@@ -1,0 +1,19 @@
+# Secrets & credentials
+.env
+credentials.json
+token.json
+
+# Runtime state (may contain personal reflection text)
+state/*.json
+state/*.jsonl
+observability/runs.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Eval outputs
+evals/results/*.md
