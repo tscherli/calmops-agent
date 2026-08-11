@@ -1,0 +1,148 @@
+"""Runs the eval suite: client.evaluate() against the job-load-agent-evals
+dataset, then a local Markdown report -- both the hosted LangSmith
+experiment (diffable across runs, and the destination for the "Add to
+Dataset" production-trace-promotion workflow) and a local evals/results/
+report (the master plan's file tree expects one, and a course grader may
+not have LangSmith UI access).
+
+Zero-tolerance rubric items (per the plan): crisis_gate_correctness and
+no_fabrication must both be 100%, independent of the overall pass rate.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import defaultdict
+from datetime import datetime, timezone
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+from langsmith import Client
+
+from evals.create_dataset import DATASET_NAME, create_or_update_dataset
+from evals.evaluators import crisis_gate_evaluator, fabrication_evaluator, trajectory_evaluator
+from evals.judge import judge_evaluator
+from evals.target import run_case
+
+RESULTS_DIR = Path(__file__).resolve().parent / "results"
+ZERO_TOLERANCE_KEYS = ("crisis_gate_correctness", "no_fabrication")
+
+
+def run_experiment(client: Client | None = None, experiment_prefix: str = "job-load-agent-eval") -> dict:
+    client = client or Client()
+    create_or_update_dataset(client=client)
+
+    results = client.evaluate(
+        run_case,
+        data=DATASET_NAME,
+        evaluators=[crisis_gate_evaluator, trajectory_evaluator, fabrication_evaluator, judge_evaluator],
+        experiment_prefix=experiment_prefix,
+    )
+
+    rows = [_extract_row(row) for row in results]
+
+    report = _build_report(rows, experiment_url=results.url, experiment_name=results.experiment_name)
+    report_path = _write_report(report)
+    print(report)
+    print(f"\nFull report written to {report_path}")
+    if results.url:
+        print(f"LangSmith experiment: {results.url}")
+
+    return {"rows": rows, "report_path": report_path, "url": results.url}
+
+
+def _extract_row(row: dict) -> dict:
+    """Pulls case_id/difficulty/category/scores out of one ExperimentResultRow.
+
+    row["evaluation_results"]["results"] is a list of langsmith
+    EvaluationResult *objects* (pydantic BaseModel), not dicts -- .key/.score
+    attribute access, not subscripting (caught by the real smoke test, not
+    by inspection: client.evaluate()'s own typed dict wrapping around them
+    made this easy to assume was a plain dict)."""
+    metadata = row["example"].metadata or {}
+    scores = {r.key: r.score for r in row["evaluation_results"]["results"]}
+    return {
+        "case_id": metadata.get("case_id", "?"),
+        "difficulty": metadata.get("difficulty", "?"),
+        "category": metadata.get("category", "?"),
+        "scores": scores,
+    }
+
+
+def _build_report(rows: list[dict], *, experiment_url: str | None, experiment_name: str) -> str:
+    lines = [
+        f"# Eval report: {experiment_name}",
+        "",
+        f"Generated {datetime.now(timezone.utc).isoformat()}",
+    ]
+    if experiment_url:
+        lines.append(f"LangSmith experiment: {experiment_url}")
+    lines.append("")
+
+    # Zero-tolerance summary
+    lines.append("## Zero-tolerance rubric items")
+    lines.append("")
+    for key in ZERO_TOLERANCE_KEYS:
+        scored = [r["scores"].get(key) for r in rows if r["scores"].get(key) is not None]
+        passed = sum(1 for s in scored if s)
+        pct = (passed / len(scored) * 100) if scored else 0.0
+        status = "PASS" if passed == len(scored) else "FAIL"
+        lines.append(f"- `{key}`: {passed}/{len(scored)} ({pct:.0f}%) -- **{status}** (must be 100%)")
+    lines.append("")
+
+    # Overall pass rate: a case "passes" if every non-None score for it is truthy
+    def case_passed(scores: dict) -> bool:
+        graded = [v for v in scores.values() if v is not None]
+        return bool(graded) and all(graded)
+
+    total_passed = sum(1 for r in rows if case_passed(r["scores"]))
+    lines.append("## Overall")
+    lines.append("")
+    lines.append(f"- Pass rate: {total_passed}/{len(rows)} ({total_passed / len(rows) * 100:.0f}%)")
+    lines.append("")
+
+    # By category
+    lines.append("## By category")
+    lines.append("")
+    by_category: dict[str, list[dict]] = defaultdict(list)
+    for r in rows:
+        by_category[r["category"]].append(r)
+    lines.append("| Category | Passed | Total |")
+    lines.append("|---|---|---|")
+    for category, cat_rows in sorted(by_category.items()):
+        passed = sum(1 for r in cat_rows if case_passed(r["scores"]))
+        lines.append(f"| {category} | {passed} | {len(cat_rows)} |")
+    lines.append("")
+
+    # Per-case detail
+    lines.append("## Per-case detail")
+    lines.append("")
+    score_keys = sorted({key for r in rows for key in r["scores"]})
+    header = ["case_id", "difficulty", "category"] + score_keys
+    lines.append("| " + " | ".join(header) + " |")
+    lines.append("|" + "---|" * len(header))
+    for r in rows:
+        cells = [r["case_id"], r["difficulty"], r["category"]]
+        for key in score_keys:
+            score = r["scores"].get(key)
+            cells.append("-" if score is None else ("pass" if score else "fail"))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    return "\n".join(lines)
+
+
+def _write_report(report: str) -> Path:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    path = RESULTS_DIR / f"eval-report-{timestamp}.md"
+    path.write_text(report, encoding="utf-8")
+    return path
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run the Job Load Agent eval suite")
+    parser.add_argument("--experiment-prefix", default="job-load-agent-eval")
+    args = parser.parse_args()
+    run_experiment(experiment_prefix=args.experiment_prefix)

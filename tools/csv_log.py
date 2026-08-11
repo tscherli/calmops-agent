@@ -1,29 +1,28 @@
-"""Google Sheets backend for mood log rows.
+"""Local CSV backend for mood log rows.
 
-OAuth Desktop flow (credentials.json + cached token.json), narrowest workable
-scope (drive.file -- limited to files this app itself creates/uses), single
-spreadsheet identified by MOOD_SHEET_ID. Any write failure falls back to a
-local JSONL file rather than losing the entry; append_mood_row/log_mood never
-raise past this module's boundary -- callers get a structured status instead.
+No external service, no credentials -- appends structured rows to a local
+CSV file. Any write failure falls back to a separate JSONL file rather than
+losing the entry; append_mood_row/log_mood never raise past this module's
+boundary -- callers get a structured status instead.
+
+Replaced the original Google Sheets/OAuth backend (see DEVELOPMENT_LOG.md,
+"Stage 3 revision") after real end-to-end OAuth setup turned out to be far
+more friction than a personal tool should require, and after weighing
+several alternatives. This keeps the log_mood tool's contract identical --
+agent/graph.py needed only a one-line import change.
 """
 from __future__ import annotations
 
+import csv
 import json
-import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from langchain_core.tools import tool
 
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-SHEET_TAB = "Log"
-SHEET_COLUMNS = [
+LOG_COLUMNS = [
     "timestamp",
     "row_id",
     "valence",
@@ -35,34 +34,11 @@ SHEET_COLUMNS = [
 ]
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-CREDENTIALS_PATH = BASE_DIR / "credentials.json"
-TOKEN_PATH = BASE_DIR / "token.json"
+LOG_PATH = BASE_DIR / "data" / "mood_log.csv"
 PENDING_LOG_PATH = BASE_DIR / "state" / "pending_sheet_log.jsonl"
 
 Valence = Literal["good", "neutral", "bad"]
 EnergyLevel = Literal["low", "medium", "high"]
-
-
-def _get_credentials() -> Credentials:
-    creds = None
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
-        TOKEN_PATH.write_text(creds.to_json())
-    return creds
-
-
-def get_sheets_service():
-    """Build a real Google Sheets API client via OAuth. Only called when no
-    mock `service` is injected -- keeps this module importable/testable
-    without real credentials on disk."""
-    creds = _get_credentials()
-    return build("sheets", "v4", credentials=creds)
 
 
 def _write_pending_fallback(row: dict[str, Any]) -> None:
@@ -95,12 +71,11 @@ def append_mood_row(
     need: str | None = None,
     next_step: str | None = None,
     *,
-    service: Any = None,
-    sheet_id: str | None = None,
+    path: Path | None = None,
 ) -> dict[str, Any]:
-    """Append one structured mood row to the Sheet. Never raises -- any
-    failure (missing config, API/auth error) falls back to a local JSONL
-    file and returns status="error" instead.
+    """Append one structured mood row to the local CSV log. Never raises --
+    any failure (e.g. a disk I/O error) falls back to a local JSONL file
+    and returns status="error" instead.
 
     energy_level is optional and orthogonal to valence -- it captures
     fatigue/exhaustion (an emotional-exhaustion-adjacent signal from burnout
@@ -118,21 +93,15 @@ def append_mood_row(
         "note": _build_note(situation, thoughts, need, next_step),
     }
 
-    sheet_id = sheet_id or os.environ.get("MOOD_SHEET_ID")
-    if not sheet_id:
-        _write_pending_fallback(row)
-        return {"status": "error", "row_id": row_id, "error": "MOOD_SHEET_ID not configured"}
-
+    log_path = path or LOG_PATH
     try:
-        svc = service or get_sheets_service()
-        values = [[row[col] for col in SHEET_COLUMNS]]
-        svc.spreadsheets().values().append(
-            spreadsheetId=sheet_id,
-            range=f"{SHEET_TAB}!A1",
-            valueInputOption="USER_ENTERED",
-            insertDataOption="INSERT_ROWS",
-            body={"values": values},
-        ).execute()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not log_path.exists() or log_path.stat().st_size == 0
+        with log_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=LOG_COLUMNS)
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
         return {"status": "ok", "row_id": row_id}
     except Exception as exc:
         _write_pending_fallback(row)
@@ -151,7 +120,7 @@ def log_mood(
     need: str = "",
     next_step: str = "",
 ) -> dict[str, Any]:
-    """Log a structured mood entry to the user's private Google Sheet.
+    """Log a structured mood entry to the user's local mood log.
 
     valence: "good", "neutral", or "bad".
     circumstances: brief description of what's going on.

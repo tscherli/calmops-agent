@@ -3,10 +3,11 @@
 credentials.json
 token.json
 
-# Runtime state (may contain personal reflection text)
+# Runtime state and the mood log itself (contain personal reflection text)
 state/*.json
 state/*.jsonl
 observability/runs.jsonl
+data/*.csv
 
 # Python
 __pycache__/

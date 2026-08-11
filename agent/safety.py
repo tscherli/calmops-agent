@@ -29,7 +29,8 @@ _CRISIS_PATTERNS: list[str] = [
     r"\bworth\s+living\b",
     r"\bno\s+reason\s+to\s+(live|go\s+on)\b",
     r"\bself[\s-]?harm\w*",
-    r"\b(hurt|cutting|cut)\s+myself\b",
+    r"\bhurt\w*\s+myself\b",
+    r"\b(cutting|cut)\s+myself\b",
     r"\boverdos\w*",
     r"\bbetter\s+off\s+(without\s+me|dead)\b",
     # English -- indirect / softer signals

@@ -1,9 +1,9 @@
-from unittest.mock import MagicMock
+import csv
 
 import pytest
 
+from tools.csv_log import append_mood_row
 from tools.mood_templates import MOOD_TEMPLATES
-from tools.sheets import append_mood_row
 
 VALID_VALENCES = {"good", "neutral", "bad"}
 VALID_ENERGY_LEVELS = {"low", "medium", "high"}
@@ -35,19 +35,21 @@ def test_each_template_has_required_fields(key):
 
 
 @pytest.mark.parametrize("key", list(MOOD_TEMPLATES.keys()))
-def test_each_template_can_be_logged_without_error(key):
+def test_each_template_can_be_logged_without_error(key, tmp_path):
     """Simulates a quick-select button click: template fields go straight
     into append_mood_row, no LLM involved."""
     template = MOOD_TEMPLATES[key]
-    service = MagicMock()
+    log_path = tmp_path / "mood_log.csv"
 
     result = append_mood_row(
         valence=template["valence"],
         circumstances=template["circumstances"],
         energy_level=template.get("energy_level"),
-        service=service,
-        sheet_id="fake-sheet-id",
+        path=log_path,
     )
 
     assert result["status"] == "ok"
-    service.spreadsheets.return_value.values.return_value.append.assert_called_once()
+    with log_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 1
+    assert rows[0]["circumstances"] == template["circumstances"]

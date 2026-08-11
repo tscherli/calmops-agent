@@ -3,9 +3,9 @@
 Only reached after agent/safety.py's crisis gate has already cleared the
 message -- this module has no crisis-handling logic of its own.
 
-model/tools are injectable, mirroring tools/sheets.py's service/sheet_id
+model/tools are injectable, mirroring tools/csv_log.py's path
 dependency-injection pattern -- lets tests stub both without hitting OpenAI
-or Google Sheets.
+or the local mood log.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
 from agent.prompts import SYSTEM_PROMPT
-from tools.sheets import log_mood
+from tools.csv_log import log_mood
 
 DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
 
@@ -31,7 +31,7 @@ def build_agent(
 
     model/tools default to a real ChatOpenAI client and the real log_mood
     tool. Inject a fake model and/or a stub tool to test graph wiring
-    without touching OpenAI or Google Sheets.
+    without touching OpenAI or the local mood log.
     """
     if model is None:
         model = ChatOpenAI(model=DEFAULT_MODEL)

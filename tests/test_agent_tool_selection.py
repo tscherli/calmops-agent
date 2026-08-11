@@ -46,7 +46,7 @@ class StubChatModel(BaseChatModel):
 
 def _make_stub_tool():
     """A stub log_mood replacement that records calls instead of touching
-    Google Sheets -- keeps this test file independent of tests/test_sheets.py."""
+    the local CSV log -- keeps this test file independent of tests/test_csv_log.py."""
     calls: list[dict] = []
 
     @tool
