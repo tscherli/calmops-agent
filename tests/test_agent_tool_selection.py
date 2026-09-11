@@ -51,9 +51,9 @@ def _make_stub_tool():
 
     @tool
     def stub_log_mood(
-        valence: str,
+        mood: str,
         circumstances: str,
-        energy_level: str = "",
+        energy: str = "",
         measure_taken: str = "",
         helpfulness: str = "",
         situation: str = "",
@@ -61,12 +61,19 @@ def _make_stub_tool():
         need: str = "",
         next_step: str = "",
     ) -> dict:
-        """Stub log_mood for testing agent graph wiring."""
+        """Stub log_mood for testing agent graph wiring.
+
+        Deliberately NOT named `log_mood`: that name triggers the graph's
+        deterministic classify/write/history pipeline (see
+        tests/test_agent_pipeline.py, which covers that path). This file is
+        only about generic tool-call wiring, so it uses a plain tool name
+        that routes through the ordinary tools node.
+        """
         calls.append(
             {
-                "valence": valence,
+                "mood": mood,
                 "circumstances": circumstances,
-                "energy_level": energy_level,
+                "energy": energy,
             }
         )
         return {"status": "ok", "row_id": "stub-row-id"}
@@ -80,7 +87,7 @@ def test_agent_calls_tool_when_model_requests_it():
         tool_calls=[
             {
                 "name": "stub_log_mood",
-                "args": {"valence": "good", "circumstances": "quiet day"},
+                "args": {"mood": "good", "circumstances": "quiet day"},
                 "id": "call_1",
                 "type": "tool_call",
             }
@@ -93,7 +100,7 @@ def test_agent_calls_tool_when_model_requests_it():
     graph = build_agent(model=model, tools=[stub_tool])
     result = graph.invoke({"messages": [HumanMessage(content="feeling good, quiet day")]})
 
-    assert calls == [{"valence": "good", "circumstances": "quiet day", "energy_level": ""}]
+    assert calls == [{"mood": "good", "circumstances": "quiet day", "energy": ""}]
     assert result["messages"][-1].content == "Logged that -- glad it's a quiet one."
     assert not result["messages"][-1].tool_calls
 
@@ -111,16 +118,16 @@ def test_agent_skips_tool_for_plain_reply():
     assert result["messages"][-1].content == "Sounds like a good one, glad to hear it!"
 
 
-def test_energy_level_arg_reaches_tool_when_model_includes_it():
+def test_energy_arg_reaches_tool_when_model_includes_it():
     tool_call_response = AIMessage(
         content="",
         tool_calls=[
             {
                 "name": "stub_log_mood",
                 "args": {
-                    "valence": "bad",
+                    "mood": "bad",
                     "circumstances": "exhausted after back-to-back meetings",
-                    "energy_level": "low",
+                    "energy": "exhausted",
                 },
                 "id": "call_1",
                 "type": "tool_call",
@@ -136,9 +143,9 @@ def test_energy_level_arg_reaches_tool_when_model_includes_it():
 
     assert calls == [
         {
-            "valence": "bad",
+            "mood": "bad",
             "circumstances": "exhausted after back-to-back meetings",
-            "energy_level": "low",
+            "energy": "exhausted",
         }
     ]
 
@@ -159,13 +166,50 @@ def test_system_prompt_reaches_the_model():
 @pytest.mark.parametrize(
     "expected_phrase",
     [
+        # Tools the model is actually allowed to reach for.
         "log_mood",
-        "energy_level",
-        "never tell the user you logged",
-        "never instructions to",
+        "find_similar_entries",
+        "web_search",
+        # Mood/energy vocabulary (renamed from valence/energy_level in the
+        # stage-14 redesign) and the read-them-together rule.
+        "exhausted",
+        "wired",
+        "good mood + wired is excitement",
+        # Structuring judgment.
         "structuring sequence",
         "clarifying question",
+        # Honesty, including the pattern-specific half added with the
+        # history lookup.
+        "never tell the user you logged",
+        "nothing on record yet",
+        # Untrusted-output handling, extended to the two new sources.
+        "never instructions to",
+        "web search result",
+        "similar-situation lookup",
+        # Proactive tool-use guidance and the no-silent-duplicate rule.
+        "weigh this on any turn",
+        "near-duplicate call",
+        # Structuring must outrank the new suggest-actions capability --
+        # added after an eval run showed the agent logging on turn 1 of the
+        # multi-turn case and handing out a how-to guide instead of asking
+        # a structuring question (regression vs. stage 10).
+        "ask one question and nothing else",
+        "never overrides the structuring rule",
+        "don't produce multi-step how-to guides",
     ],
 )
 def test_system_prompt_covers_required_guidance(expected_phrase):
     assert expected_phrase.lower() in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_no_longer_claims_log_mood_is_the_only_tool():
+    """The line was true through stage 10 and is now actively false -- the
+    agent has a history lookup and a web search as well."""
+    assert "only tool available" not in SYSTEM_PROMPT.lower()
+
+
+def test_system_prompt_does_not_mention_classify_entry():
+    """Classification is a graph edge, not something the model chooses. If it
+    ever shows up in the prompt, that's a sign the guarantee slipped back
+    into being a request."""
+    assert "classify_entry" not in SYSTEM_PROMPT.lower()

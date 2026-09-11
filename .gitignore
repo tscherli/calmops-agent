@@ -18,3 +18,6 @@ venv/
 
 # Eval outputs
 evals/results/*.md
+
+# Local-only dev notes (never intended for the repo)
+notes/

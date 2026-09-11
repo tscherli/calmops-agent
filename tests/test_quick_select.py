@@ -52,9 +52,11 @@ def test_quick_select_button_logs_correct_template_no_llm(app, isolated_log_path
     template = MOOD_TEMPLATES[key]
     rows = _read_rows(isolated_log_path)
     assert len(rows) == 1
-    assert rows[0]["valence"] == template["valence"]
+    assert rows[0]["mood"] == template["mood"]
     assert rows[0]["circumstances"] == template["circumstances"]
-    assert rows[0]["energy_level"] == template.get("energy_level", "")
+    assert rows[0]["energy"] == template.get("energy", "")
+    # No LLM ran, so no semantic classification happened either.
+    assert rows[0]["tags"] == ""
 
 
 def test_quick_select_appends_to_visible_history(app, isolated_log_path):

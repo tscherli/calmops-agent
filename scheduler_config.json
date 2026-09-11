@@ -1,0 +1,15 @@
+{
+  "checkins": {
+    "mode": "times_of_day",
+    "days": ["mon", "tue", "wed", "thu", "fri"],
+    "times": ["10:00", "16:00"],
+    "interval_min_minutes": 45,
+    "interval_max_minutes": 90
+  },
+  "digest": {
+    "enabled": true,
+    "day": "fri",
+    "time": "16:30",
+    "window_days": 7
+  }
+}

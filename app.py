@@ -20,7 +20,7 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage
 
-from agent.graph import DEFAULT_MODEL, build_agent
+from agent.graph import DEFAULT_MODEL, build_agent, message_text
 from agent.safety import CRISIS_RESOURCES, screen_for_crisis
 from observability.tracing import RunRecorder
 from tools.csv_log import log_mood
@@ -150,11 +150,14 @@ class ChatApp:
     def _on_quick_select(self, key: str) -> None:
         template = MOOD_TEMPLATES[key]
         try:
+            # Calls the tool's own body directly, bypassing the agent graph --
+            # so no LLM is involved and, deliberately, no semantic tagging
+            # either (see tools/mood_templates.py's module docstring).
             result = log_mood.invoke(
                 {
-                    "valence": template["valence"],
+                    "mood": template["mood"],
                     "circumstances": template["circumstances"],
-                    "energy_level": template.get("energy_level", ""),
+                    "energy": template.get("energy", ""),
                 }
             )
         except Exception as exc:  # never let an unhandled exception reach the UI
@@ -192,7 +195,10 @@ class ChatApp:
 
         self.messages = result["messages"]
         self.recorder.record_turn(messages_before, self.messages, DEFAULT_MODEL, latency)
-        self._append_message("Agent", self.messages[-1].content)
+        # message_text, not .content: with the built-in web_search bound the
+        # model speaks Responses-API content blocks, and .content would put
+        # raw dicts and base64 in the chat window.
+        self._append_message("Agent", message_text(self.messages[-1]))
 
 
 def main() -> None:
