@@ -22,9 +22,43 @@ _MULTITURN_CASE = {
 
 
 def test_load_cases_reads_all_lines():
+    """Validates shape rather than a hardcoded count -- the count changes
+    every time a case is added, and a test that only breaks on growth
+    catches nothing useful."""
     cases = load_cases()
-    assert len(cases) == 28
-    assert len({c["id"] for c in cases}) == 28  # unique ids
+
+    assert len(cases) >= 28, "cases should only ever be added, not silently dropped"
+    assert len({c["id"] for c in cases}) == len(cases), "duplicate case ids"
+
+    for case in cases:
+        assert case.get("query") or case.get("turns"), f"{case['id']}: no input"
+        assert not (case.get("query") and case.get("turns")), f"{case['id']}: both query and turns"
+        for field in ("id", "difficulty", "category", "expected_behavior", "notes"):
+            assert case.get(field), f"{case['id']}: missing {field}"
+        assert case["difficulty"] in {"simple", "medium", "hard"}, case["id"]
+
+
+def test_every_case_id_is_unique_and_stable_looking():
+    """create_or_update_dataset upserts by case_id, so a renamed id orphans
+    the old LangSmith example and silently creates a duplicate."""
+    ids = [c["id"] for c in load_cases()]
+    assert all(i.startswith(("simple_", "medium_", "hard_")) for i in ids), ids
+
+
+def test_seeded_and_failure_flag_cases_are_wired_into_inputs():
+    """These flags only do anything if case_to_example forwards them --
+    evaluate() hands the target function `inputs` and nothing else."""
+    cases = {c["id"]: c for c in load_cases()}
+
+    seeded = [c for c in cases.values() if c.get("seed_entries")]
+    assert seeded, "expected at least one history case with seeded entries"
+    for case in seeded:
+        assert case_to_example(case)["inputs"]["seed_entries"] == case["seed_entries"]
+
+    failing = [c for c in cases.values() if c.get("simulate_write_failure")]
+    assert failing, "expected the tool-failure case to carry the flag"
+    for case in failing:
+        assert case_to_example(case)["inputs"]["simulate_write_failure"] is True
 
 
 def test_case_to_example_wraps_single_query_as_turns():

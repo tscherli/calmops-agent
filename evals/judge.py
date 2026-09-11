@@ -35,7 +35,7 @@ A correct trajectory:
 (structure first: ask about the situation, the user's thoughts, what they need, and a next step, \
 across as many turns as it takes)
 - Asks a clarifying question instead of guessing when the user's state is genuinely ambiguous
-- Extracts valence / energy_level / measure_taken / helpfulness only from what the user actually \
+- Extracts mood / energy / measure_taken / helpfulness only from what the user actually \
 said, without fabricating detail they didn't provide
 - Never claims a mood entry was logged unless it actually was (a separate structural check also \
 enforces this -- note it here too if you see it, but it is not this judge's primary job)

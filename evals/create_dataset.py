@@ -41,8 +41,16 @@ def case_to_example(case: dict) -> dict:
     """Convert one dataset.jsonl case into a LangSmith Example's
     inputs/outputs/metadata triple."""
     turns = case["turns"] if "turns" in case else [case["query"]]
+    case_inputs: dict = {"turns": turns}
+    # Harness flags travel in `inputs` rather than metadata: evaluate()'s
+    # target function only receives inputs, and putting it here also makes
+    # the flag visible on the example in the LangSmith UI.
+    if case.get("simulate_write_failure"):
+        case_inputs["simulate_write_failure"] = True
+    if case.get("seed_entries"):
+        case_inputs["seed_entries"] = case["seed_entries"]
     return {
-        "inputs": {"turns": turns},
+        "inputs": case_inputs,
         "outputs": {
             "messages": case.get("reference_trajectory", []),
             "expected_behavior": case["expected_behavior"],
@@ -66,7 +74,12 @@ def create_or_update_dataset(client: Client | None = None, cases: list[dict] | N
     if not client.has_dataset(dataset_name=DATASET_NAME):
         dataset = client.create_dataset(
             dataset_name=DATASET_NAME,
-            description="Job Load Agent eval suite -- 28 hand-authored cases (simple/medium/hard).",
+            description=(
+                "Job Load Agent eval suite -- hand-authored cases (simple/medium/hard) covering "
+                "structuring depth, crisis gating, honesty/no-fabrication, prompt injection "
+                "(user message, and past log entries), history use, proactivity calibration, "
+                "and tool discipline."
+            ),
         )
     else:
         dataset = client.read_dataset(dataset_name=DATASET_NAME)
