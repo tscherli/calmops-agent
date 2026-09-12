@@ -6,3 +6,6 @@ pandas>=2.2.0
 pytest>=8.0.0
 langsmith>=0.10
 agentevals>=0.0.5
+# Eval judge runs on a different provider from the model under test,
+# so grading blind spots are not correlated with the agent's own.
+langchain-google-genai>=4.0
