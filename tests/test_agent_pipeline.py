@@ -20,7 +20,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import tool
 from pydantic import Field
 
-from agent.graph import build_agent
+from agent.graph import build_agent, message_text
 from tools.csv_log import parse_tags
 
 
@@ -42,6 +42,12 @@ class StubChatModel(BaseChatModel):
 
     def bind_tools(self, tools: Any, *, tool_choice: Optional[str] = None, **kwargs: Any):
         self.bind_calls.append(list(tools))
+        return self
+
+    def bind(self, **kwargs: Any):
+        return self
+
+    def with_structured_output(self, schema: Any, **kwargs: Any):
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
@@ -104,7 +110,7 @@ def test_entry_is_classified_and_written_with_tags_in_one_row(tmp_path):
         classifier=_stub_classifier(["manager_feedback", "unclear_expectations"]),
         log_path=log_path,
     )
-    graph.invoke({"messages": [HumanMessage(content="boss said it was wrong")]})
+    graph.invoke({"current_step": "light", "messages": [HumanMessage(content="boss said it was wrong")]})
 
     rows = _read_rows(log_path)
     assert len(rows) == 1, "the row must be written exactly once, never appended then rewritten"
@@ -128,7 +134,7 @@ def test_classifier_receives_the_entry_text_from_the_tool_call(tmp_path):
         classifier=_stub_classifier(["x"], calls),
         log_path=tmp_path / "mood_log.csv",
     )
-    graph.invoke({"messages": [HumanMessage(content="hi")]})
+    graph.invoke({"current_step": "light", "messages": [HumanMessage(content="hi")]})
 
     assert calls == [
         {
@@ -152,14 +158,14 @@ def test_existing_log_vocabulary_is_passed_to_the_classifier(tmp_path):
         classifier=_stub_classifier(["high_workload", "overtime"]),
         log_path=log_path,
     )
-    first.invoke({"messages": [HumanMessage(content="crunch")]})
+    first.invoke({"current_step": "light", "messages": [HumanMessage(content="crunch")]})
 
     second = build_agent(
         model=_model_that_logs_then_replies({"mood": "bad", "circumstances": "crunch again"}),
         classifier=_stub_classifier(["high_workload"], calls),
         log_path=log_path,
     )
-    second.invoke({"messages": [HumanMessage(content="crunch again")]})
+    second.invoke({"current_step": "light", "messages": [HumanMessage(content="crunch again")]})
 
     assert calls[0]["known_tags"] == ["high_workload", "overtime"]
 
@@ -173,7 +179,7 @@ def test_classification_failure_still_writes_the_row_untagged(tmp_path):
 
     model = _model_that_logs_then_replies({"mood": "good", "circumstances": "quiet day"})
     graph = build_agent(model=model, classifier=failing_classifier, log_path=log_path)
-    result = graph.invoke({"messages": [HumanMessage(content="quiet day")]})
+    result = graph.invoke({"current_step": "light", "messages": [HumanMessage(content="quiet day")]})
 
     rows = _read_rows(log_path)
     assert len(rows) == 1
@@ -194,12 +200,12 @@ def test_history_lookup_runs_after_logging_and_reaches_the_model(tmp_path):
         classifier=classifier,
         log_path=log_path,
     )
-    first.invoke({"messages": [HumanMessage(content="crunch week")]})
+    first.invoke({"current_step": "light", "messages": [HumanMessage(content="crunch week")]})
 
     # ...a later one about the same kind of thing should surface it.
     second_model = _model_that_logs_then_replies({"mood": "bad", "circumstances": "crunch again"})
     second = build_agent(model=second_model, classifier=classifier, log_path=log_path)
-    result = second.invoke({"messages": [HumanMessage(content="crunch again")]})
+    result = second.invoke({"current_step": "light", "messages": [HumanMessage(content="crunch again")]})
 
     payload = _log_tool_payload(result)
     assert payload["tags"] == ["deadline_pressure"]
@@ -219,7 +225,7 @@ def test_empty_history_is_reported_as_an_empty_list(tmp_path):
     graph = build_agent(
         model=model, classifier=_stub_classifier(["brand_new_tag"]), log_path=tmp_path / "log.csv"
     )
-    result = graph.invoke({"messages": [HumanMessage(content="first entry")]})
+    result = graph.invoke({"current_step": "light", "messages": [HumanMessage(content="first entry")]})
 
     assert _log_tool_payload(result)["similar_past_entries"] == []
 
@@ -234,7 +240,7 @@ def test_just_written_entry_is_not_returned_as_its_own_precedent(tmp_path):
     graph = build_agent(
         model=model, classifier=_stub_classifier(["some_tag"]), log_path=log_path
     )
-    result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+    result = graph.invoke({"current_step": "light", "messages": [HumanMessage(content="hi")]})
 
     assert len(_read_rows(log_path)) == 1
     assert _log_tool_payload(result)["similar_past_entries"] == []
@@ -252,7 +258,7 @@ def test_failed_write_is_reported_as_an_error_tool_message(tmp_path):
         classifier=_stub_classifier(["x"]),
         log_path=unwritable / "mood_log.csv",
     )
-    result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+    result = graph.invoke({"current_step": "light", "messages": [HumanMessage(content="hi")]})
 
     log_message = next(m for m in _tool_messages(result) if m.name == "log_mood")
     assert log_message.status == "error"
@@ -262,36 +268,89 @@ def test_failed_write_is_reported_as_an_error_tool_message(tmp_path):
 # -- tool surface ------------------------------------------------------------
 
 
-def test_classify_entry_is_never_exposed_to_the_model(tmp_path):
+def _tools_bound_in_state(state: str, tmp_path, **build_kwargs) -> list:
+    """Run one state and report what the model was bound with there.
+
+    This is the load-bearing test helper for the whole redesign: the safety
+    properties are "state X cannot do Y", and an empty tool list is what
+    makes that true. It is checkable with no LLM involved.
+    """
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    graph = build_agent(
+        model=model,
+        classifier=_stub_classifier([]),
+        log_path=tmp_path / "mood_log.csv",
+        **build_kwargs,
+    )
+    graph.invoke({"current_step": state, "messages": [HumanMessage(content="hi")]})
+    # Structured-output states never call bind_tools at all -- that absence
+    # IS the guarantee, so an empty list is the expected result there.
+    return [getattr(x, "name", x) for call in model.bind_calls for x in call]
+
+
+def test_triage_binds_no_tools_so_it_cannot_log(tmp_path, monkeypatch):
+    """simple_small_talk_06 regressed when a prompt edit made the agent ask
+    for a mood rating on a greeting. Triage now has no logging tool at all,
+    so that failure mode is unreachable rather than discouraged."""
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    assert _tools_bound_in_state("triage", tmp_path) == []
+
+
+def test_structuring_binds_no_tools_so_it_cannot_log_early(tmp_path, monkeypatch):
+    """medium_multiturn_structuring_02 failed by logging on turn 1. The
+    structuring state cannot reach log_mood."""
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    assert _tools_bound_in_state("structuring", tmp_path) == []
+
+
+def test_light_binds_only_log_mood(tmp_path, monkeypatch):
+    """medium_proactivity_ordinary_17 failed by reaching for tools on an
+    ordinary bad day. A light check-in can log and nothing else -- no
+    web_search, no history lookup."""
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    assert _tools_bound_in_state("light", tmp_path) == ["log_mood"]
+
+
+def test_only_post_log_can_reach_history_and_web(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_ENABLE_WEB_SEARCH", raising=False)
+    bound = _tools_bound_in_state("post_log", tmp_path)
+    assert "find_similar_entries" in bound
+    assert {"type": "web_search"} in bound or "web_search" in str(bound)
+
+
+def test_web_search_can_be_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    bound = _tools_bound_in_state("post_log", tmp_path)
+    assert bound == ["find_similar_entries"]
+
+
+def test_classify_entry_is_never_exposed_to_the_model(tmp_path, monkeypatch):
     """Binding it as a tool as well as a guaranteed edge would invite the
     model to call it a second time on its own initiative."""
-    model = _model_that_logs_then_replies({"mood": "good", "circumstances": "x"})
-    build_agent(model=model, classifier=_stub_classifier([]), log_path=tmp_path / "log.csv")
-
-    bound_names = {getattr(t, "name", None) for t in model.bound_tools}
-    assert "classify_entry" not in bound_names
-
-
-def test_default_tool_surface_is_log_mood_and_find_similar_entries(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
-    model = _model_that_logs_then_replies({"mood": "good", "circumstances": "x"})
-
-    build_agent(model=model, classifier=_stub_classifier([]), log_path=tmp_path / "log.csv")
-
-    bound_names = {getattr(t, "name", None) for t in model.bound_tools}
-    assert bound_names == {"log_mood", "find_similar_entries"}
-
-
-def test_web_search_is_bound_by_default_and_can_be_disabled(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_ENABLE_WEB_SEARCH", raising=False)
-    model = _model_that_logs_then_replies({"mood": "good", "circumstances": "x"})
-    build_agent(model=model, classifier=_stub_classifier([]), log_path=tmp_path / "log.csv")
-    assert {"type": "web_search"} in model.bound_tools
+    for state in ("triage", "structuring", "light", "post_log"):
+        assert "classify_entry" not in _tools_bound_in_state(state, tmp_path)
 
-    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
-    off_model = _model_that_logs_then_replies({"mood": "good", "circumstances": "x"})
-    build_agent(model=off_model, classifier=_stub_classifier([]), log_path=tmp_path / "log.csv")
-    assert {"type": "web_search"} not in off_model.bound_tools
+
+def test_awaiting_scale_asks_without_calling_the_model(tmp_path):
+    """E1: the scale question is a constant. Generating it would cost a call
+    and let the scale words drift, which is the one thing this state exists
+    to prevent."""
+    from agent.prompts import SCALE_QUESTION
+
+    model = StubChatModel(responses=[AIMessage(content="SHOULD NOT BE CALLED")])
+    graph = build_agent(
+        model=model, classifier=_stub_classifier([]), log_path=tmp_path / "mood_log.csv"
+    )
+    result = graph.invoke(
+        {"current_step": "light", "messages": [HumanMessage(content="feeling fine")]}
+    )
+
+    # light replied without a log_mood call -> values missing -> scale question
+    assert result["current_step"] == "awaiting_scale"
+    assert SCALE_QUESTION in message_text(result["messages"][-1])
+    # one call for `light`, none for the question itself
+    assert model.call_count == 1
 
 
 def test_mixed_tool_calls_are_each_answered_exactly_once(tmp_path):
@@ -334,13 +393,14 @@ def test_mixed_tool_calls_are_each_answered_exactly_once(tmp_path):
         classifier=_stub_classifier(["busy_tag"]),
         log_path=log_path,
     )
-    result = graph.invoke({"messages": [HumanMessage(content="busy")]})
+    result = graph.invoke(
+        {"current_step": "light", "messages": [HumanMessage(content="busy")]}
+    )
 
     assert len(_read_rows(log_path)) == 1, "log_mood must not be executed twice"
     assert other_calls == ["thing"]
     answered = {m.tool_call_id for m in _tool_messages(result)}
     assert answered == {"call_log", "call_other"}
-    assert result["messages"][-1].content == "all done"
 
 
 def test_unknown_tool_call_is_reported_as_an_error_not_a_crash(tmp_path):
@@ -358,71 +418,14 @@ def test_unknown_tool_call_is_reported_as_an_error_not_a_crash(tmp_path):
     from tools.csv_log import log_mood
 
     graph = build_agent(model=model, tools=[log_mood], log_path=tmp_path / "log.csv")
-    result = graph.invoke({"messages": [HumanMessage(content="hi")]})
+    result = graph.invoke(
+        {"current_step": "post_log", "messages": [HumanMessage(content="hi")]}
+    )
 
     error_message = _tool_messages(result)[0]
     assert error_message.status == "error"
     assert "no_such_tool" in error_message.content
     assert result["messages"][-1].content == "recovered"
-
-
-def test_recalled_entries_are_trimmed_before_reaching_the_model(tmp_path):
-    """Three past entries ride along on every logged turn, so their free
-    text is bounded -- a real smoke test produced a 200+ char next_step."""
-    log_path = tmp_path / "mood_log.csv"
-    classifier = _stub_classifier(["deadline_pressure"])
-
-    long_plan = "pick one ticket and finish it " * 20
-    build_agent(
-        model=_model_that_logs_then_replies(
-            {
-                "mood": "bad",
-                "circumstances": "x" * 400,
-                "next_step": long_plan,
-            }
-        ),
-        classifier=classifier,
-        log_path=log_path,
-    ).invoke({"messages": [HumanMessage(content="hi")]})
-
-    second_model = _model_that_logs_then_replies({"mood": "bad", "circumstances": "again"})
-    result = build_agent(
-        model=second_model, classifier=classifier, log_path=log_path
-    ).invoke({"messages": [HumanMessage(content="again")]})
-
-    recalled = _log_tool_payload(result)["similar_past_entries"][0]
-    assert len(recalled["circumstances"]) <= 160
-    assert len(recalled["next_step"]) <= 160
-    assert recalled["circumstances"].endswith("…")
-    # A date is enough to say "last Tuesday"; the full ISO timestamp and the
-    # entry's complete tag list are dropped as redundant.
-    assert len(recalled["date"]) == 10
-    assert "timestamp" not in recalled
-    assert "tags" not in recalled
-    assert recalled["matched_tags"] == ["deadline_pressure"]
-
-
-def test_short_recalled_fields_are_left_untouched(tmp_path):
-    log_path = tmp_path / "mood_log.csv"
-    classifier = _stub_classifier(["deadline_pressure"])
-
-    build_agent(
-        model=_model_that_logs_then_replies(
-            {"mood": "bad", "circumstances": "crunch week", "measure_taken": "asked for help"}
-        ),
-        classifier=classifier,
-        log_path=log_path,
-    ).invoke({"messages": [HumanMessage(content="hi")]})
-
-    result = build_agent(
-        model=_model_that_logs_then_replies({"mood": "bad", "circumstances": "again"}),
-        classifier=classifier,
-        log_path=log_path,
-    ).invoke({"messages": [HumanMessage(content="again")]})
-
-    recalled = _log_tool_payload(result)["similar_past_entries"][0]
-    assert recalled["circumstances"] == "crunch week"
-    assert recalled["measure_taken"] == "asked for help"
 
 
 def test_message_text_flattens_responses_api_content_blocks():

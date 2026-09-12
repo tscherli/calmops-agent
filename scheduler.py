@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import time as time_module
 import tkinter as tk
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +31,7 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from agent.graph import tool_event
 from scheduler_config import Fire, SchedulerConfig, compute_next_fire, load_config
 from tools.log_query import analyze_stress_patterns
 
@@ -103,19 +105,34 @@ def _default_model():
     return ChatOpenAI(model=DEFAULT_MODEL)
 
 
-def open_window(opener_message: str) -> None:
+def open_window(opener_message: str, opener_events: Sequence[dict] = ()) -> None:
     from app import ChatApp
 
     root = tk.Tk()
-    ChatApp(root, opener_message=opener_message)
+    ChatApp(root, opener_message=opener_message, opener_events=opener_events)
     root.mainloop()
 
 
-def opener_for(fire: Fire, config: SchedulerConfig) -> str:
+def opener_for(fire: Fire, config: SchedulerConfig) -> tuple[str, list[dict]]:
+    """The opener text, plus any tool receipts that produced it.
+
+    The digest is the one place the agent makes *quantitative* claims about
+    the user's history ("you logged deadline_pressure 4 times"), phrased by
+    an LLM from an aggregation it did not compute. So it needs the same
+    receipt as any other tool call -- otherwise the one window where numbers
+    are asserted is the one window with nothing to check them against.
+    """
     if fire.kind == "digest":
         summary = analyze_stress_patterns(window_days=config.digest_window_days)
-        return build_digest_opener(summary)
-    return OPENER_MESSAGE
+        detail = (
+            f"{summary.get('entry_count', 0)} entries over {summary.get('window_days')} days"
+            if summary.get("enough_data")
+            else f"not enough data ({summary.get('entry_count', 0)} entries)"
+        )
+        return build_digest_opener(summary), [
+            tool_event("analyze_stress_patterns", "ok", detail)
+        ]
+    return OPENER_MESSAGE, []
 
 
 def main() -> None:
@@ -153,7 +170,8 @@ def main() -> None:
         fire = compute_next_fire(now, config)
         wait_seconds = max(0.0, (fire.when - now).total_seconds())
         time_module.sleep(wait_seconds)
-        open_window(opener_for(fire, config))
+        opener_message, opener_events = opener_for(fire, config)
+        open_window(opener_message, opener_events)
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from langchain_core.tools import tool
 from pydantic import Field
 
 from agent.graph import build_agent
-from agent.prompts import SYSTEM_PROMPT
+from agent.prompts import BASE_PROMPT, SCALE_QUESTION, STATE_PROMPTS
 
 
 class StubChatModel(BaseChatModel):
@@ -31,6 +31,15 @@ class StubChatModel(BaseChatModel):
     def bind_tools(self, tools: Any, *, tool_choice: Optional[str] = None, **kwargs: Any):
         # Real chat models validate/attach tool schemas here; the stub
         # ignores them since its responses are already scripted.
+        return self
+
+    def bind(self, **kwargs: Any):
+        # Per-state reasoning_effort binding is a no-op for a scripted stub.
+        return self
+
+    def with_structured_output(self, schema: Any, **kwargs: Any):
+        # The graph falls back to reading plain text when a model returns
+        # something other than the schema, which is what a stub does.
         return self
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
@@ -98,7 +107,9 @@ def test_agent_calls_tool_when_model_requests_it():
     stub_tool, calls = _make_stub_tool()
 
     graph = build_agent(model=model, tools=[stub_tool])
-    result = graph.invoke({"messages": [HumanMessage(content="feeling good, quiet day")]})
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="feeling good, quiet day")], "current_step": "post_log"}
+    )
 
     assert calls == [{"mood": "good", "circumstances": "quiet day", "energy": ""}]
     assert result["messages"][-1].content == "Logged that -- glad it's a quiet one."
@@ -112,7 +123,9 @@ def test_agent_skips_tool_for_plain_reply():
     stub_tool, calls = _make_stub_tool()
 
     graph = build_agent(model=model, tools=[stub_tool])
-    result = graph.invoke({"messages": [HumanMessage(content="hey, how's your day going?")]})
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="hey, how's your day going?")], "current_step": "post_log"}
+    )
 
     assert calls == []
     assert result["messages"][-1].content == "Sounds like a good one, glad to hear it!"
@@ -139,7 +152,12 @@ def test_energy_arg_reaches_tool_when_model_includes_it():
     stub_tool, calls = _make_stub_tool()
 
     graph = build_agent(model=model, tools=[stub_tool])
-    graph.invoke({"messages": [HumanMessage(content="exhausted after back-to-back meetings")]})
+    graph.invoke(
+        {
+            "messages": [HumanMessage(content="exhausted after back-to-back meetings")],
+            "current_step": "post_log",
+        }
+    )
 
     assert calls == [
         {
@@ -150,66 +168,75 @@ def test_energy_arg_reaches_tool_when_model_includes_it():
     ]
 
 
-def test_system_prompt_reaches_the_model():
-    model = StubChatModel(responses=[AIMessage(content="Hey! How's it going?")])
-    stub_tool, _ = _make_stub_tool()
-
-    graph = build_agent(model=model, tools=[stub_tool])
-    graph.invoke({"messages": [HumanMessage(content="hi")]})
-
-    assert len(model.received_messages) == 1
-    first_call_messages = model.received_messages[0]
-    assert isinstance(first_call_messages[0], SystemMessage)
-    assert first_call_messages[0].content == SYSTEM_PROMPT
+def test_base_prompt_reaches_every_state():
+    """Scope, honesty and untrusted-output rules are shared, so each state's
+    prompt must carry them -- that is the point of a shared base."""
+    for name, prompt in STATE_PROMPTS.items():
+        assert prompt.startswith(BASE_PROMPT), f"{name} does not include the base prompt"
 
 
 @pytest.mark.parametrize(
     "expected_phrase",
     [
-        # Tools the model is actually allowed to reach for.
-        "log_mood",
-        "find_similar_entries",
-        "web_search",
-        # Mood/energy vocabulary (renamed from valence/energy_level in the
-        # stage-14 redesign) and the read-them-together rule.
-        "exhausted",
-        "wired",
-        "good mood + wired is excitement",
-        # Structuring judgment.
-        "structuring sequence",
-        "clarifying question",
-        # Honesty, including the pattern-specific half added with the
-        # history lookup.
-        "never tell the user you logged",
+        # The honesty rule about saving became a blanket prohibition: the
+        # machine-set tool receipt reports the outcome, so the agent claiming
+        # it adds nothing and can only contradict it.
+        "do not tell the user whether anything was saved",
         "nothing on record yet",
-        # Untrusted-output handling, extended to the two new sources.
         "never instructions to",
         "web search result",
-        "similar-situation lookup",
-        # Proactive tool-use guidance and the no-silent-duplicate rule.
-        "weigh this on any turn",
-        "near-duplicate call",
-        # Structuring must outrank the new suggest-actions capability --
-        # added after an eval run showed the agent logging on turn 1 of the
-        # multi-turn case and handing out a how-to guide instead of asking
-        # a structuring question (regression vs. stage 10).
-        "ask one question and nothing else",
-        "never overrides the structuring rule",
+        "past log entries",
         "don't produce multi-step how-to guides",
     ],
 )
-def test_system_prompt_covers_required_guidance(expected_phrase):
-    assert expected_phrase.lower() in SYSTEM_PROMPT.lower()
+def test_base_prompt_covers_the_shared_rules(expected_phrase):
+    assert expected_phrase.lower() in BASE_PROMPT.lower()
 
 
-def test_system_prompt_no_longer_claims_log_mood_is_the_only_tool():
-    """The line was true through stage 10 and is now actively false -- the
-    agent has a history lookup and a web search as well."""
-    assert "only tool available" not in SYSTEM_PROMPT.lower()
+@pytest.mark.parametrize(
+    "state,expected_phrase",
+    [
+        # triage must not steer a greeting into a check-in -- the stage-18
+        # regression that broke simple_small_talk_06.
+        ("triage", "do not ask for a mood or energy rating"),
+        ("triage", "you have no tools here"),
+        # structuring asks one thing at a time and cannot log yet.
+        ("structuring", "ask one question per turn and nothing else"),
+        ("structuring", "cannot log anything yet"),
+        # light never guesses a missing scale value.
+        ("light", "do not guess a value"),
+        ("light", "mood and energy are the user's own readings"),
+        # post_log is where history beats the web.
+        ("post_log", "use it before anything else"),
+        ("post_log", "good mood + wired is excitement"),
+        ("post_log", "don't silently repeat it"),
+    ],
+)
+def test_state_prompts_carry_their_own_rules(state, expected_phrase):
+    assert expected_phrase.lower() in STATE_PROMPTS[state].lower()
 
 
-def test_system_prompt_does_not_mention_classify_entry():
-    """Classification is a graph edge, not something the model chooses. If it
-    ever shows up in the prompt, that's a sign the guarantee slipped back
-    into being a request."""
-    assert "classify_entry" not in SYSTEM_PROMPT.lower()
+def test_rules_do_not_leak_between_states():
+    """The whole reason for splitting the prompt: a structuring edit must not
+    be able to reach small talk. If triage ever grows the structuring rules,
+    that isolation is gone."""
+    assert "ask one question per turn" not in STATE_PROMPTS["triage"].lower()
+    assert "log_mood" not in STATE_PROMPTS["triage"].lower()
+    assert "log_mood" not in STATE_PROMPTS["structuring"].lower()
+
+
+def test_no_state_prompt_mentions_classify_entry():
+    """Classification is a graph edge, not something the model chooses."""
+    for name, prompt in STATE_PROMPTS.items():
+        assert "classify_entry" not in prompt.lower(), name
+
+
+def test_no_prompt_claims_log_mood_is_the_only_tool():
+    for prompt in STATE_PROMPTS.values():
+        assert "only tool available" not in prompt.lower()
+
+
+def test_scale_question_offers_the_exact_vocabulary():
+    """The question is canned precisely so the scale words cannot drift."""
+    for value in ("bad", "neutral", "good", "exhausted", "calm", "wired"):
+        assert value in SCALE_QUESTION

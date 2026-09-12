@@ -97,7 +97,11 @@ def test_real_counts_are_what_gets_sent_to_the_model():
 def test_checkin_fire_uses_the_plain_opener():
     fire = Fire(when=None, kind="checkin")
 
-    assert opener_for(fire, SchedulerConfig()) == OPENER_MESSAGE
+    opener, events = opener_for(fire, SchedulerConfig())
+
+    assert opener == OPENER_MESSAGE
+    # An ordinary check-in runs no tool, so it has nothing to report.
+    assert events == []
 
 
 def test_digest_fire_builds_a_digest_opener(monkeypatch):
@@ -106,7 +110,36 @@ def test_digest_fire_builds_a_digest_opener(monkeypatch):
         lambda window_days: _summary(enough_data=False, entry_count=0),
     )
 
-    opener = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
+    opener, _events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
 
     assert opener != OPENER_MESSAGE
     assert "enough" in opener.lower()
+
+
+def test_digest_reports_the_analysis_that_produced_it(monkeypatch):
+    """The digest is the one window where the agent asserts numbers about the
+    user's history. Those numbers come from an aggregation the model did not
+    compute, so the aggregation reports itself."""
+    monkeypatch.setattr(
+        "scheduler.analyze_stress_patterns",
+        lambda window_days: _summary(enough_data=True, entry_count=6),
+    )
+
+    _opener, events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
+
+    assert [e["tool"] for e in events] == ["analyze_stress_patterns"]
+    assert events[0]["exit_code"] == 0
+    assert "6 entries" in events[0]["detail"]
+
+
+def test_digest_says_so_when_there_was_not_enough_data(monkeypatch):
+    """'Not enough data' must be visible as a fact about the aggregation, not
+    only as a sentence the model chose to write."""
+    monkeypatch.setattr(
+        "scheduler.analyze_stress_patterns",
+        lambda window_days: _summary(enough_data=False, entry_count=1),
+    )
+
+    _opener, events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
+
+    assert "not enough data" in events[0]["detail"]

@@ -117,6 +117,17 @@ def _extract_tags(raw_text: str) -> list[str]:
     return []
 
 
+# L1 (skip classify_entry on "thin" entries) was tried and REVERTED. The plan
+# proposed a length threshold on the strength of one observation: a light
+# check-in that returned no tags. It does not generalise -- "three deadlines
+# collided" is 24 characters and perfectly classifiable, while the entry that
+# returned nothing was 58. Length does not separate them; whether a *problem*
+# is described does, and judging that is precisely the classifier's job.
+# Shipping the heuristic would have silently left real entries untagged and
+# therefore invisible to find_similar_entries, to save ~1s on some turns.
+# Not worth it. The empty-entry skip below is kept: that one is exact.
+
+
 def _build_entry_text(circumstances: str, situation: str, thoughts: str) -> str:
     parts = []
     if circumstances:
@@ -160,7 +171,8 @@ def classify_entry(
     `model` is injectable, following this project's DI-for-testability
     convention (tools/csv_log.py's `path`, agent/graph.py's `model`/`tools`).
     """
-    entry_text = _build_entry_text(circumstances.strip(), situation.strip(), thoughts.strip())
+    circumstances, situation, thoughts = circumstances.strip(), situation.strip(), thoughts.strip()
+    entry_text = _build_entry_text(circumstances, situation, thoughts)
     if not entry_text:
         # Nothing to classify (e.g. a quick-select row). Don't spend an LLM
         # call inventing tags for an empty entry.

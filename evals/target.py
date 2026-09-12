@@ -16,7 +16,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from agent.graph import build_agent, message_text
+from agent.graph import build_agent, compact_spent_tool_messages, message_text
 from agent.safety import screen_for_crisis
 
 # Role vocabulary must match dataset.jsonl's hand-authored reference_trajectory
@@ -148,17 +148,61 @@ def run_case(inputs: dict, *, agent_graph: Any = None, log_path: Path | None = N
         graph = build_agent(log_path=log_path)
 
     messages: list[BaseMessage] = []
+    # Conversation state must be carried here exactly as app.py does. Passing
+    # only `messages` resets current_step every turn, so every turn re-enters
+    # at `triage`, the resumable states become unreachable, and the suite
+    # measures a system the application never runs. That defect produced a
+    # full run of plausible-looking but meaningless numbers -- see
+    # DEVELOPMENT_LOG.md, stage 26.
+    current_step = ""
+    scale_values: dict[str, str] = {}
+    transcript: list[BaseMessage] = []
+    # Machine-set records of what each tool actually did, accumulated across
+    # the case's turns. The evaluators grade against these rather than
+    # against what the reply claims -- see evals/evaluators.py.
+    tool_events: list[dict] = []
 
     for turn_text in inputs["turns"]:
         crisis = screen_for_crisis(turn_text)
         if crisis.triggered:
             return {
-                "messages": serialize_messages(messages),
+                "messages": serialize_messages(transcript),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
+                "tool_events": tool_events,
             }
         messages_before = messages + [HumanMessage(content=turn_text)]
-        result = graph.invoke({"messages": messages_before})
-        messages = result["messages"]
+        result = graph.invoke(
+            {
+                "messages": messages_before,
+                "current_step": current_step,
+                "scale_values": dict(scale_values),
+            }
+        )
+        # Accumulate only what this turn newly produced. The transcript must
+        # keep growing across a context reset, or everything said before the
+        # reset silently vanishes from grading -- the evaluators judge the
+        # whole case, while `messages` is only the agent's working context.
+        produced = result["messages"][len(messages_before):]
+        transcript.append(HumanMessage(content=turn_text))
+        transcript.extend(produced)
 
-    return {"messages": serialize_messages(messages), "crisis_intercepted": False}
+        tool_events.extend(result.get("tool_events") or [])
+
+        messages = result["messages"]
+        current_step = result.get("current_step", "") or ""
+
+        if not current_step:
+            # Check-in complete: app.py clears the buffer here, because the
+            # durable memory is the CSV. Mirrored so the harness does not
+            # quietly give the agent more context than it has in production.
+            messages = []
+            scale_values = {}
+        else:
+            messages = compact_spent_tool_messages(messages)
+
+    return {
+        "messages": serialize_messages(transcript),
+        "crisis_intercepted": False,
+        "tool_events": tool_events,
+    }

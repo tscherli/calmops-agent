@@ -12,9 +12,12 @@ class _PoisonGraph:
 
 
 class _StubGraph:
-    def __init__(self, reply_content="Stub reply", tool_call=False):
+    def __init__(self, reply_content="Stub reply", tool_call=False, current_step=""):
         self.reply_content = reply_content
         self.tool_call = tool_call
+        # "" means the check-in finished this turn; anything else means the
+        # conversation is still open and should be resumed on the next turn.
+        self.current_step = current_step
         self.calls = []
 
     def invoke(self, payload):
@@ -26,7 +29,7 @@ class _StubGraph:
             )
             messages.append(ToolMessage(content="ok", name="log_mood", status="success", tool_call_id="1"))
         messages.append(AIMessage(content=self.reply_content))
-        return {"messages": messages}
+        return {"messages": messages, "current_step": self.current_step}
 
 
 def test_crisis_case_never_invokes_agent():
@@ -50,16 +53,47 @@ def test_non_crisis_case_invokes_agent_and_serializes_messages():
     assert result["messages"][-1]["content"] == "Sounds good."
 
 
-def test_multi_turn_accumulates_across_calls():
-    stub = _StubGraph(reply_content="ok")
+def test_multi_turn_accumulates_while_the_conversation_is_open():
+    """A conversation still in a state carries its history forward, so the
+    agent sees what was already said."""
+    stub = _StubGraph(reply_content="ok", current_step="structuring")
 
     result = run_case({"turns": ["hi", "still not great"]}, agent_graph=stub)
 
     assert len(stub.calls) == 2
-    # second call's messages must include the first turn's accumulated history
     assert len(stub.calls[1]["messages"]) == 3  # human, ai, + new human
     roles = [m["role"] for m in result["messages"]]
     assert roles == ["human", "ai", "human", "ai"]
+
+
+def test_conversation_state_is_carried_between_turns():
+    """The defect that made a whole eval run meaningless: passing only
+    `messages` reset current_step every turn, so the suite never reached the
+    resumable states and measured a system app.py does not run."""
+    stub = _StubGraph(reply_content="ok", current_step="awaiting_scale")
+
+    run_case({"turns": ["quiet morning", "mood: good, energy: calm"]}, agent_graph=stub)
+
+    assert stub.calls[0]["current_step"] == ""            # fresh conversation
+    assert stub.calls[1]["current_step"] == "awaiting_scale"  # resumed, not re-triaged
+    assert "scale_values" in stub.calls[1]
+
+
+def test_context_resets_once_a_check_in_completes():
+    """app.py clears the buffer when current_step goes empty, because the
+    durable memory is the CSV. The harness mirrors that, so it cannot quietly
+    hand the agent more context than it has in production."""
+    stub = _StubGraph(reply_content="ok", current_step="")
+
+    result = run_case({"turns": ["hi", "second check-in"]}, agent_graph=stub)
+
+    # turn 2 starts clean: just the new human message
+    assert len(stub.calls[1]["messages"]) == 1
+    # ...but the graded transcript still holds BOTH turns. Getting this wrong
+    # silently drops everything before the reset from grading.
+    roles = [m["role"] for m in result["messages"]]
+    assert roles == ["human", "ai", "human", "ai"]
+    assert result["messages"][2]["content"] == "second check-in"
 
 
 def test_multi_turn_stops_at_crisis_mid_conversation():

@@ -20,8 +20,8 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 |---|---|
 | `app.py` | Tkinter chat window: first-run consent screen, LLM-free quick-select buttons, free-text chat. |
 | `agent/safety.py` | Deterministic crisis-keyword gate. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
-| `agent/graph.py` | The agent: a hand-rolled LangGraph `StateGraph`. LLM judgment for conversation, code-guaranteed edges for the log→classify→history sequence. |
-| `agent/prompts.py` | System prompt: structuring judgment, mood/energy extraction, honesty rule, untrusted-tool-output rules. |
+| `agent/graph.py` | The agent: a hand-rolled LangGraph `StateGraph` running the conversation as a **state machine**. Each state binds only its own tools, so what the agent may do is enforced by the graph rather than by prompt wording. |
+| `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per state, so an edit to one state's rules cannot leak into another's. |
 | `tools/csv_log.py` | `log_mood` tool + the local CSV append. Never raises; falls back to a JSONL file on write failure. |
 | `tools/classify.py` | `classify_entry` — one narrow LLM call turning an entry into semantic tags. Deliberately *not* an agent-callable tool. |
 | `tools/log_query.py` | `find_similar_entries` / `analyze_stress_patterns` — deterministic, read-only scans over the tags column. |
@@ -227,15 +227,29 @@ Set `"mode": "random_interval"` instead to get the original behavior (a nudge ev
 
 ## How the tool works
 
-**One turn, end to end.** You type something. Before any AI sees it, `agent/safety.py` regex-screens it for crisis language; if it matches, you get hardcoded crisis resources and the model is never called at all. Otherwise the message goes to the agent, which decides whether this is small talk (just reply), a light check-in (log it now), something heavier (ask a structuring question first), or genuinely ambiguous (ask what you meant).
+**The conversation is a state machine.** Each state binds only the tools it is allowed to use, which makes the important rules structural rather than advisory:
 
-**When it logs.** The model calls `log_mood` with what it gathered — mood, energy, circumstances, and the structuring fields if it collected them. From there the graph, not the model, takes over: `classify_entry` turns the entry text into semantic tags, the row is appended to `data/mood_log.csv` **once**, already tagged, and `find_similar_entries` looks for past entries sharing those tags. All three results come back to the agent as a single tool result, so its reply can be pattern-aware in the same turn.
+| state | can it log? | can it search? | what it does |
+|---|---|---|---|
+| `triage` | no | no | decides what kind of message this is, and answers small talk directly |
+| `structuring` | no | no | asks one question at a time to unpack a heavier situation |
+| `light` | yes | no | logs a straightforward check-in |
+| `awaiting_scale` | no | no | asks for mood and energy — **no AI call at all** |
+| `post_log` | — | yes | replies, using your history before reaching for the web |
 
-**Why that ordering is in code and not the prompt.** Asking a model to "always classify after logging" works most of the time, which is another way of saying it silently fails some of the time — and an untagged entry is invisible to every future lookup. Making it a graph edge means it cannot be skipped. The same is not true of *whether to search the web* or *whether the user still seems stuck* — those are real judgment calls, and they stay with the model.
+"The agent must not do X here" is an empty tool list, not a sentence in a prompt. `triage` cannot log a greeting because it has no logging tool; `structuring` cannot log on turn one because no path leads there.
 
-**What you get back.** An honest reply. If the write failed, it says so. If nothing similar is on record, it says that too, rather than implying a pattern from one entry — including the entry it just wrote, which is explicitly excluded from its own history lookup.
+**Mood and energy are asked for, never guessed.** If you said them ("exhausted", "buzzing", "rough one"), they're taken as given. If you didn't, you get a short question with buttons — *mood: bad / neutral / good*, *energy: exhausted / calm / wired*. Tone, terseness and topic are explicitly **not** treated as evidence: a short message is not a bad mood, and a busy day is not low energy. Decline to answer and the fields stay empty, because an empty field is honest and a guessed one quietly corrupts the weekly digest.
 
-**Quick-select buttons** bypass all of this: they write a fixed template row directly, with no LLM call and no tagging. That's the point of them.
+That question costs no API call — it's fixed text rendered as buttons, which also means the scale wording can't drift.
+
+**When it logs.** The model calls `log_mood`, and from there the graph takes over: `classify_entry` turns the entry into semantic tags, the row is appended **once** already tagged, and `find_similar_entries` looks for past entries sharing those tags. All three results come back as one tool result, so the reply can be pattern-aware in the same turn.
+
+**Why that ordering is code and not prompt.** Asking a model to "always classify after logging" works most of the time — which means it silently fails some of the time, and an untagged entry is invisible to every future lookup. A graph edge cannot be skipped. The same is not true of genuine judgement calls (what to ask next, whether a search would help); those stay with the model.
+
+**What you get back.** An honest reply. If the write failed, it says so. If nothing similar is on record, it says that too rather than implying a pattern — including the entry it just wrote, which is excluded from its own history lookup.
+
+**Quick-select buttons** bypass all of this: a fixed template row, no AI call, no tagging. That's the point of them.
 
 ## How to run evals
 

@@ -64,4 +64,7 @@ def test_quick_select_appends_to_visible_history(app, isolated_log_path):
 
     history_text = app.history.get("1.0", "end")
     assert MOOD_TEMPLATES["good_general"]["label"] in history_text
-    assert "Logged" in history_text
+    # The confirmation is a machine-set tool receipt, not agent prose: the
+    # quick-select path reports a write exactly the way the agent path does.
+    assert "log_mood" in history_text
+    assert "exit 0" in history_text
