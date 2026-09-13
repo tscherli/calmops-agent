@@ -68,7 +68,7 @@ TRIAGE_PROMPT = f"""{BASE_PROMPT}
 This is the first turn of a new check-in. Decide which kind of message this is, and respond \
 accordingly. You have no tools here -- you cannot log anything on this turn.
 
-Choose exactly one `next_step`:
+Choose exactly one `route`:
 
 - "small_talk" -- a greeting, small talk, or anything unrelated to how the user is doing. Reply \
 normally and warmly. Do NOT ask how they're feeling, do NOT ask for a mood or energy rating, and \
@@ -82,7 +82,26 @@ more. Put that reply in `reply`.
 (excessive task-switching, rushing, decision paralysis, physical tension), or a genuinely \
 ambiguous state ("today was a lot"). Ask ONE short question to start unpacking it -- about the \
 situation, or what's on their mind. Just the question, nothing else: no tips, no plans, no lists. \
-Put it in `reply`."""
+Put it in `reply`.
+
+Choosing between "light" and "structuring" is the decision to get right. The question is only \
+this: **is there something here to unpack?** Structuring is several more turns of questions \
+before anything is written, so it has to earn them.
+
+Choose "light" when the message is self-contained -- a day reported, not a problem raised. "Quiet \
+morning, coffee helped", "feeling fine", "closed a big deal", "bit of a rough day, nothing \
+dramatic, just a lot of small annoying tasks". When the user plays it down themselves, believe \
+them: a bad day is not automatically a heavy one, and treating it as one reads as an \
+interrogation.
+
+Choose "structuring" when something is unresolved, recurring, or stuck, when the user names a \
+problem rather than a mood, or when they say a lot without landing anywhere. "Everything is late \
+and I'm behind" is a problem, not a mood.
+
+Do NOT use whether the user mentioned how they feel to decide this. Saying "völlig erschöpft" or \
+"rough one" tells you their reading of themselves; it tells you nothing about whether the \
+situation behind it needs unpacking. That only decides whether they get asked for a scale value \
+later."""
 
 
 STRUCTURING_PROMPT = f"""{BASE_PROMPT}
@@ -90,21 +109,62 @@ STRUCTURING_PROMPT = f"""{BASE_PROMPT}
 You are partway through unpacking a heavier situation with the user. You have no tools here -- \
 you cannot log anything yet, and you should not try to.
 
-Ask ONE question per turn and nothing else. Work towards understanding: the situation, what the \
-user is thinking about it, what they need, and one small next step. Don't rush this, and don't \
-offer tips, plans or lists while you're still gathering -- jumping to advice skips the part that \
-makes the entry worth having.
+Ask ONE question per turn and nothing else. Do not offer tips, plans or lists yet. You cannot \
+suggest anything useful until you know what is actually going on and what the user has already \
+tried -- otherwise you will suggest the thing they did yesterday that didn't work.
 
-Choose `next_step`:
+Three things are needed before this conversation can move on. Ask for whichever is still missing, \
+one per turn, starting with whichever matters most right now:
 
-- "structuring" -- you still need more. Put your single question in `reply`.
-- "ready" -- the user has named a next step, or you have enough to write a useful entry. Put a \
-short acknowledgement in `reply` (one sentence, no advice)."""
+1. `circumstances` -- briefly, what is going on.
+2. `situation` -- concretely what is happening: what, when, with whom.
+3. `measure_taken` -- what they have already tried. Ask this one explicitly; do not assume it \
+from what they have said. If they tell you they haven't tried anything, write "nothing yet" -- \
+that is a complete answer. Leave it EMPTY if you have not asked yet.
+
+Never write a placeholder into a field. "not provided yet", "unknown", "n/a", "none given" and \
+the like are not answers -- they are the absence of one, and writing them puts a stand-in into \
+the user's log as though it were something they said. An empty field is honest; a placeholder is \
+not, and it will not move the conversation on.
+
+When the user sounds stuck, says something keeps happening, or asks what to do, do not just ask \
+another bare question. Say plainly that you want to help and what you still need in order to \
+suggest something that actually fits -- then ask for it. For example: "I can see this keeps \
+coming back. So I don't just repeat something you've already tried -- what have you attempted so \
+far?" Say this when it genuinely applies, not as a preamble to every question.
+
+Record anything else the user offers without asking for it: `thoughts` (what they make of it), \
+`need` (what they want from this -- to vent, to decide, to plan), `next_step` (something they \
+decide to do). Never hold the conversation up for these. Helping the user find a next step is \
+what comes later, so waiting for one now means waiting for something you have not helped produce \
+yet.
+
+Fill in `collected` every turn with everything established so far, including anything said in \
+earlier turns before you began unpacking. Report only what the user actually said -- do not \
+infer, and leave a field empty rather than guessing at it.
+
+Put each thing in the field it belongs to. A bare scale answer like "mood: bad, energy: wired" is \
+the user rating themselves: it is not `thoughts`, and it belongs in no field here at all. Never \
+put a routing word such as "structuring" or "ready" into `next_step` -- that field is for \
+something the user decided to do.
+
+Choose `route`:
+
+- "structuring" -- you are still missing one of the three. Put your single question in `reply`.
+- "ready" -- you have all three. Put a short acknowledgement in `reply` (one sentence, no \
+advice)."""
 
 
 LIGHT_PROMPT = f"""{BASE_PROMPT}
 
-This is a light check-in. Log it with the `log_mood` tool, using only what the user actually said.
+You are here to write the entry. Log it with the `log_mood` tool, using only what the user \
+actually said.
+
+You arrive here two ways: a straightforward check-in that needed no unpacking, or the end of a \
+longer conversation that has already been unpacked. In the second case the details are already in \
+the conversation above -- carry them into the tool call (`situation`, `thoughts`, `need`, \
+`next_step`, `measure_taken`, `helpfulness`) rather than logging only the last thing said. Do not \
+re-ask anything that has already been answered, and do not start a new round of questions.
 
 {CONVEYED_RULE}
 
@@ -143,7 +203,13 @@ relevant past entry sits unused.
 
 If the user explicitly asks for a history check or a search you already ran in this conversation, \
 don't silently repeat it. Say what you already found, and either refine the angle or ask what's \
-missing."""
+missing.
+
+If the user said what they wanted from this conversation, respect it over your own instinct to \
+be useful. Someone who said they just wanted to get it off their chest should not be handed a \
+plan; acknowledge what they said and leave it there. Most of the time they will not have said \
+anything either way, and that is not a signal -- treat silence as "no preference stated", not as \
+permission to hold back or as a request for advice."""
 
 
 STATE_PROMPTS = {

@@ -477,3 +477,62 @@ def test_recursion_limit_is_configured_on_the_compiled_graph(tmp_path):
     graph = build_agent(model=model, log_path=tmp_path / "log.csv")
 
     assert graph.config.get("recursion_limit") == DEFAULT_RECURSION_LIMIT
+
+
+# -- the row must carry what the conversation established --------------------
+
+
+def test_structuring_detail_reaches_the_row_even_when_the_tool_call_omits_it(tmp_path):
+    """Gap 2 from stage 31: `structuring` can spend four turns gathering
+    situation/thoughts/next_step and the model then builds a `log_mood` call
+    with only mood and circumstances, writing a thin row anyway. Already
+    observed on the easy path -- simple_light_measure_03's user said they made
+    a priority list and that it helped a lot, and both fields logged empty.
+
+    The merge is code-side, the same way scale_values already win over the
+    model's guess, so four turns of unpacking do not survive only as long as
+    the model's attention does."""
+    log_path = tmp_path / "mood_log.csv"
+    model = _model_that_logs_then_replies({"mood": "bad", "circumstances": "swamped"})
+
+    graph = build_agent(model=model, classifier=_stub_classifier(["deadline_pressure"]), log_path=log_path)
+    graph.invoke(
+        {
+            "current_step": "light",
+            "messages": [HumanMessage(content="mood: bad, energy: wired")],
+            "collected": {
+                "situation": "three deadlines the same afternoon",
+                "thoughts": "I took on too much",
+                "measure_taken": "made a priority list",
+                "helpfulness": "helped a bit",
+                "next_step": "tell the client tomorrow",
+            },
+        }
+    )
+
+    row = _read_rows(log_path)[0]
+    assert row["situation"] == "three deadlines the same afternoon"
+    assert row["thoughts"] == "I took on too much"
+    assert row["measure_taken"] == "made a priority list"
+    assert row["helpfulness"] == "helped a bit"
+    assert row["next_step"] == "tell the client tomorrow"
+
+
+def test_this_turns_tool_call_wins_over_the_earlier_collected_value(tmp_path):
+    """The fallback fills gaps; it must not overwrite a fresher value the
+    model supplied on the turn that actually writes the row."""
+    log_path = tmp_path / "mood_log.csv"
+    model = _model_that_logs_then_replies(
+        {"mood": "bad", "circumstances": "swamped", "situation": "revised on the final turn"}
+    )
+
+    graph = build_agent(model=model, classifier=_stub_classifier(["x"]), log_path=log_path)
+    graph.invoke(
+        {
+            "current_step": "light",
+            "messages": [HumanMessage(content="mood: bad, energy: wired")],
+            "collected": {"situation": "stale earlier version"},
+        }
+    )
+
+    assert _read_rows(log_path)[0]["situation"] == "revised on the final turn"

@@ -36,6 +36,8 @@ Efficiency decisions, each measured rather than assumed (see DEVELOPMENT_LOG):
 """
 from __future__ import annotations
 
+import re
+
 import json
 import os
 from collections.abc import Sequence
@@ -84,6 +86,34 @@ def _web_search_enabled() -> bool:
     }
 
 
+class CollectedFields(BaseModel):
+    """What the conversation has established so far, as reported by the model.
+
+    Deliberately *facts*, not a judgement. `structuring` used to decide its
+    own exit, and lost every time: its permissive "or you have enough" rule
+    sat under a four-noun checklist and a "don't rush this", so it emitted
+    `ready` zero times in 37 cases. Reporting what has been gathered is a
+    much easier and more checkable job than deciding when to stop -- and it
+    moves the decision into Python, where it can be tested without an LLM.
+
+    `measure_taken` must be filled with something (e.g. "nothing yet") once
+    the question has been asked, because empty has to mean *not asked*. That
+    distinction is the whole point of gating on it.
+    """
+
+    circumstances: str = Field(default="", description="Brief description of what is going on.")
+    situation: str = Field(default="", description="Concretely what is happening, if established.")
+    thoughts: str = Field(default="", description="What the user thinks about it, if said.")
+    need: str = Field(default="", description="What the user wants from this conversation, if said.")
+    next_step: str = Field(default="", description="A small next step, if the user named one.")
+    measure_taken: str = Field(
+        default="",
+        description="What the user has already tried. Write 'nothing yet' if they say so; "
+        "leave empty ONLY if you have not asked.",
+    )
+    helpfulness: str = Field(default="", description="How well that worked, if said.")
+
+
 class TurnDecision(BaseModel):
     """Structured output for the states that both reply and route.
 
@@ -91,8 +121,68 @@ class TurnDecision(BaseModel):
     state machine from costing an extra model call per turn.
     """
 
-    next_step: str = Field(description="One of the allowed next steps for this state.")
+    route: str = Field(
+        description="Where this state hands off next. NOT the user's next_step -- that "
+        "is a log column inside `collected`."
+    )
     reply: str = Field(default="", description="What to say to the user, if anything.")
+    collected: CollectedFields | None = Field(
+        default=None, description="Only `structuring` fills this in."
+    )
+
+
+# The gates, defined by what goes wrong without each field rather than by
+# which columns happen to exist (see DEVELOPMENT_LOG.md, stage 31):
+#
+#   missing circumstances/situation -> generic advice, because the agent does
+#       not actually know what happened
+#   missing measure_taken           -> suggesting the thing they tried
+#       yesterday that did not work
+#
+# mood and energy are not here: they are supplied by the user through
+# `awaiting_scale`, never gathered by structuring.
+#
+# thoughts / need / next_step are deliberately NOT gates. `next_step` in
+# particular was one, and it was circular -- helping the user find a next step
+# is what the suggestion is *for*, so requiring it first made the state wait
+# for an output of the stage that comes after it.
+SUGGEST_GATE_FIELDS = ("circumstances", "situation", "measure_taken")
+
+# A gate that only checks "is this non-empty" is a gate the model can walk
+# through by writing a placeholder, and in the first live run of the heavy
+# path it did exactly that: `measure_taken: "not provided yet"`. That both
+# opened the gate without the question ever being asked *and* wrote the
+# placeholder into the user's CSV as though it were data.
+#
+# "nothing yet" is a real answer and must pass; "not provided yet" is the
+# absence of an answer wearing an answer's clothes.
+_PLACEHOLDER_PATTERN = re.compile(
+    r"^\s*(n/?a|none|unknown|tbd|null|-+|"
+    r"(not|no)\s+(provided|specified|stated|given|mentioned|asked|available|answered|answer|info|information|details?)"
+    r"[\w\s]*)\s*$",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder(value: str) -> bool:
+    """Does this field hold a stand-in for an answer rather than an answer?"""
+    return bool(_PLACEHOLDER_PATTERN.match(value or ""))
+
+
+def suggest_gate_missing(collected: CollectedFields | None) -> list[str]:
+    """Which gate fields are still unanswered. Empty list == may move on.
+
+    Plain function, no model involved: this is the decision `structuring`
+    kept getting wrong when it was left to prompt judgement.
+    """
+    if collected is None:
+        return list(SUGGEST_GATE_FIELDS)
+    missing = []
+    for f in SUGGEST_GATE_FIELDS:
+        value = (getattr(collected, f, "") or "").strip()
+        if not value or is_placeholder(value):
+            missing.append(f)
+    return missing
 
 
 def _merge_tool_events(
@@ -169,6 +259,10 @@ class AgentState(TypedDict, total=False):
     pending_tags: list[str]
     pending_log: dict[str, Any]
     scale_values: dict[str, str]
+    # What structuring established, carried forward so log_write can merge it
+    # into the row deterministically rather than hoping the model still
+    # remembers four turns of conversation when it builds the tool call.
+    collected: dict[str, str]
     # Set by code, read by app.py's live receipt line and by the eval's
     # fabrication check. Never written by the model.
     tool_events: Annotated[list[dict[str, Any]], _merge_tool_events]
@@ -353,9 +447,12 @@ def build_agent(
         """
         result = _bind(state_name, structured=True).invoke(_conversation(state, state_name))
         if isinstance(result, TurnDecision):
-            step = result.next_step if result.next_step in allowed else fallback
-            return TurnDecision(next_step=step, reply=result.reply)
-        return TurnDecision(next_step=fallback, reply=message_text(result))
+            step = result.route if result.route in allowed else fallback
+            # `collected` must survive: it is the evidence the gate is checked
+            # against, and rebuilding the decision without it silently meant
+            # every gate saw an empty report.
+            return TurnDecision(route=step, reply=result.reply, collected=result.collected)
+        return TurnDecision(route=fallback, reply=message_text(result))
 
     # -- nodes ---------------------------------------------------------------
 
@@ -363,21 +460,41 @@ def build_agent(
         decision = _decide(
             state, "triage", {"small_talk", "light", "structuring"}, fallback="small_talk"
         )
-        update: dict[str, Any] = {"current_step": decision.next_step}
-        if decision.next_step != "light" and decision.reply:
+        update: dict[str, Any] = {"current_step": decision.route}
+        if decision.route != "light" and decision.reply:
             update["messages"] = [AIMessage(content=decision.reply)]
-        if decision.next_step == "small_talk":
+        if decision.route == "small_talk":
             update["current_step"] = ""     # nothing to resume
         return update
 
     def structuring_node(state: AgentState) -> dict[str, Any]:
+        """Unpack a heavier situation, one question per turn.
+
+        The model reports what it has gathered; **this function decides
+        whether that is enough.** Leaving the decision to the model is what
+        produced zero `ready` transitions in 37 cases -- the exit rule was
+        one permissive line under a four-noun checklist telling it to be
+        thorough, and thorough won every time.
+
+        Exiting to `light` rather than `awaiting_scale` is deliberate:
+        `light` already knows how to tell conveyed values from missing ones,
+        and having one place make that call beats two that will drift.
+        """
         decision = _decide(state, "structuring", {"structuring", "ready"}, fallback="structuring")
-        update: dict[str, Any] = {}
+
+        merged = dict(state.get("collected") or {})
+        if decision.collected is not None:
+            # Accumulate: a field established on turn 2 must not be lost
+            # because turn 4's report happened not to restate it.
+            for field, value in decision.collected.model_dump().items():
+                if (value or "").strip():
+                    merged[field] = value.strip()
+
+        missing = suggest_gate_missing(CollectedFields(**merged))
+        update: dict[str, Any] = {"collected": merged}
         if decision.reply:
             update["messages"] = [AIMessage(content=decision.reply)]
-        update["current_step"] = (
-            "awaiting_scale" if decision.next_step == "ready" else "structuring"
-        )
+        update["current_step"] = "ready" if not missing else "structuring"
         return update
 
     def light_node(state: AgentState) -> dict[str, Any]:
@@ -402,8 +519,24 @@ def build_agent(
         }
 
     def awaiting_scale_ack_node(state: AgentState) -> dict[str, Any]:
+        """The user has answered the scale question -- usually.
+
+        `current_step` must only say "logging" if the model actually requested
+        the write. It used to be set unconditionally, so a turn where the user
+        answered something *else* (real case: the agent asked for the scale and
+        the user carried on describing the situation) left the state claiming
+        to be logging while the router correctly went nowhere. The next turn
+        then found a step no one resumes and fell through to `triage`, which
+        re-triaged a conversation already in progress and restarted it.
+        """
         response = _bind("awaiting_scale_ack").invoke(_conversation(state, "awaiting_scale_ack"))
-        return {"messages": [response], "current_step": "logging"}
+        logging_now = any(
+            c.get("name") == LOG_MOOD_TOOL_NAME for c in (response.tool_calls or [])
+        )
+        return {
+            "messages": [response],
+            "current_step": "logging" if logging_now else "awaiting_scale",
+        }
 
     def classify_node(state: AgentState) -> dict[str, Any]:
         call = _pending_log_call(state["messages"])
@@ -434,16 +567,29 @@ def build_agent(
         call = _pending_log_call(state["messages"])
         args = call.get("args") or {} if call else {}
         supplied = state.get("scale_values") or {}
+        collected = state.get("collected") or {}
+
+        def field(name: str) -> str | None:
+            """This turn's tool call first, then what structuring established.
+
+            The fallback exists because the model demonstrably drops detail it
+            gathered earlier: in simple_light_measure_03 the user said they
+            made a priority list and that it helped a lot, and both fields
+            logged empty. Four turns of unpacking should not survive only as
+            long as the model's attention does.
+            """
+            return (args.get(name) or "").strip() or (collected.get(name) or "").strip() or None
+
         result = append_mood_row(
             mood=supplied.get("mood") or args.get("mood") or "neutral",
-            circumstances=args.get("circumstances") or "",
+            circumstances=field("circumstances") or "",
             energy=supplied.get("energy") or args.get("energy") or None,
-            measure_taken=args.get("measure_taken") or None,
-            helpfulness=args.get("helpfulness") or None,
-            situation=args.get("situation") or None,
-            thoughts=args.get("thoughts") or None,
-            need=args.get("need") or None,
-            next_step=args.get("next_step") or None,
+            measure_taken=field("measure_taken"),
+            helpfulness=field("helpfulness"),
+            situation=field("situation"),
+            thoughts=field("thoughts"),
+            need=field("need"),
+            next_step=field("next_step"),
             tags=state.get("pending_tags") or None,
             path=log_path,
         )
@@ -556,13 +702,18 @@ def build_agent(
             return "post_log"
         if step == "light":
             return "light"
+        if step == "logging":
+            # Transient: it should never survive a turn. If it somehow does,
+            # resuming the scale question is recoverable; falling through to
+            # `triage` silently restarts a conversation already in progress.
+            return "awaiting_scale_ack"
         return "triage"
 
     def route_after_triage(state: AgentState) -> str:
         return "light" if state.get("current_step") == "light" else END
 
     def route_after_structuring(state: AgentState) -> str:
-        return "awaiting_scale" if state.get("current_step") == "awaiting_scale" else END
+        return "light" if state.get("current_step") == "ready" else END
 
     def route_after_light(state: AgentState) -> str:
         return "classify" if state.get("current_step") == "logging" else "awaiting_scale"
@@ -598,7 +749,7 @@ def build_agent(
     )
     graph.add_conditional_edges("triage", route_after_triage, {"light": "light", END: END})
     graph.add_conditional_edges(
-        "structuring", route_after_structuring, {"awaiting_scale": "awaiting_scale", END: END}
+        "structuring", route_after_structuring, {"light": "light", END: END}
     )
     graph.add_conditional_edges(
         "light", route_after_light, {"classify": "classify", "awaiting_scale": "awaiting_scale"}
