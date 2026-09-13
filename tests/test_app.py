@@ -80,12 +80,6 @@ class _RaisingGraph:
         yield  # pragma: no cover -- makes this a generator
 
 
-@pytest.fixture
-def tk_root():
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
 
 @pytest.fixture(autouse=True)

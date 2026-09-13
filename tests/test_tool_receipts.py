@@ -209,12 +209,6 @@ class _StreamingStub:
         )
 
 
-@pytest.fixture
-def tk_root():
-    root = tk.Tk()
-    root.withdraw()
-    yield root
-    root.destroy()
 
 
 @pytest.fixture(autouse=True)
