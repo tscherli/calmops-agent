@@ -8,6 +8,8 @@ state/*.json
 state/*.jsonl
 observability/runs.jsonl
 data/*.csv
+# LangGraph dev server state; Studio persists conversation threads here
+.langgraph_api/
 
 # Python
 __pycache__/

@@ -1,0 +1,12 @@
+# Sandbox-only dependencies. Installed into sandbox/.venv, never the app's .venv:
+# langgraph-cli[inmem] pins protobuf 6.x and would downgrade the app's protobuf 7.x.
+#
+# The core libraries are pinned to the versions the production app runs, so
+# anything learned in here behaves the same when it is ported back into agent/.
+langgraph==1.2.10
+langchain==1.3.14
+langchain-openai==1.4.3
+python-dotenv==1.2.2
+
+# The local Agent Server that Studio connects to.
+langgraph-cli[inmem]

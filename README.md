@@ -149,6 +149,12 @@ These are deliberately two different axes, not duplicates: you can be low-energy
 
 Concretely, `mood=bad` alone can't tell apart two common but very different bad days — **depleted** (`bad` + `exhausted`) and **agitated** (`bad` + `wired`). Those usually have different causes and want different responses (rest vs. calming down), and the agent is instructed to read the pair together for exactly that reason — while never stating the combination back at you as a label. It's also what lets the weekly digest say something more useful than a tally of bad days ("your rough days this week skewed wired, not drained").
 
+> **Planned change — `mood` is being dropped** (prototyped in `sandbox/`, not yet in the app). Used in
+> practice, the tool is opened in draining situations, so "is the mood bad?" is true almost every time
+> and selects nothing. The prototype asks for **`energy`** plus a **goal** instead — calm down right
+> now, plan something to recover, or change the situation itself — and those two pick measures from a
+> curated list. Everything above describes what the code does today.
+
 This maps onto Hans Selye's eustress/distress distinction — stress that energizes vs. stress that harms — which needs no extra field, since it already lives on the `mood` axis. A useful confirmation that the split is right: "tired" belongs equally to good, neutral, and bad stress, which is precisely why tiredness can't be folded into `mood`.
 
 > **Note on naming:** these fields were called `valence` (`good`/`neutral`/`bad`) and `energy_level` (`low`/`medium`/`high`) through stage 10. The rename came with the redesign; logs written before it are archived as `data/mood_log.pre-redesign.csv` rather than migrated.

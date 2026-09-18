@@ -1,0 +1,25 @@
+measure_id,type,measure,fits_energy,effort,source
+drink_water,recover,Go grab a glass of water.,exhausted;calm;wired,minutes,stretchly:mini:aaa
+deep_breaths,recover,Close your eyes and take a few deep breaths.,wired,minutes,stretchly:mini:aad
+count_breaths,recover,Close your eyes and count your breaths.,wired,minutes,stretchly:mini:aap
+name_sounds,recover,Close your eyes and name the things you hear.,wired,minutes,stretchly:mini:aaq
+grounding_54321,recover,"Identify 5 things you can see, 4 you can touch, 3 you can hear, 2 you can smell and 1 you can taste.",wired,minutes,stretchly:long:abj
+visualize_calm_place,recover,"Close your eyes and imagine a peaceful place, such as a beach or a forest, and focus on its sights, sounds and sensations.",wired,minutes,stretchly:long:abi
+stand_and_stretch,recover,Stand up from your chair and stretch.,exhausted;calm,minutes,stretchly:mini:aak
+natural_light,recover,Expose your eyes to natural light.,exhausted;calm,minutes,stretchly:mini:abb
+no_tech_walk,recover,Take a short walk without your phone or computer.,exhausted;wired,minutes,stretchly:long:aaj
+step_away,recover,Step away from the computer and think about something completely unrelated.,exhausted;wired,minutes,stretchly:long:aab
+lunch_outside,recover,"Take your lunch break outside, ideally somewhere green.",exhausted;calm;wired,minutes,stretchly:long:abb
+break_with_colleague,recover,Take your break together with a colleague.,exhausted;calm,minutes,stretchly:long:aaa
+appreciate_something,recover,Take a moment to think about something you appreciate.,exhausted;calm,minutes,stretchly:mini:aam
+ask_for_help,act,"If you need help, ask for it.",exhausted;calm;wired,minutes,stretchly:mini:aax
+one_thing_at_a_time,act,Do one thing at a time.,calm;wired,minutes,stretchly:mini:aay
+massage,recover,Book a massage.,exhausted;wired,hours,user
+wellness_day,recover,"Plan a wellness day, e.g. a spa or sauna.",exhausted;wired,hours,user
+staycation,recover,"Take a few days off at home, with no work and a few local trips.",exhausted;calm,days,user
+weekend_relax,recover,"Plan a quiet weekend away, e.g. an adults-only farm stay or a yoga weekend.",exhausted,days,user
+weekend_active,recover,"Plan an active weekend, e.g. hiking, a bike trip or a sports camp.",calm;wired,days,user
+weekend_learn,recover,"Plan a weekend where you learn something new, e.g. a cooking course, surfing or a creative camp.",calm,days,user
+step_by_step_checkin,act,Ask the person who needs help: "Could you walk me through exactly what you did, step by step, and tell me whether you used the docs at each step?",wired,minutes,agent
+holding_pattern_pause,act,Put a short pause on new requests for a couple of hours and send a quick status note to teammates/managers that you’re in a holding pattern to triage priorities.,exhausted,hours,agent
+abcde_prioritization,act,"Label each task from A (must do, serious consequences) to E (eliminate), and stop doing the low-impact ones.",exhausted;calm;wired,minutes,web:https://clickup.com/learn/topic/task-management/prioritization/abcde-method/
