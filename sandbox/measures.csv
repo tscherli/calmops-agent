@@ -25,3 +25,5 @@ holding_pattern_pause,act,"Pause new requests for a couple of hours and say when
 abcde_prioritization,act,"Label each task from A (must do, serious consequences) to E (eliminate), and stop doing the low-impact ones.",exhausted;calm;wired,minutes,web:https://clickup.com/learn/topic/task-management/prioritization/abcde-method/
 pre_meeting_cue_card,act,"Write a one-line reminder that the other person may be under pressure themselves, and read it before you reply.",exhausted;calm;wired,minutes,agent
 brief_cognitive_reframe_cue,recover,"Say a short sentence to yourself in the moment, such as: I only need to respond now, not fix this.",exhausted;calm;wired,minutes,agent
+pause_then_nudge,act,"Wait a few seconds before answering, then ask 'Any other ideas?' or 'Who wants to take a first stab?'.",calm;wired,minutes,user
+pause_then_nudge_with_recap,act,"Pause a few seconds before replying, then add a short recap like 'Great ideas so far, anything else to add?'.",calm;wired,minutes,agent
