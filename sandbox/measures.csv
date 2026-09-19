@@ -20,6 +20,8 @@ staycation,recover,"Take a few days off at home, with no work and a few local tr
 weekend_relax,recover,"Plan a quiet weekend away, e.g. an adults-only farm stay or a yoga weekend.",exhausted,days,user
 weekend_active,recover,"Plan an active weekend, e.g. hiking, a bike trip or a sports camp.",calm;wired,days,user
 weekend_learn,recover,"Plan a weekend where you learn something new, e.g. a cooking course, surfing or a creative camp.",calm,days,user
-step_by_step_checkin,act,Ask the person who needs help: "Could you walk me through exactly what you did, step by step, and tell me whether you used the docs at each step?",wired,minutes,agent
-holding_pattern_pause,act,Put a short pause on new requests for a couple of hours and send a quick status note to teammates/managers that you’re in a holding pattern to triage priorities.,exhausted,hours,agent
+step_by_step_checkin,act,"Ask the person who wants help to walk you through what they already tried, step by step, and which instructions they followed.",wired,minutes,agent
+holding_pattern_pause,act,"Pause new requests for a couple of hours and say when you will come back to them, so you can sort your priorities first.",exhausted,hours,agent
 abcde_prioritization,act,"Label each task from A (must do, serious consequences) to E (eliminate), and stop doing the low-impact ones.",exhausted;calm;wired,minutes,web:https://clickup.com/learn/topic/task-management/prioritization/abcde-method/
+pre_meeting_cue_card,act,"Write a one-line reminder that the other person may be under pressure themselves, and read it before you reply.",exhausted;calm;wired,minutes,agent
+brief_cognitive_reframe_cue,recover,"Say a short sentence to yourself in the moment, such as: I only need to respond now, not fix this.",exhausted;calm;wired,minutes,agent

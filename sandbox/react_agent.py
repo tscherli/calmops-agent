@@ -21,7 +21,9 @@ Tools:
 - find_measures: reads measures.csv, filtered by energy and goal
 - add_measure: appends a row to measures.csv (no approval step while testing in
   Studio; add one back before this reaches the app)
-- log_entry: appends a row to data/sandbox_mood_log.csv, never to the real log
+- log_entry: appends a row to data/sandbox_checkin_log.csv, never to the real log.
+  A check-in row (energy, confirmed circumstances, measure_id) is written only
+  once a measure is settled; a rating is a second row (measure_id, helpfulness)
 - suggestion_not_helpful: counts a rejected suggestion in the graph state
 - web_search: OpenAI's built-in search. It runs on OpenAI's side inside a model
   call, so it never shows up in the tools node.
@@ -46,8 +48,8 @@ os.environ["LANGSMITH_PROJECT"] = "job-load-agent-sandbox"
 MEASURES_FILE = Path(__file__).parent / "measures.csv"
 MEASURE_COLUMNS = ["measure_id", "type", "measure", "fits_energy", "effort", "source"]
 
-LOG_FILE = Path(__file__).parent.parent / "data" / "sandbox_mood_log.csv"
-LOG_COLUMNS = ["timestamp", "mood", "energy", "circumstances", "measure_id", "measure_taken", "helpfulness"]
+LOG_FILE = Path(__file__).parent.parent / "data" / "sandbox_checkin_log.csv"
+LOG_COLUMNS = ["timestamp", "energy", "circumstances", "measure_id", "measure_taken", "helpfulness"]
 
 SYSTEM_PROMPT = """You are a private companion for checking in about how work is going. You help \
 the user reflect briefly on how they are doing. You are not a therapist, you don't give medical or \
@@ -80,10 +82,17 @@ agrees, call add_measure, describing it in your own words in one short sentence,
 came from as source_url (empty for your own idea). The user approves or declines it once more.
 
 Logging:
-- When the user picks a measure to try, call log_entry with their mood, energy, a short \
-circumstances and the measure_id, and leave helpfulness empty.
-- Later, ask whether it helped: helped, somewhat, or didn't help. When they answer, call log_entry \
-again with the measure_id and the helpfulness.
+- Log nothing until the user has settled on a measure: one they said they will try, or one you just \
+added to their list.
+- When that happens, write one short sentence describing their situation in your own words and ask \
+them to confirm or correct it, for example: I'd note this: "..." - is that right?
+- The sentence describes only what is going on for them: what happened, who is involved, what it \
+does to them. It never mentions the measure, what they tried, or how it went - that is what the \
+measure_id and helpfulness columns are for.
+- Only once they have confirmed it, call log_entry with their energy, the confirmed sentence as \
+circumstances, and the measure_id. Leave helpfulness empty.
+- When they later say whether it helped, call log_entry again with only the measure_id and the \
+helpfulness (helped, somewhat or didnt_help), and nothing else.
 - For something the user did that isn't in the list, use measure_taken instead of measure_id.
 - Only log what the user said. Only say something was logged or added if the tool says so.
 
@@ -170,27 +179,33 @@ def add_measure(
 
 @tool
 def log_entry(
-    mood: Literal["bad", "neutral", "good", ""] = "",
     energy: Literal["exhausted", "calm", "wired", ""] = "",
     circumstances: str = "",
     measure_id: str = "",
     measure_taken: str = "",
     helpfulness: Literal["helped", "somewhat", "didnt_help", ""] = "",
 ) -> str:
-    """Append one entry to the user's mood log. Leave out anything the user didn't say.
+    """Append one row to the user's check-in log. One row per event, not per conversation.
 
-    measure_id: the id of a measure from find_measures.
-    measure_taken: something the user did that is not in the measure list.
-    helpfulness: only when the user said whether the measure helped.
+    The check-in row carries energy, the confirmed circumstances sentence and the
+    measure_id. A later rating is a second row with only measure_id and
+    helpfulness. Nothing is ever overwritten.
+
+    circumstances: the user's situation only - what happened and what it does to
+    them. Never what they tried or how it went.
+    measure_id: the id of a measure from find_measures; this is what they tried.
+    measure_taken: something they did that is not in the measure list.
+    helpfulness: how that measure went; only when the user said so. When this is
+    set the row is a rating, and energy and circumstances are left out.
     """
     if measure_id and measure_id not in {r["measure_id"] for r in read_measures()}:
         return f"Not logged: {measure_id} is not in the measure list. Use measure_taken for other things."
 
+    is_rating = bool(helpfulness)
     append_row(LOG_FILE, LOG_COLUMNS, {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "mood": mood,
-        "energy": energy,
-        "circumstances": circumstances,
+        "energy": "" if is_rating else energy,
+        "circumstances": "" if is_rating else circumstances,
         "measure_id": measure_id,
         "measure_taken": measure_taken,
         "helpfulness": helpfulness,
