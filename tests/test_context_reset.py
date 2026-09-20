@@ -11,8 +11,8 @@ import csv
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.stations import CARRIED_FIELDS, build_agent, next_turn_state, station_for
-from tests.test_agent_pipeline import StubChatModel
+from agent.graph import CARRIED_FIELDS, build_agent, next_turn_state, station_for
+from tests.conftest import StubChatModel
 from tools.measures import MEASURE_COLUMNS
 
 MEASURE_ROWS = [

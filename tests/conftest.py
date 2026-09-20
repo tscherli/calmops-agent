@@ -2,7 +2,7 @@
 
 **Tracing is force-disabled here, and that matters more than it looks.**
 `app.py` calls `load_dotenv()` at import time (it is an entry point, so it
-must). `tests/test_app.py` and `tests/test_quick_select.py` import it, which
+must). `tests/test_app.py` and `tests/test_tool_receipts.py` import it, which
 pulls the real `.env` into the test process -- including
 `LANGSMITH_TRACING=true`. Every `graph.invoke()` in the suite then tries to
 POST traces to LangSmith.
@@ -25,8 +25,13 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-a-real-key")
 
 import time
 import tkinter as tk
+from typing import Any
 
 import pytest
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from pydantic import Field
 
 
 def _new_root(attempts: int = 3) -> tk.Tk:
@@ -82,3 +87,49 @@ def tk_root():
     except tk.TclError:
         pass
     root.destroy()
+
+
+class StubChatModel(BaseChatModel):
+    """A scripted model that also records how it was bound.
+
+    Lives here rather than in one test module because nearly every graph test
+    needs it: a station is only testable if the model's next move can be
+    dictated, and the binding record is how "this station cannot suggest" is
+    checked without calling OpenAI.
+
+    `bind_calls` keeps every bind_tools call, not just the last. A real chat
+    model returns a new object per bind; this stub returns `self`, so the
+    graph's several bindings would otherwise overwrite each other.
+    """
+
+    responses: list[AIMessage]
+    call_count: int = 0
+    received_messages: list[list[BaseMessage]] = Field(default_factory=list)
+    bind_calls: list[list] = Field(default_factory=list)
+    tool_choices: list[Any] = Field(default_factory=list)
+
+    @property
+    def bound_tools(self) -> list:
+        """The primary binding -- what the model is actually called with."""
+        return self.bind_calls[0] if self.bind_calls else []
+
+    def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any):
+        self.bind_calls.append(list(tools))
+        self.tool_choices.append(tool_choice)
+        return self
+
+    def bind(self, **kwargs: Any):
+        return self
+
+    def with_structured_output(self, schema: Any, **kwargs: Any):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        self.received_messages.append(messages)
+        response = self.responses[min(self.call_count, len(self.responses) - 1)]
+        self.call_count += 1
+        return ChatResult(generations=[ChatGeneration(message=response)])
+
+    @property
+    def _llm_type(self) -> str:
+        return "stub-chat-model"

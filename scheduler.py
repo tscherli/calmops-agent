@@ -31,7 +31,7 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from agent.graph import tool_event
+from agent.common import tool_event
 from scheduler_config import Fire, SchedulerConfig, compute_next_fire, load_config
 from tools.log_query import analyze_stress_patterns
 
@@ -100,7 +100,7 @@ def _fallback_opener(summary: dict) -> str:
 def _default_model():
     from langchain_openai import ChatOpenAI
 
-    from agent.graph import DEFAULT_MODEL
+    from agent.model import DEFAULT_MODEL
 
     return ChatOpenAI(model=DEFAULT_MODEL)
 

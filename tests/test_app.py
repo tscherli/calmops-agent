@@ -1,7 +1,7 @@
 """Tests for app.py's ChatApp: crisis-gate wiring (must intercept before
 the agent ever runs), graceful exception handling (no unhandled exception
-may reach the Tkinter UI), and consent-screen gating. Quick-select button
-wiring is tests/test_quick_select.py's job, not this file's."""
+may reach the Tkinter UI), and consent-screen gating. How a turn's receipts
+and carried state are drawn is tests/test_tool_receipts.py's job."""
 import json
 import time
 import tkinter as tk

@@ -1,23 +1,26 @@
 """The eval harness's target function: runs one eval case through the same
 production pipeline as app.py -- agent/safety.py's crisis gate first, then
-the real agent -- for as many turns as the case provides, accumulating one
+the station graph -- for as many turns as the case provides, accumulating one
 continuous conversation.
 
 agent_graph is injectable (same dependency-injection-for-testability
-pattern used throughout this project: tools/csv_log.py's `path`,
+pattern used throughout this project: tools/checkin_log.py's `path`,
 agent/graph.py's `model`/`tools`, app.py's `agent_graph`/`recorder`) so
 tests can stub it without a real OpenAI call.
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
-from agent.graph import build_agent, compact_spent_tool_messages, message_text
+from agent.common import message_text
+from agent.graph import build_agent, next_turn_state
 from agent.safety import screen_for_crisis
+from tools.measures import MEASURES_PATH
 
 # Role vocabulary must match dataset.jsonl's hand-authored reference_trajectory
 # entries exactly ("human"/"ai"/"tool") -- agentevals' structural comparison
@@ -60,55 +63,29 @@ def serialize_messages(messages: list[BaseMessage]) -> list[dict]:
     return result
 
 
-def _content_str(content: Any) -> str:
-    return content if isinstance(content, str) else str(content)
-
-
 def _isolated_log_path() -> Path:
-    """A throwaway mood log for one eval case.
+    """A throwaway check-in log for one eval case.
 
-    Two reasons this must never default to the real data/mood_log.csv:
-    a run would inject 28 fabricated entries into the user's personal log,
-    and -- since the stage-14 redesign classifies every entry -- those
-    fixtures would also enter `known_tags`, nudging future *real*
-    classifications toward vocabulary invented by test data.
+    This must never default to the real data/checkin_log.csv: a run would
+    inject dozens of fabricated rows into the user's own log, and the weekly
+    digest reads that file.
 
-    Fresh per case, so cases can't see each other's entries and results
-    don't depend on execution order. Cases that need seeded history pass
-    their own prepared `log_path` instead.
+    Fresh per case, so cases can't see each other's rows and results don't
+    depend on execution order.
     """
-    return Path(tempfile.mkdtemp(prefix="joblog-eval-")) / "mood_log.csv"
+    return Path(tempfile.mkdtemp(prefix="joblog-eval-")) / "checkin_log.csv"
 
 
-def _seeded_log_path(seed_entries: list[dict]) -> Path:
-    """An isolated log pre-populated with fixture entries.
+def _isolated_measures_path() -> Path:
+    """A per-case copy of the curated measure list.
 
-    Needed for any case about *history*: "have I dealt with this before?",
-    whether the agent overstates a loose match, and whether instruction-like
-    text sitting in a past entry gets obeyed when the history lookup
-    surfaces it. Without seeding, every eval case runs against an empty log
-    and none of that is reachable.
-
-    Written through the real append_mood_row so fixtures go through exactly
-    the same schema and tag encoding as production rows.
+    `add_measure` writes to this file, so a shared one would let an eval run
+    grow the user's real list -- and every later conversation reads it back.
+    A copy rather than an empty file, because the cases are about choosing
+    from the real list.
     """
-    from tools.csv_log import append_mood_row
-
-    path = Path(tempfile.mkdtemp(prefix="joblog-evalseed-")) / "mood_log.csv"
-    for entry in seed_entries:
-        append_mood_row(
-            mood=entry.get("mood", "neutral"),
-            circumstances=entry.get("circumstances", ""),
-            energy=entry.get("energy") or None,
-            measure_taken=entry.get("measure_taken") or None,
-            helpfulness=entry.get("helpfulness") or None,
-            situation=entry.get("situation") or None,
-            thoughts=entry.get("thoughts") or None,
-            need=entry.get("need") or None,
-            next_step=entry.get("next_step") or None,
-            tags=entry.get("tags") or None,
-            path=path,
-        )
+    path = Path(tempfile.mkdtemp(prefix="joblog-evalmeasures-")) / "measures.csv"
+    shutil.copyfile(MEASURES_PATH, path)
     return path
 
 
@@ -120,10 +97,16 @@ def _unwritable_log_path() -> Path:
     directory = Path(tempfile.mkdtemp(prefix="joblog-evalfail-"))
     blocker = directory / "not-a-directory"
     blocker.write_text("blocks the write below", encoding="utf-8")
-    return blocker / "mood_log.csv"
+    return blocker / "checkin_log.csv"
 
 
-def run_case(inputs: dict, *, agent_graph: Any = None, log_path: Path | None = None) -> dict:
+def run_case(
+    inputs: dict,
+    *,
+    agent_graph: Any = None,
+    log_path: Path | None = None,
+    measures_path: Path | None = None,
+) -> dict:
     """The function LangSmith's evaluate() calls once per Example (and the
     same logic run_baseline.py's no-tools comparison is built against).
 
@@ -139,30 +122,32 @@ def run_case(inputs: dict, *, agent_graph: Any = None, log_path: Path | None = N
         graph = agent_graph
     else:
         if log_path is None:
-            if inputs.get("simulate_write_failure"):
-                log_path = _unwritable_log_path()
-            elif inputs.get("seed_entries"):
-                log_path = _seeded_log_path(inputs["seed_entries"])
-            else:
-                log_path = _isolated_log_path()
-        graph = build_agent(log_path=log_path)
+            log_path = (
+                _unwritable_log_path()
+                if inputs.get("simulate_write_failure")
+                else _isolated_log_path()
+            )
+        if measures_path is None:
+            measures_path = _isolated_measures_path()
+        graph = build_agent(log_path=log_path, measures_path=measures_path)
 
-    messages: list[BaseMessage] = []
-    # Conversation state must be carried here exactly as app.py does. Passing
-    # only `messages` resets current_step every turn, so every turn re-enters
-    # at `triage`, the resumable states become unreachable, and the suite
-    # measures a system the application never runs. That defect produced a
-    # full run of plausible-looking but meaningless numbers -- see
-    # DEVELOPMENT_LOG.md, stage 26.
-    current_step = ""
-    scale_values: dict[str, str] = {}
+    # Conversation state must be carried here exactly as app.py does, and
+    # through the same function: passing only `messages` would reset the
+    # station fields every turn, so the graph would re-ask for energy and goal
+    # forever and the suite would measure a system the application never runs.
+    # That defect produced a full run of plausible-looking but meaningless
+    # numbers once already -- see DEVELOPMENT_LOG.md, stage 26.
+    state: dict[str, Any] = {"messages": []}
     transcript: list[BaseMessage] = []
     # Machine-set records of what each tool actually did, accumulated across
     # the case's turns. The evaluators grade against these rather than
     # against what the reply claims -- see evals/evaluators.py.
     tool_events: list[dict] = []
 
-    for turn_text in inputs["turns"]:
+    for turn in inputs["turns"]:
+        turn_text, extra = (turn, {}) if isinstance(turn, str) else (turn["text"], dict(turn))
+        extra.pop("text", None)
+
         crisis = screen_for_crisis(turn_text)
         if crisis.triggered:
             return {
@@ -171,14 +156,12 @@ def run_case(inputs: dict, *, agent_graph: Any = None, log_path: Path | None = N
                 "matched_pattern": crisis.matched_pattern,
                 "tool_events": tool_events,
             }
-        messages_before = messages + [HumanMessage(content=turn_text)]
-        result = graph.invoke(
-            {
-                "messages": messages_before,
-                "current_step": current_step,
-                "scale_values": dict(scale_values),
-            }
-        )
+        messages_before = list(state.get("messages") or []) + [HumanMessage(content=turn_text)]
+        # `extra` carries what the UI's buttons would put in the payload
+        # (`rejected`, `idea`, `energy`, `goal`), so a case can exercise a
+        # click without the harness pretending to be Tkinter.
+        result = graph.invoke({**state, **extra, "messages": messages_before})
+
         # Accumulate only what this turn newly produced. The transcript must
         # keep growing across a context reset, or everything said before the
         # reset silently vanishes from grading -- the evaluators judge the
@@ -188,18 +171,7 @@ def run_case(inputs: dict, *, agent_graph: Any = None, log_path: Path | None = N
         transcript.extend(produced)
 
         tool_events.extend(result.get("tool_events") or [])
-
-        messages = result["messages"]
-        current_step = result.get("current_step", "") or ""
-
-        if not current_step:
-            # Check-in complete: app.py clears the buffer here, because the
-            # durable memory is the CSV. Mirrored so the harness does not
-            # quietly give the agent more context than it has in production.
-            messages = []
-            scale_values = {}
-        else:
-            messages = compact_spent_tool_messages(messages)
+        state = next_turn_state(result)
 
     return {
         "messages": serialize_messages(transcript),

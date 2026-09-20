@@ -1,245 +1,246 @@
-"""Tests for evals/target.py: crisis gate short-circuit, message
-serialization, and multi-turn accumulation -- all stubbed, no real OpenAI
-call (same dependency-injection pattern as tests/test_app.py)."""
+"""Tests for evals/target.py -- the harness that drives one eval case.
+
+The guarantee this module exists for: **the harness runs the same system the
+application runs.** It drifted from app.py once, by carrying conversation
+state differently, and the result was a full eval run of plausible-looking
+numbers that measured nothing (DEVELOPMENT_LOG.md, stage 26). Both sides now
+go through next_turn_state, and that is asserted here rather than trusted.
+
+The second guarantee is data safety: an eval run must not touch the user's
+own check-in log or grow their measure list.
+"""
+import csv
+from pathlib import Path
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from evals.target import run_case, serialize_messages
-
-
-class _PoisonGraph:
-    def invoke(self, *args, **kwargs):
-        raise AssertionError("must never invoke the agent graph")
+from tools.measures import MEASURE_COLUMNS
 
 
 class _StubGraph:
-    def __init__(self, reply_content="Stub reply", tool_call=False, current_step=""):
+    """Records every payload it is handed, and echoes a final state back."""
+
+    def __init__(self, reply_content="Stub reply", tool_call=False, final_state=None):
         self.reply_content = reply_content
         self.tool_call = tool_call
-        # "" means the check-in finished this turn; anything else means the
-        # conversation is still open and should be resumed on the next turn.
-        self.current_step = current_step
-        self.calls = []
+        self.final_state = final_state or {}
+        self.calls: list[dict] = []
 
     def invoke(self, payload):
         self.calls.append(payload)
         messages = list(payload["messages"])
         if self.tool_call:
             messages.append(
-                AIMessage(content="", tool_calls=[{"name": "log_mood", "args": {"valence": "good"}, "id": "1"}])
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "log_checkin", "args": {"energy": "wired"}, "id": "1"}],
+                )
             )
-            messages.append(ToolMessage(content="ok", name="log_mood", status="success", tool_call_id="1"))
+            messages.append(
+                ToolMessage(content="ok", name="log_checkin", status="success", tool_call_id="1")
+            )
         messages.append(AIMessage(content=self.reply_content))
-        return {"messages": messages, "current_step": self.current_step}
+        return {**self.final_state, "messages": messages}
+
+
+# -- the crisis gate runs before the agent, exactly as app.py does -----------
 
 
 def test_crisis_case_never_invokes_agent():
-    result = run_case({"turns": ["I want to kill myself"]}, agent_graph=_PoisonGraph())
+    stub = _StubGraph()
+
+    result = run_case({"turns": ["I want to kill myself"]}, agent_graph=stub)
 
     assert result["crisis_intercepted"] is True
-    assert result["messages"] == []
-    assert result["matched_pattern"] is not None
-
-
-def test_non_crisis_case_invokes_agent_and_serializes_messages():
-    stub = _StubGraph(reply_content="Sounds good.", tool_call=True)
-
-    result = run_case({"turns": ["feeling good today"]}, agent_graph=stub)
-
-    assert result["crisis_intercepted"] is False
-    roles = [m["role"] for m in result["messages"]]
-    assert roles == ["human", "ai", "tool", "ai"]
-    assert result["messages"][1]["tool_calls"] == [{"name": "log_mood", "args": {"valence": "good"}}]
-    assert result["messages"][2]["status"] == "success"
-    assert result["messages"][-1]["content"] == "Sounds good."
-
-
-def test_multi_turn_accumulates_while_the_conversation_is_open():
-    """A conversation still in a state carries its history forward, so the
-    agent sees what was already said."""
-    stub = _StubGraph(reply_content="ok", current_step="structuring")
-
-    result = run_case({"turns": ["hi", "still not great"]}, agent_graph=stub)
-
-    assert len(stub.calls) == 2
-    assert len(stub.calls[1]["messages"]) == 3  # human, ai, + new human
-    roles = [m["role"] for m in result["messages"]]
-    assert roles == ["human", "ai", "human", "ai"]
-
-
-def test_conversation_state_is_carried_between_turns():
-    """The defect that made a whole eval run meaningless: passing only
-    `messages` reset current_step every turn, so the suite never reached the
-    resumable states and measured a system app.py does not run."""
-    stub = _StubGraph(reply_content="ok", current_step="awaiting_scale")
-
-    run_case({"turns": ["quiet morning", "mood: good, energy: calm"]}, agent_graph=stub)
-
-    assert stub.calls[0]["current_step"] == ""            # fresh conversation
-    assert stub.calls[1]["current_step"] == "awaiting_scale"  # resumed, not re-triaged
-    assert "scale_values" in stub.calls[1]
-
-
-def test_context_resets_once_a_check_in_completes():
-    """app.py clears the buffer when current_step goes empty, because the
-    durable memory is the CSV. The harness mirrors that, so it cannot quietly
-    hand the agent more context than it has in production."""
-    stub = _StubGraph(reply_content="ok", current_step="")
-
-    result = run_case({"turns": ["hi", "second check-in"]}, agent_graph=stub)
-
-    # turn 2 starts clean: just the new human message
-    assert len(stub.calls[1]["messages"]) == 1
-    # ...but the graded transcript still holds BOTH turns. Getting this wrong
-    # silently drops everything before the reset from grading.
-    roles = [m["role"] for m in result["messages"]]
-    assert roles == ["human", "ai", "human", "ai"]
-    assert result["messages"][2]["content"] == "second check-in"
+    assert stub.calls == []
 
 
 def test_multi_turn_stops_at_crisis_mid_conversation():
-    stub = _StubGraph(reply_content="ok")
+    stub = _StubGraph()
 
-    result = run_case({"turns": ["hi", "I want to end it all"]}, agent_graph=stub)
+    result = run_case(
+        {"turns": ["busy week", "I want to end my life", "never mind"]}, agent_graph=stub
+    )
 
     assert result["crisis_intercepted"] is True
-    assert len(stub.calls) == 1  # second turn never reached the agent
+    assert len(stub.calls) == 1
+
+
+def test_non_crisis_case_invokes_agent_and_serializes_messages():
+    stub = _StubGraph(reply_content="Tell me more.", tool_call=True)
+
+    result = run_case({"turns": ["quiet morning"]}, agent_graph=stub)
+
     roles = [m["role"] for m in result["messages"]]
-    assert roles == ["human", "ai"]  # only the first turn's accumulated messages
+    assert roles == ["human", "ai", "tool", "ai"]
+    assert result["messages"][1]["tool_calls"] == [{"name": "log_checkin", "args": {"energy": "wired"}}]
+    assert result["crisis_intercepted"] is False
 
 
-def test_eval_runs_never_write_to_the_real_mood_log(monkeypatch, tmp_path):
-    """A run would otherwise inject 28 fabricated entries into the user's
-    personal log -- and since the redesign classifies every entry, those
-    fixtures would also enter known_tags and nudge future real
-    classifications toward test vocabulary."""
-    import tools.csv_log as csv_log_module
+# -- conversation state is carried the way the application carries it --------
 
-    real_log = tmp_path / "real_mood_log.csv"
-    monkeypatch.setattr(csv_log_module, "LOG_PATH", real_log)
 
+def test_the_station_fields_are_carried_between_turns():
+    """Passing only `messages` would reset energy and goal every turn, so the
+    agent would re-ask for them forever and the suite would grade a system
+    nobody runs."""
+    stub = _StubGraph(final_state={"energy": "wired", "goal": "calm down now",
+                                   "offered": ["short_walk"], "step": "follow_up"})
+
+    run_case({"turns": ["I'm wired", "what else?"]}, agent_graph=stub)
+
+    assert stub.calls[0].get("energy") is None
+    assert stub.calls[1]["energy"] == "wired"
+    assert stub.calls[1]["offered"] == ["short_walk"]
+
+
+def test_context_resets_once_a_check_in_completes():
+    """The durable memory is the CSV, so the next conversation starts cold --
+    and `offered` must go with the transcript, or the next sentence lands in
+    follow_up with nothing to follow up on."""
+    stub = _StubGraph(final_state={"complete": True, "energy": "wired",
+                                   "offered": ["short_walk"]})
+
+    run_case({"turns": ["that helped", "hello again"]}, agent_graph=stub)
+
+    assert stub.calls[1]["energy"] is None
+    assert stub.calls[1]["offered"] == []
+    assert len(stub.calls[1]["messages"]) == 1
+
+
+def test_the_transcript_keeps_growing_across_a_reset():
+    """`messages` is only the agent's working context; the evaluators judge
+    the whole case. Everything said before a reset must still be graded."""
+    stub = _StubGraph(reply_content="ok", final_state={"complete": True})
+
+    result = run_case({"turns": ["first", "second"]}, agent_graph=stub)
+
+    contents = [m["content"] for m in result["messages"]]
+    assert contents == ["first", "ok", "second", "ok"]
+
+
+def test_a_turn_can_carry_what_a_button_click_would_put_in_the_payload():
+    """Three of the UI's controls write straight into the payload rather than
+    going through the model. A case that cannot express a click cannot cover
+    the rejection path at all."""
+    stub = _StubGraph()
+
+    run_case(
+        {"turns": ["I'm wired", {"text": "no", "rejected": True}]},
+        agent_graph=stub,
+    )
+
+    assert stub.calls[1]["rejected"] is True
+    assert stub.calls[1]["messages"][-1].content == "no"
+
+
+# -- data safety -------------------------------------------------------------
+
+
+def test_eval_runs_never_write_to_the_real_check_in_log(monkeypatch):
+    """A run would otherwise inject dozens of fabricated rows into the user's
+    own log -- which the weekly digest then reads."""
     captured = {}
 
-    def fake_build_agent(*, log_path=None, **kwargs):
-        captured["log_path"] = log_path
-        return _StubGraph(tool_call=True)
-
-    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
-
-    run_case({"turns": ["feeling good today"]})
-
-    assert captured["log_path"] is not None, "run_case must pass an explicit log path"
-    assert captured["log_path"] != real_log
-    assert not real_log.exists()
-
-
-def test_simulate_write_failure_flag_produces_a_genuinely_unwritable_path(monkeypatch):
-    """hard_tool_failure_10 claimed for several stages that the harness
-    simulated a write failure. It never did -- the case passed on an
-    ordinary successful write. This asserts the simulation is real."""
-    from tools.csv_log import append_mood_row
-
-    captured = {}
-
-    def fake_build_agent(*, log_path=None, **kwargs):
-        captured["log_path"] = log_path
-        return _StubGraph(tool_call=True)
-
-    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
-
-    run_case({"turns": ["standard day"], "simulate_write_failure": True})
-
-    result = append_mood_row(mood="good", circumstances="x", path=captured["log_path"])
-    assert result["status"] == "error", "the simulated path must actually fail to write"
-
-
-def test_seed_entries_prepopulate_an_isolated_log(monkeypatch):
-    """History cases ("have I dealt with this before?", overstating a loose
-    match, instruction-like text inside a past entry) are unreachable
-    without seeded history -- every case otherwise runs on an empty log."""
-    import csv
-
-    captured = {}
-
-    def fake_build_agent(*, log_path=None, **kwargs):
-        captured["log_path"] = log_path
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
         return _StubGraph()
 
     monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
+    run_case({"turns": ["quiet morning"]})
 
-    run_case(
-        {
-            "turns": ["crunch week again"],
-            "seed_entries": [
-                {
-                    "mood": "bad",
-                    "circumstances": "three deadlines at once",
-                    "measure_taken": "asked for an extension",
-                    "helpfulness": "helped a lot",
-                    "tags": ["multiple_deadlines"],
-                }
-            ],
-        }
-    )
-
-    seeded = captured["log_path"]
-    with seeded.open(newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-
-    assert len(rows) == 1
-    assert rows[0]["circumstances"] == "three deadlines at once"
-    assert rows[0]["measure_taken"] == "asked for an extension"
-    assert rows[0]["tags"] == "multiple_deadlines"
+    log_path = Path(captured["log_path"])
+    assert log_path.name == "checkin_log.csv"
+    assert "data" not in log_path.parts
+    assert not log_path.exists()
 
 
-def test_seeded_entries_are_findable_by_the_history_lookup(monkeypatch):
-    """Seeding is only useful if find_similar_entries can actually match it,
-    so this asserts the join works end to end rather than just the write."""
-    from tools.log_query import find_similar_entries
+def test_eval_runs_get_their_own_copy_of_the_measure_list(monkeypatch):
+    """add_measure writes to this file and find_measures reads it back in
+    every later conversation. A shared one would let an eval run grow the
+    user's real list, permanently and silently."""
+    captured = {}
+
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
+        return _StubGraph()
+
+    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
+    run_case({"turns": ["quiet morning"]})
+
+    measures_path = Path(captured["measures_path"])
+    assert measures_path.name == "measures.csv"
+    assert measures_path.parent != Path("tools").resolve()
+    with measures_path.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows and list(rows[0]) == MEASURE_COLUMNS
+
+
+def test_each_case_gets_a_fresh_measure_copy(monkeypatch):
+    """Cases must not see each other's added measures, or results depend on
+    execution order."""
+    seen = []
+
+    def fake_build_agent(**kwargs):
+        seen.append(kwargs["measures_path"])
+        return _StubGraph()
+
+    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
+    run_case({"turns": ["a"]})
+    run_case({"turns": ["b"]})
+
+    assert seen[0] != seen[1]
+
+
+def test_simulate_write_failure_flag_produces_a_genuinely_unwritable_path(monkeypatch):
+    """The honesty-under-failure case has to fail for real, not be mocked."""
+    from tools.checkin_log import append_checkin_row
 
     captured = {}
-    monkeypatch.setattr(
-        "evals.target.build_agent",
-        lambda *, log_path=None, **kw: captured.setdefault("log_path", log_path) and None or _StubGraph(),
-    )
 
-    run_case(
-        {
-            "turns": ["again"],
-            "seed_entries": [
-                {"mood": "bad", "circumstances": "deadline crunch", "tags": ["multiple_deadlines"]}
-            ],
-        }
-    )
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
+        return _StubGraph()
 
-    found = find_similar_entries(["multiple_deadlines"], path=captured["log_path"])
-    assert [e["circumstances"] for e in found] == ["deadline crunch"]
+    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
+    run_case({"turns": ["rough day"], "simulate_write_failure": True})
+
+    result = append_checkin_row(
+        energy="wired", circumstances="x", measure_id="m01", path=captured["log_path"]
+    )
+    assert result["status"] == "error"
 
 
 def test_explicit_log_path_is_respected(monkeypatch, tmp_path):
     captured = {}
 
-    def fake_build_agent(*, log_path=None, **kwargs):
-        captured["log_path"] = log_path
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
         return _StubGraph()
 
     monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
-    chosen = tmp_path / "seeded.csv"
-
-    run_case({"turns": ["hi"]}, log_path=chosen)
+    chosen = tmp_path / "chosen.csv"
+    run_case({"turns": ["quiet morning"]}, log_path=chosen)
 
     assert captured["log_path"] == chosen
 
 
+# -- serialization -----------------------------------------------------------
+
+
 def test_serialize_messages_role_vocabulary():
+    """The vocabulary has to match dataset.jsonl's hand-authored reference
+    trajectories exactly; agentevals only compares strings."""
     messages = [
         HumanMessage(content="hi"),
-        AIMessage(content="", tool_calls=[{"name": "log_mood", "args": {}, "id": "1"}]),
-        ToolMessage(content="ok", name="log_mood", status="success", tool_call_id="1"),
+        AIMessage(content="", tool_calls=[{"name": "log_checkin", "args": {}, "id": "1"}]),
+        ToolMessage(content="ok", name="log_checkin", status="success", tool_call_id="1"),
         AIMessage(content="done"),
     ]
 
     result = serialize_messages(messages)
 
     assert [m["role"] for m in result] == ["human", "ai", "tool", "ai"]
-    assert result[1]["tool_calls"] == [{"name": "log_mood", "args": {}}]
-    assert result[3]["tool_calls"] is None
+    assert result[1]["tool_calls"] == [{"name": "log_checkin", "args": {}}]
+    assert result[2]["name"] == "log_checkin"

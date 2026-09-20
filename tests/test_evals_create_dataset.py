@@ -9,7 +9,7 @@ _SIMPLE_CASE = {
     "difficulty": "simple",
     "category": "light_checkin",
     "expected_behavior": "Logs directly, no clarifying questions.",
-    "reference_trajectory": [{"role": "human"}, {"role": "ai", "tool_calls": [{"name": "log_mood"}]}],
+    "reference_trajectory": [{"role": "human"}, {"role": "ai", "tool_calls": [{"name": "log_checkin"}]}],
 }
 
 _MULTITURN_CASE = {

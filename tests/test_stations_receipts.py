@@ -11,8 +11,8 @@ import csv
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agent.stations import build_agent
-from tests.test_agent_pipeline import StubChatModel
+from agent.graph import build_agent
+from tests.conftest import StubChatModel
 from tools.measures import MEASURE_COLUMNS
 
 MEASURE_ROWS = [

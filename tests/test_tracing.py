@@ -30,11 +30,11 @@ def test_summarize_turn_sums_across_multiple_ai_messages_in_tool_calling_turn():
     messages_before = [HumanMessage(content="exhausted after back-to-back meetings")]
     tool_call_message = AIMessage(
         content="",
-        tool_calls=[{"name": "log_mood", "args": {"valence": "bad"}, "id": "call_1", "type": "tool_call"}],
+        tool_calls=[{"name": "log_checkin", "args": {"valence": "bad"}, "id": "call_1", "type": "tool_call"}],
         usage_metadata={"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
     )
     tool_result_message = ToolMessage(
-        content='{"status": "ok"}', name="log_mood", tool_call_id="call_1", status="success"
+        content='{"status": "ok"}', name="log_checkin", tool_call_id="call_1", status="success"
     )
     final_reply = AIMessage(
         content="Logged it. That sounds draining.",
@@ -48,15 +48,15 @@ def test_summarize_turn_sums_across_multiple_ai_messages_in_tool_calling_turn():
     assert record.output_tokens == 13  # 5 + 8
     assert record.total_tokens == 63
     assert len(record.tool_calls) == 1
-    assert record.tool_calls[0].name == "log_mood"
+    assert record.tool_calls[0].name == "log_checkin"
     assert record.tool_calls[0].status == "success"
 
 
 def test_summarize_turn_captures_tool_error_status():
     messages_before = [HumanMessage(content="log this")]
     messages_after = messages_before + [
-        AIMessage(content="", tool_calls=[{"name": "log_mood", "args": {}, "id": "call_1", "type": "tool_call"}]),
-        ToolMessage(content="disk error", name="log_mood", tool_call_id="call_1", status="error"),
+        AIMessage(content="", tool_calls=[{"name": "log_checkin", "args": {}, "id": "call_1", "type": "tool_call"}]),
+        ToolMessage(content="disk error", name="log_checkin", tool_call_id="call_1", status="error"),
         AIMessage(content="That didn't save -- disk error."),
     ]
 

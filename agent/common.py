@@ -133,7 +133,7 @@ def pending_tool_calls(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
 
 
 def compact_spent_tool_messages(
-    messages: list[BaseMessage], tool_names: Sequence[str] = ("log_mood",), limit: int = 200
+    messages: list[BaseMessage], tool_names: Sequence[str] = ("find_measures",), limit: int = 200
 ) -> list[BaseMessage]:
     """Shrink already-used tool results to a marker.
 

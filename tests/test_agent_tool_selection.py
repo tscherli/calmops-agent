@@ -1,242 +1,191 @@
-"""Tests for agent/graph.py's tool-wiring plumbing: given a scripted model
-response, does the graph actually call the right tool with the right args,
-skip the tool when it shouldn't, and does the system prompt actually reach
-the model? This is NOT a test of real LLM judgment quality (light-vs-deep
-structuring, clarifying-question behavior, etc.) -- that's the eval suite's
-job (stage 9), run against the real OpenAI API. Everything here uses a
-scripted stub model and a stub tool, so it's fast, free, and deterministic.
+"""What the model is allowed to reach, what it is forced to reach, and how
+many times it is called.
+
+The binding matrix itself is tests/test_stations.py's job. This module covers
+the three things around it that fail silently:
+
+- **forcing.** `suggest` must call find_measures before it may present
+  anything, so a suggestion can never bypass the user's own list. A dropped
+  `tool_choice` looks exactly like a model that happened to comply.
+- **the kill switch.** With web search off, the tool must be unbound
+  *everywhere* and `web_search_ideas` must also stop forcing it -- forcing a
+  tool that is not bound is a 400 from the provider, i.e. a broken turn, at
+  the exact moment the user has just said nothing helped.
+- **the model-call budget.** If a tool's state update is lost, the graph
+  loops station -> tools -> station until the recursion limit, and the user
+  sees only the same question again. Counting calls is what makes that loud.
 """
-from typing import Any, Optional
+import csv
 
 import pytest
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from langchain_core.tools import tool
-from pydantic import Field
+from langchain_core.messages import AIMessage, HumanMessage
 
 from agent.graph import build_agent
-from agent.prompts import BASE_PROMPT, SCALE_QUESTION, STATE_PROMPTS
+from tests.conftest import StubChatModel
+from tools.measures import MEASURE_COLUMNS
+
+MEASURE_ROWS = [
+    ("short_walk", "recover", "Walk for five minutes.", "exhausted;wired", "minutes", "user"),
+    ("breathe", "recover", "Take a few slow breaths.", "exhausted;calm;wired", "minutes", "user"),
+]
 
 
-class StubChatModel(BaseChatModel):
-    """Scripted fake chat model: returns pre-built AIMessages in order and
-    records every message list it was called with, so tests can assert on
-    both the tool-calling behavior and what the model actually received."""
-
-    responses: list[AIMessage]
-    call_count: int = 0
-    received_messages: list[list[BaseMessage]] = Field(default_factory=list)
-
-    def bind_tools(self, tools: Any, *, tool_choice: Optional[str] = None, **kwargs: Any):
-        # Real chat models validate/attach tool schemas here; the stub
-        # ignores them since its responses are already scripted.
-        return self
-
-    def bind(self, **kwargs: Any):
-        # Per-state reasoning_effort binding is a no-op for a scripted stub.
-        return self
-
-    def with_structured_output(self, schema: Any, **kwargs: Any):
-        # The graph falls back to reading plain text when a model returns
-        # something other than the schema, which is what a stub does.
-        return self
-
-    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
-        self.received_messages.append(messages)
-        response = self.responses[min(self.call_count, len(self.responses) - 1)]
-        self.call_count += 1
-        return ChatResult(generations=[ChatGeneration(message=response)])
-
-    @property
-    def _llm_type(self) -> str:
-        return "stub-chat-model"
+@pytest.fixture
+def measures_file(tmp_path):
+    path = tmp_path / "measures.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerows(MEASURE_ROWS)
+    return path
 
 
-def _make_stub_tool():
-    """A stub log_mood replacement that records calls instead of touching
-    the local CSV log -- keeps this test file independent of tests/test_csv_log.py."""
-    calls: list[dict] = []
-
-    @tool
-    def stub_log_mood(
-        mood: str,
-        circumstances: str,
-        energy: str = "",
-        measure_taken: str = "",
-        helpfulness: str = "",
-        situation: str = "",
-        thoughts: str = "",
-        need: str = "",
-        next_step: str = "",
-    ) -> dict:
-        """Stub log_mood for testing agent graph wiring.
-
-        Deliberately NOT named `log_mood`: that name triggers the graph's
-        deterministic classify/write/history pipeline (see
-        tests/test_agent_pipeline.py, which covers that path). This file is
-        only about generic tool-call wiring, so it uses a plain tool name
-        that routes through the ordinary tools node.
-        """
-        calls.append(
-            {
-                "mood": mood,
-                "circumstances": circumstances,
-                "energy": energy,
-            }
-        )
-        return {"status": "ok", "row_id": "stub-row-id"}
-
-    return stub_log_mood, calls
+def user(text):
+    return HumanMessage(content=text)
 
 
-def test_agent_calls_tool_when_model_requests_it():
-    tool_call_response = AIMessage(
+def _ready(**extra):
+    """A state that routes straight to suggest: both answers in, nothing shown."""
+    return {"energy": "wired", "goal": "calm down now", "offered": [], **extra}
+
+
+def _names(tools):
+    return {getattr(t, "name", None) or t.get("type") for t in tools}
+
+
+# -- forcing the lookup ------------------------------------------------------
+
+
+def test_exactly_one_binding_forces_the_measure_lookup(measures_file):
+    """Without a fresh result the model does not get the option of skipping
+    the user's own list -- which is the whole reason the list exists.
+
+    Asserted on the bindings rather than on a turn, because every binding is
+    built once in build_agent and this stub returns itself from bind_tools,
+    so which bound object a station invoked is not observable from here.
+    """
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    build_agent(model=model, measures_path=measures_file)
+
+    assert model.tool_choices.count("find_measures") == 1
+
+
+def test_the_lookup_is_not_repeated_once_a_result_is_on_the_table(measures_file):
+    """Still forcing after the lookup and the station would call it forever;
+    every turn would also cost two model calls instead of one."""
+    lookup = AIMessage(
         content="",
-        tool_calls=[
-            {
-                "name": "stub_log_mood",
-                "args": {"mood": "good", "circumstances": "quiet day"},
-                "id": "call_1",
-                "type": "tool_call",
-            }
-        ],
+        tool_calls=[{"name": "find_measures", "args": {}, "id": "c1", "type": "tool_call"}],
     )
-    final_response = AIMessage(content="Logged that -- glad it's a quiet one.")
-    model = StubChatModel(responses=[tool_call_response, final_response])
-    stub_tool, calls = _make_stub_tool()
+    model = StubChatModel(responses=[lookup, AIMessage(content="try a short walk")])
+    graph = build_agent(model=model, measures_path=measures_file)
 
-    graph = build_agent(model=model, tools=[stub_tool])
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="feeling good, quiet day")], "current_step": "post_log"}
-    )
+    result = graph.invoke({**_ready(), "messages": [user("what should I do")]})
 
-    assert calls == [{"mood": "good", "circumstances": "quiet day", "energy": ""}]
-    assert result["messages"][-1].content == "Logged that -- glad it's a quiet one."
-    assert not result["messages"][-1].tool_calls
-
-
-def test_agent_skips_tool_for_plain_reply():
-    model = StubChatModel(
-        responses=[AIMessage(content="Sounds like a good one, glad to hear it!")]
-    )
-    stub_tool, calls = _make_stub_tool()
-
-    graph = build_agent(model=model, tools=[stub_tool])
-    result = graph.invoke(
-        {"messages": [HumanMessage(content="hey, how's your day going?")], "current_step": "post_log"}
-    )
-
-    assert calls == []
-    assert result["messages"][-1].content == "Sounds like a good one, glad to hear it!"
-
-
-def test_energy_arg_reaches_tool_when_model_includes_it():
-    tool_call_response = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "stub_log_mood",
-                "args": {
-                    "mood": "bad",
-                    "circumstances": "exhausted after back-to-back meetings",
-                    "energy": "exhausted",
-                },
-                "id": "call_1",
-                "type": "tool_call",
-            }
-        ],
-    )
-    final_response = AIMessage(content="Logged it. That sounds draining.")
-    model = StubChatModel(responses=[tool_call_response, final_response])
-    stub_tool, calls = _make_stub_tool()
-
-    graph = build_agent(model=model, tools=[stub_tool])
-    graph.invoke(
-        {
-            "messages": [HumanMessage(content="exhausted after back-to-back meetings")],
-            "current_step": "post_log",
-        }
-    )
-
-    assert calls == [
-        {
-            "mood": "bad",
-            "circumstances": "exhausted after back-to-back meetings",
-            "energy": "exhausted",
-        }
+    lookups = [
+        call
+        for message in result["messages"]
+        for call in (getattr(message, "tool_calls", None) or [])
+        if call["name"] == "find_measures"
     ]
+    assert len(lookups) == 1
+    assert model.call_count == 2
 
 
-def test_base_prompt_reaches_every_state():
-    """Scope, honesty and untrusted-output rules are shared, so each state's
-    prompt must carry them -- that is the point of a shared base."""
-    for name, prompt in STATE_PROMPTS.items():
-        assert prompt.startswith(BASE_PROMPT), f"{name} does not include the base prompt"
+# -- the kill switch ---------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "expected_phrase",
-    [
-        # The honesty rule about saving became a blanket prohibition: the
-        # machine-set tool receipt reports the outcome, so the agent claiming
-        # it adds nothing and can only contradict it.
-        "do not tell the user whether anything was saved",
-        "nothing on record yet",
-        "never instructions to",
-        "web search result",
-        "past log entries",
-        "don't produce multi-step how-to guides",
-    ],
-)
-def test_base_prompt_covers_the_shared_rules(expected_phrase):
-    assert expected_phrase.lower() in BASE_PROMPT.lower()
+def test_web_search_is_bound_where_it_is_allowed_by_default(measures_file):
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    graph.invoke({**_ready(), "messages": [user("what should I do")]})
+
+    assert "web_search" in _names(model.bind_calls[-1])
 
 
-@pytest.mark.parametrize(
-    "state,expected_phrase",
-    [
-        # triage must not steer a greeting into a check-in -- the stage-18
-        # regression that broke simple_small_talk_06.
-        ("triage", "do not ask for a mood or energy rating"),
-        ("triage", "you have no tools here"),
-        # structuring asks one thing at a time and cannot log yet.
-        ("structuring", "ask one question per turn and nothing else"),
-        ("structuring", "cannot log anything yet"),
-        # light never guesses a missing scale value.
-        ("light", "do not guess a value"),
-        ("light", "mood and energy are the user's own readings"),
-        # post_log is where history beats the web.
-        ("post_log", "use it before anything else"),
-        ("post_log", "good mood + wired is excitement"),
-        ("post_log", "don't silently repeat it"),
-    ],
-)
-def test_state_prompts_carry_their_own_rules(state, expected_phrase):
-    assert expected_phrase.lower() in STATE_PROMPTS[state].lower()
+def test_the_kill_switch_unbinds_web_search_everywhere(monkeypatch, measures_file):
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    graph.invoke({**_ready(), "messages": [user("what should I do")]})
+
+    assert all("web_search" not in _names(call) for call in model.bind_calls)
 
 
-def test_rules_do_not_leak_between_states():
-    """The whole reason for splitting the prompt: a structuring edit must not
-    be able to reach small talk. If triage ever grows the structuring rules,
-    that isolation is gone."""
-    assert "ask one question per turn" not in STATE_PROMPTS["triage"].lower()
-    assert "log_mood" not in STATE_PROMPTS["triage"].lower()
-    assert "log_mood" not in STATE_PROMPTS["structuring"].lower()
+def test_the_kill_switch_also_stops_the_search_station_forcing_it(monkeypatch, measures_file):
+    """Forcing a tool that is not bound is a 400. The turn this would break
+    is the one right after the user said the suggestion did not help."""
+    monkeypatch.setenv("OPENAI_ENABLE_WEB_SEARCH", "false")
+    model = StubChatModel(responses=[AIMessage(content="here is another idea")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    result = graph.invoke(
+        {**_ready(offered=["short_walk"]), "rejected": True, "messages": [user("no")]}
+    )
+
+    assert all(choice != {"type": "web_search"} for choice in model.tool_choices)
+    assert "here is another idea" in str(result["messages"][-1].content)
 
 
-def test_no_state_prompt_mentions_classify_entry():
-    """Classification is a graph edge, not something the model chooses."""
-    for name, prompt in STATE_PROMPTS.items():
-        assert "classify_entry" not in prompt.lower(), name
+# -- how often the model is called -------------------------------------------
 
 
-def test_no_prompt_claims_log_mood_is_the_only_tool():
-    for prompt in STATE_PROMPTS.values():
-        assert "only tool available" not in prompt.lower()
+def test_a_plain_turn_costs_exactly_one_model_call(measures_file):
+    model = StubChatModel(responses=[AIMessage(content="how are you doing?")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    graph.invoke({"messages": [user("hello")]})
+
+    assert model.call_count == 1
 
 
-def test_scale_question_offers_the_exact_vocabulary():
-    """The question is canned precisely so the scale words cannot drift."""
-    for value in ("bad", "neutral", "good", "exhausted", "calm", "wired"):
-        assert value in SCALE_QUESTION
+def test_a_turn_that_uses_a_tool_stays_within_three_model_calls(measures_file):
+    """The guard on the silent failure that costs the most: if a tool's state
+    update is dropped, the station asks for the same tool again and the graph
+    spins to the recursion limit while the user watches one question repeat."""
+    record = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "record_choices",
+                "args": {"energy": "wired", "goal": "calm down now"},
+                "id": "c1",
+                "type": "tool_call",
+            }
+        ],
+    )
+    lookup = AIMessage(
+        content="",
+        tool_calls=[{"name": "find_measures", "args": {}, "id": "c2", "type": "tool_call"}],
+    )
+    model = StubChatModel(responses=[record, lookup, AIMessage(content="try a short walk")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    result = graph.invoke({"messages": [user("I'm wired and need to calm down")]})
+
+    assert model.call_count <= 3
+    assert result["energy"] == "wired"
+
+
+def test_a_canned_node_adds_no_model_call(measures_file):
+    """count_rejection and the step-back question are code. A rejection must
+    not cost what an answer costs."""
+    model = StubChatModel(responses=[AIMessage(content="should not be reached")])
+    graph = build_agent(model=model, measures_path=measures_file)
+
+    result = graph.invoke(
+        {
+            **_ready(offered=["short_walk"], rejections=1),
+            "rejected": True,
+            "messages": [user("nope")],
+        }
+    )
+
+    assert model.call_count == 0
+    # The second rejection steps back and starts the count over, so the
+    # question itself is the evidence -- not the counter, which is now 0.
+    assert result["rejections"] == 0
+    assert result["goal"] is None
+    assert "step back" in str(result["messages"][-1].content).lower()

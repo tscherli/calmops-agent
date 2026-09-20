@@ -1,4 +1,4 @@
-"""agent/stations.py -- the station graph: routing, bindings, canned nodes.
+"""agent/graph.py -- the station graph: routing, bindings, canned nodes.
 
 No model is called in this file: a stub records what it was bound to and what
 it was asked. What the graph guarantees must hold without the model's help.
@@ -8,7 +8,7 @@ import csv
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.stations import (
+from agent.graph import (
     DEBATE_TURN_CAP,
     NOT_HELPFUL_PHRASES,
     build_agent,
@@ -16,7 +16,7 @@ from agent.stations import (
     says_not_helpful,
     station_for,
 )
-from tests.test_agent_pipeline import StubChatModel  # records bind_tools calls
+from tests.conftest import StubChatModel  # records bind_tools calls
 from tools.measures import MEASURE_COLUMNS
 
 MEASURE_ROWS = [

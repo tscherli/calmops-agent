@@ -1,8 +1,7 @@
 """Tkinter chat window: the actual Job Load Agent UI.
 
-Blocking first-run consent screen, a persistent row of quick-select mood
-buttons (no LLM involved), and free-text chat that goes through
-agent/safety.py's crisis gate first, then the real agent.
+Blocking first-run consent screen, then free-text chat that goes through
+agent/safety.py's crisis gate first and the station graph second.
 
 Entry point -- must load .env itself (flagged during stage 6: library
 modules like agent/graph.py must not do this as an import side effect).
@@ -12,7 +11,6 @@ import json
 import queue
 import threading
 import time
-import typing
 import tkinter as tk
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,26 +22,17 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage
 
-from agent.graph import (
-    DEFAULT_MODEL,
-    LOG_MOOD_TOOL_NAME,
-    build_agent,
-    compact_spent_tool_messages,
-    message_text,
-)
+from agent.common import message_text
+from agent.graph import build_agent, next_turn_state
+from agent.model import DEFAULT_MODEL
 from agent.safety import CRISIS_RESOURCES, screen_for_crisis
 from observability.tracing import RunRecorder
-from tools.csv_log import Energy, Mood, log_mood
-from tools.mood_templates import MOOD_TEMPLATES
 
 # How often the main thread checks the worker's queue while a turn runs.
 # Small enough that a receipt looks instant, large enough to cost nothing.
 _POLL_MS = 50
 
-# Derived from the schema's own Literals (tools/csv_log.py) rather than
-# duplicated here, so a vocabulary change updates the buttons automatically.
-_MOOD_OPTIONS = list(typing.get_args(Mood))
-_ENERGY_OPTIONS = list(typing.get_args(Energy))
+LOG_TOOL_NAME = "log_checkin"
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,8 +45,7 @@ CONSENT_TEXT = (
     "LangSmith (for tracing). Mood entries themselves are saved to a local CSV file "
     "on your own machine, never sent to any storage service.\n\n"
     "If you are not comfortable with a large language model processing your "
-    "personal information, do not use this software -- the quick-select buttons "
-    "below let you log a mood without sharing anything personal.\n\n"
+    "personal information, do not use this software.\n\n"
     "This is a self-reflection aid, not a substitute for professional mental health "
     "support; its replies are AI-generated and may be inaccurate. In a crisis, "
     "contact local emergency services or a crisis hotline directly, not this tool.\n\n"
@@ -92,11 +80,11 @@ class ChatApp:
     ) -> None:
         self.root = root
         self.root.title("Job Load Agent")
-        self.messages: list = []
-        # Carried across turns so the graph can resume a state instead of
-        # re-triaging (and re-paying for) every message.
-        self.current_step: str = ""
-        self.scale_values: dict[str, str] = {}
+        # Everything the graph needs carried into the next turn: the
+        # transcript plus the station fields. Built by next_turn_state(), the
+        # one function the eval harness uses too -- the two implemented this
+        # separately once and drifted apart without anything failing.
+        self.state: dict = {"messages": []}
         self.graph = agent_graph if agent_graph is not None else build_agent()
         self.recorder = recorder if recorder is not None else RunRecorder()
         self._opener_message = opener_message
@@ -132,55 +120,12 @@ class ChatApp:
     # -- Main chat screen --------------------------------------------------
 
     def _build_chat_ui(self) -> None:
-        tk.Label(
-            self.root,
-            text="Quick log — no AI, nothing shared:",
-            font=("TkDefaultFont", 9, "italic"),
-            fg="gray30",
-        ).pack(fill="x", padx=10, pady=(10, 0), anchor="w")
-
-        quick_frame = tk.Frame(self.root)
-        quick_frame.pack(fill="x", padx=10, pady=(0, 0))
-        self._quick_buttons: list[tk.Button] = []
-        for key, template in MOOD_TEMPLATES.items():
-            b = tk.Button(
-                quick_frame,
-                text=template["label"],
-                command=lambda k=key: self._on_quick_select(k),
-            )
-            b.pack(side="left", padx=2, pady=2)
-            self._quick_buttons.append(b)
-
         self.history = scrolledtext.ScrolledText(self.root, state="disabled", width=70, height=22, wrap="word")
         self.history.pack(fill="both", expand=True, padx=10, pady=10)
         # Tool receipts are deliberately styled as machine output, not speech:
         # they are the one thing in this window the agent cannot write.
         self.history.tag_configure("tool", font=("TkFixedFont", 8), foreground="gray45")
         self.history.tag_configure("tool_error", font=("TkFixedFont", 8), foreground="firebrick")
-
-        tk.Label(
-            self.root,
-            text="Or type freely to chat with the agent:",
-            font=("TkDefaultFont", 9, "italic"),
-            fg="gray30",
-        ).pack(fill="x", padx=10, pady=(0, 0), anchor="w")
-
-        # Scale buttons (E1). Hidden until the agent is waiting for values.
-        # The question is a constant, so asking it costs no model call, and a
-        # click is unambiguous self-report -- the same argument that makes the
-        # quick-select entries clean data.
-        self.scale_frame = tk.Frame(self.root)
-        self._scale_buttons: dict[str, list[tk.Button]] = {}
-        for field, options in (("mood", _MOOD_OPTIONS), ("energy", _ENERGY_OPTIONS)):
-            row = tk.Frame(self.scale_frame)
-            row.pack(fill="x")
-            tk.Label(row, text=f"{field}:", width=8, anchor="w").pack(side="left")
-            buttons = []
-            for value in options:
-                b = tk.Button(row, text=value, command=lambda f=field, v=value: self._on_scale_click(f, v))
-                b.pack(side="left", padx=2, pady=1)
-                buttons.append(b)
-            self._scale_buttons[field] = buttons
 
         input_frame = tk.Frame(self.root)
         input_frame.pack(fill="x", padx=10, pady=(0, 10))
@@ -229,67 +174,11 @@ class ChatApp:
         Until this change the UI simply froze, which accidentally prevented a
         second turn being started mid-flight. Now that the graph runs off the
         main thread that has to be done deliberately -- two concurrent turns
-        would interleave writes to self.messages and corrupt the state.
+        would interleave writes to self.state and corrupt it.
         """
         state = "disabled" if busy else "normal"
         self.entry.configure(state=state)
         self.send_button.configure(state=state)
-        for b in self._quick_buttons:
-            b.configure(state=state)
-        for buttons in self._scale_buttons.values():
-            for b in buttons:
-                b.configure(state=state)
-
-    # -- Quick-select: no LLM involved at all --------------------------------------------------
-
-    def _on_quick_select(self, key: str) -> None:
-        template = MOOD_TEMPLATES[key]
-        try:
-            # Calls the tool's own body directly, bypassing the agent graph --
-            # so no LLM is involved and, deliberately, no semantic tagging
-            # either (see tools/mood_templates.py's module docstring).
-            result = log_mood.invoke(
-                {
-                    "mood": template["mood"],
-                    "circumstances": template["circumstances"],
-                    "energy": template.get("energy", ""),
-                }
-            )
-        except Exception as exc:  # never let an unhandled exception reach the UI
-            self._append_message("App", f"Something went wrong logging that: {exc}")
-            return
-
-        self._append_message("You", template["label"])
-        # Same receipt as the agent path. A quick-select write is still a tool
-        # call, and reporting it the same way means one format to trust rather
-        # than two ways of being told an entry was saved.
-        if result["status"] == "ok":
-            self._append_tool_event(
-                {"tool": LOG_MOOD_TOOL_NAME, "exit_code": 0,
-                 "detail": f"row {result.get('row_id')} written"}
-            )
-        else:
-            self._append_tool_event(
-                {"tool": LOG_MOOD_TOOL_NAME, "exit_code": 1,
-                 "detail": f"write failed: {result.get('error', 'unknown error')}"}
-            )
-
-    # -- Free text: crisis gate first, then the real agent --------------------------------------------------
-
-    def _show_scale_buttons(self, visible: bool) -> None:
-        if visible:
-            self.scale_frame.pack(fill="x", padx=10, pady=(0, 4), before=self.entry.master)
-        else:
-            self.scale_frame.pack_forget()
-
-    def _on_scale_click(self, field: str, value: str) -> None:
-        """A click supplies one value directly -- no typing, no model call,
-        no parsing. Once both are in, the turn proceeds automatically."""
-        self.scale_values[field] = value
-        self._append_message("You", f"{field}: {value}")
-        if {"mood", "energy"} <= set(self.scale_values):
-            self._show_scale_buttons(False)
-            self._run_turn(f"mood: {self.scale_values['mood']}, energy: {self.scale_values['energy']}")
 
     # -- Free text: crisis gate first, then the real agent --------------------------------------------------
 
@@ -319,12 +208,8 @@ class ChatApp:
         Tk is not thread-safe, so the worker only ever puts events on a
         queue; every widget call happens back on the main thread in _drain.
         """
-        messages_before = self.messages + [HumanMessage(content=user_text)]
-        payload = {
-            "messages": messages_before,
-            "current_step": self.current_step,
-            "scale_values": dict(self.scale_values),
-        }
+        messages_before = list(self.state.get("messages") or []) + [HumanMessage(content=user_text)]
+        payload = {**self.state, "messages": messages_before}
         events: queue.Queue = queue.Queue()
         self._set_busy(True)
         threading.Thread(target=self._stream_worker, args=(payload, events), daemon=True).start()
@@ -391,35 +276,21 @@ class ChatApp:
         # Stated explicitly rather than left to be inferred from silence: an
         # absent receipt is ambiguous (nothing logged, or nothing rendered?),
         # a printed one is not.
-        if not any(e.get("tool") == LOG_MOOD_TOOL_NAME for e in result.get("tool_events") or []):
-            self._append_tool_event({"tool": LOG_MOOD_TOOL_NAME, "exit_code": None,
+        if not any(e.get("tool") == LOG_TOOL_NAME for e in result.get("tool_events") or []):
+            self._append_tool_event({"tool": LOG_TOOL_NAME, "exit_code": None,
                                      "detail": "not called this turn"})
 
-        self.messages = result["messages"]
-        self.current_step = result.get("current_step", "") or ""
-        self.recorder.record_turn(messages_before, self.messages, DEFAULT_MODEL, latency)
+        messages = result["messages"]
+        self.recorder.record_turn(messages_before, messages, DEFAULT_MODEL, latency)
         # message_text, not .content: with the built-in web_search bound the
         # model speaks Responses-API content blocks.
-        self._append_message("Agent", message_text(self.messages[-1]))
+        self._append_message("Agent", message_text(messages[-1]))
 
-        if self.current_step == "awaiting_scale":
-            self.scale_values = {}
-            self._show_scale_buttons(True)
-        else:
-            self._show_scale_buttons(False)
+        # One shared decision, not a second copy of it here: on a completed
+        # check-in this clears the transcript *and* the station fields, and
+        # otherwise compacts spent tool payloads and carries the rest.
+        self.state = next_turn_state(result)
 
-        if not self.current_step:
-            # Check-in complete. The durable memory is the CSV, and
-            # find_similar_entries is a better cross-conversation memory than
-            # the chat buffer, so start the next one at near-zero context
-            # rather than re-sending this one forever.
-            self.messages = []
-            self.scale_values = {}
-        else:
-            # Still mid-conversation: at least shrink spent tool payloads.
-            self.messages = compact_spent_tool_messages(self.messages)
-
-        # Visibility was already set above; this only restores interactivity.
         self._set_busy(False)
 
 

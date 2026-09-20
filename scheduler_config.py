@@ -6,7 +6,7 @@ plus a digest Friday afternoon") doesn't justify a cron parser, and adding
 one would be a new dependency for a personal tool.
 
 `compute_next_fire` is pure and takes an injected `now`, per this project's
-DI-for-testability convention (tools/csv_log.py's `path`, agent/graph.py's
+DI-for-testability convention (tools/checkin_log.py's `path`, agent/graph.py's
 `model`/`tools`) -- the whole scheduling rule set is unit-testable without
 freezing the clock or sleeping.
 

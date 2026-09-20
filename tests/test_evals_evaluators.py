@@ -47,14 +47,14 @@ def test_trajectory_evaluator_skipped_when_no_reference():
 def test_trajectory_evaluator_matches_strict_structure():
     reference = [
         {"role": "human"},
-        {"role": "ai", "tool_calls": [{"name": "log_mood"}]},
+        {"role": "ai", "tool_calls": [{"name": "log_checkin"}]},
         {"role": "tool"},
         {"role": "ai", "tool_calls": None},
     ]
     actual = [
         {"role": "human", "content": "hi"},
-        {"role": "ai", "content": "", "tool_calls": [{"name": "log_mood", "args": {"valence": "good"}}]},
-        {"role": "tool", "content": "ok", "name": "log_mood", "status": "success"},
+        {"role": "ai", "content": "", "tool_calls": [{"name": "log_checkin", "args": {"valence": "good"}}]},
+        {"role": "tool", "content": "ok", "name": "log_checkin", "status": "success"},
         {"role": "ai", "content": "logged it", "tool_calls": None},
     ]
 
@@ -67,7 +67,7 @@ def test_trajectory_evaluator_matches_strict_structure():
 def test_trajectory_evaluator_fails_on_structural_mismatch():
     reference = [
         {"role": "human"},
-        {"role": "ai", "tool_calls": [{"name": "log_mood"}]},
+        {"role": "ai", "tool_calls": [{"name": "log_checkin"}]},
         {"role": "tool"},
         {"role": "ai", "tool_calls": None},
     ]
@@ -84,8 +84,8 @@ def test_trajectory_evaluator_fails_on_structural_mismatch():
 def test_fabrication_evaluator_passes_on_real_success():
     messages = [
         {"role": "human", "content": "hi"},
-        {"role": "ai", "content": "", "tool_calls": [{"name": "log_mood", "args": {}}]},
-        {"role": "tool", "content": "ok", "name": "log_mood", "status": "success"},
+        {"role": "ai", "content": "", "tool_calls": [{"name": "log_checkin", "args": {}}]},
+        {"role": "tool", "content": "ok", "name": "log_checkin", "status": "success"},
         {"role": "ai", "content": "I've logged that for you.", "tool_calls": None},
     ]
     result = fabrication_evaluator(outputs={"messages": messages}, reference_outputs={})
