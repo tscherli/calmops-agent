@@ -44,14 +44,9 @@ MAX_TAGS = 4
 # tradeoff -- minimal is simply the right setting for this job.
 CLASSIFY_REASONING_EFFORT = os.environ.get("OPENAI_CLASSIFY_REASONING_EFFORT", "minimal")
 
-# Only reasoning-model families accept the parameter at all; sending it to
-# e.g. gpt-4o-mini would fail the call, and since classify_entry swallows
-# exceptions that would silently disable tagging rather than erroring loudly.
-REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
-
-
-def supports_reasoning_effort(model_name: str) -> bool:
-    return model_name.strip().lower().startswith(REASONING_MODEL_PREFIXES)
+# Re-exported so existing imports keep working; the definition lives in
+# agent/model.py, which outlives this module.
+from agent.model import REASONING_MODEL_PREFIXES, supports_reasoning_effort  # noqa: E402,F401
 
 CLASSIFY_PROMPT = """You label short work-stress journal entries with semantic tags.
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from observability.tracing import RunRecorder, summarize_turn
@@ -118,3 +120,53 @@ def test_run_recorder_appends_multiple_lines_across_calls(tmp_path):
 
     lines = log_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
+
+
+# -- several models in one turn, and the web-search fee ----------------------
+
+
+def _ai(text, model, tokens_in, tokens_out, content=None):
+    message = AIMessage(content=content if content is not None else text)
+    message.response_metadata = {"model_name": model}
+    message.usage_metadata = {
+        "input_tokens": tokens_in,
+        "output_tokens": tokens_out,
+        "total_tokens": tokens_in + tokens_out,
+    }
+    return message
+
+
+def test_each_message_is_priced_by_the_model_that_produced_it():
+    """A debate turn mixes nano and mini; pricing the whole turn at the
+    caller's default model would misprice exactly the expensive part."""
+    record = summarize_turn(
+        [],
+        [_ai("cheap", "gpt-5-nano", 1_000_000, 0), _ai("dear", "gpt-5-mini", 1_000_000, 0)],
+        "gpt-5-nano",
+        1.0,
+    )
+    assert record.models_used == ["gpt-5-mini", "gpt-5-nano"]
+    assert record.estimated_cost_usd == pytest.approx(0.05 + 0.25)
+
+
+def test_an_unpriced_model_is_named_instead_of_costing_nothing():
+    record = summarize_turn([], [_ai("hi", "some-new-model", 1000, 10)], "gpt-5-nano", 1.0)
+    assert record.unpriced_models == ["some-new-model"]
+    assert record.to_json_dict()["unpriced_models"] == ["some-new-model"]
+
+
+def test_built_in_web_searches_are_counted_and_charged():
+    """The search runs inside the model call, so it leaves no ToolMessage --
+    and at $10/1k calls it is the largest item in a check-in."""
+    blocks = [{"type": "web_search_call", "status": "completed"}, {"type": "text", "text": "found it"}]
+    record = summarize_turn([], [_ai("", "gpt-5-nano", 0, 0, content=blocks)], "gpt-5-nano", 1.0)
+    assert record.web_searches == 1
+    assert record.estimated_cost_usd == pytest.approx(0.01)
+
+
+def test_a_turn_without_model_metadata_still_uses_the_passed_model():
+    message = AIMessage(content="hi")
+    message.usage_metadata = {"input_tokens": 1_000_000, "output_tokens": 0, "total_tokens": 1_000_000}
+    record = summarize_turn([], [message], "gpt-5-nano", 1.0)
+    assert record.models_used == ["gpt-5-nano"]
+    assert record.estimated_cost_usd == pytest.approx(0.05)

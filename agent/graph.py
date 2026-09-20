@@ -36,10 +36,8 @@ Efficiency decisions, each measured rather than assumed (see DEVELOPMENT_LOG):
 """
 from __future__ import annotations
 
-import re
-
-import json
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal, TypedDict
@@ -51,12 +49,38 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
+from agent.common import (
+    as_tool_content as _as_tool_content,
+)
+from agent.common import (
+    compact_spent_tool_messages as _compact_spent,
+)
+from agent.common import (
+    merge_tool_events as _merge_tool_events,
+)
+from agent.common import (
+    message_text,
+    tool_event,
+)
+from agent.common import (
+    pending_tool_calls as _pending_tool_calls,
+)
+from agent.common import (
+    result_detail as _result_detail,
+)
+from agent.common import (
+    web_search_ran as _web_search_ran,
+)
+from agent.model import (  # noqa: F401  (DEFAULT_MODEL is re-exported for app.py/scheduler.py)
+    DEFAULT_MODEL,
+    model_name_of,
+    resolve_model,
+    supports_reasoning_effort,
+)
 from agent.prompts import SCALE_QUESTION, STATE_PROMPTS, SYSTEM_PROMPT  # noqa: F401
-from tools.classify import classify_entry, supports_reasoning_effort
+from tools.classify import classify_entry
 from tools.csv_log import PENDING_LOG_PATH, append_mood_row, log_mood
 from tools.log_query import find_similar_entries, find_similar_entries_tool, known_tags
-
-DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
 
 LOG_MOOD_TOOL_NAME = "log_mood"
 POST_LOG_SIMILAR_LIMIT = 3
@@ -185,74 +209,6 @@ def suggest_gate_missing(collected: CollectedFields | None) -> list[str]:
     return missing
 
 
-def _merge_tool_events(
-    left: list[dict[str, Any]] | None, right: list[dict[str, Any]] | None
-) -> list[dict[str, Any]]:
-    """Accumulate tool events across the nodes of one turn.
-
-    A plain append reducer, not a replace: a single turn can run several
-    tool-bearing nodes (classify -> log_write -> history_lookup), and the UI
-    reports each one as it finishes. `app.py` does not pass `tool_events`
-    back in on the next turn, so each turn starts empty on its own.
-    """
-    return (left or []) + (right or [])
-
-
-def tool_event(tool: str, status: str, detail: str = "", *, verified: bool = True) -> dict[str, Any]:
-    """One machine-set record of what a tool actually did.
-
-    Set by the graph from the tool's real return value, never by the model --
-    the same reasoning that makes log_mood's tool-call status trustworthy.
-    That is the whole point: the agent cannot emit one of these, and cannot
-    suppress one, so a claim in its prose can be checked against them.
-
-    `exit_code` is deliberately None for "skipped". A tool that never ran has
-    no exit code, and reporting it as 0 would be its own small lie.
-
-    `verified=False` marks an event we did NOT observe in our own code --
-    currently only OpenAI's server-side web_search, whose execution is
-    reported by the provider rather than witnessed here. Same weaker
-    guarantee already documented for its payload; surfaced rather than
-    blurred into the verified ones.
-    """
-    return {
-        "tool": tool,
-        "status": status,
-        "exit_code": {"ok": 0, "error": 1}.get(status),
-        "detail": detail,
-        "verified": verified,
-    }
-
-
-def _result_detail(result: Any) -> str:
-    """A short, honest summary of what a discretionary tool returned."""
-    if isinstance(result, list):
-        return f"{len(result)} results" if result else "no matches"
-    if isinstance(result, dict):
-        return str(result.get("status") or f"{len(result)} fields")
-    text = str(result)
-    return text if len(text) <= 60 else text[:57] + "..."
-
-
-def _web_search_ran(message: BaseMessage) -> bool:
-    """Did OpenAI's server-side web_search run on this response?
-
-    Read off the Responses-API content blocks, which is the only evidence
-    available: the search executes on OpenAI's infrastructure and its payload
-    never passes through our code. That is why the event it produces is
-    marked verified=False -- we are relaying the provider's report, not
-    witnessing the call the way we witness append_mood_row.
-    """
-    content = getattr(message, "content", None)
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        block_type = block.get("type") if isinstance(block, dict) else getattr(block, "type", None)
-        if isinstance(block_type, str) and "web_search" in block_type:
-            return True
-    return False
-
-
 class AgentState(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     current_step: str
@@ -271,56 +227,11 @@ class AgentState(TypedDict, total=False):
 # -- message helpers ---------------------------------------------------------
 
 
-def message_text(message: BaseMessage) -> str:
-    """Plain display text for a message, whatever shape its content is in.
-
-    Binding OpenAI's built-in web_search switches langchain-openai to the
-    Responses API, where `AIMessage.content` is a list of content blocks
-    rather than a string -- so reading `.content` straight into the UI prints
-    raw dicts and base64 at the user. `.text` is clean in both modes.
-    """
-    text = getattr(message, "text", None)
-    # isinstance first: in langchain-core 1.5.3 `.text` is a property returning
-    # a str that is *also* callable, so checking callable() first would take
-    # the deprecated method path on every message.
-    if not isinstance(text, str) and callable(text):
-        text = text()
-    if isinstance(text, str) and text:
-        return text
-    content = message.content
-    return content if isinstance(content, str) else str(content)
-
-
-def _last_ai_tool_calls(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
-    for message in reversed(messages):
-        if isinstance(message, AIMessage):
-            return list(message.tool_calls or [])
-    return []
-
-
-def _answered_tool_call_ids(messages: Sequence[BaseMessage]) -> set[str]:
-    return {m.tool_call_id for m in messages if isinstance(m, ToolMessage) and m.tool_call_id}
-
-
-def _pending_tool_calls(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
-    answered = _answered_tool_call_ids(messages)
-    return [call for call in _last_ai_tool_calls(messages) if call.get("id") not in answered]
-
-
 def _pending_log_call(messages: Sequence[BaseMessage]) -> dict[str, Any] | None:
     for call in _pending_tool_calls(messages):
         if call.get("name") == LOG_MOOD_TOOL_NAME:
             return call
     return None
-
-
-def _as_tool_content(result: Any) -> str:
-    if isinstance(result, str):
-        return result
-    try:
-        return json.dumps(result, ensure_ascii=False, default=str)
-    except (TypeError, ValueError):
-        return str(result)
 
 
 def _shorten(value: str, limit: int = MAX_RECALLED_FIELD_CHARS) -> str:
@@ -344,34 +255,8 @@ def _compact_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def compact_spent_tool_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Shrink already-used log_mood results to a marker.
-
-    The payload carries up to three past entries; it is needed for the reply
-    on that turn and then re-sent on every later turn of the conversation.
-    """
-    out: list[BaseMessage] = []
-    for message in messages:
-        if (
-            isinstance(message, ToolMessage)
-            and message.name == LOG_MOOD_TOOL_NAME
-            and len(message.content or "") > 200
-        ):
-            try:
-                data = json.loads(message.content)
-                slim = {"status": data.get("status"), "row_id": data.get("row_id")}
-            except (ValueError, TypeError):
-                slim = {"status": "ok"}
-            out.append(
-                ToolMessage(
-                    content=_as_tool_content(slim),
-                    name=message.name,
-                    tool_call_id=message.tool_call_id,
-                    status=message.status,
-                )
-            )
-        else:
-            out.append(message)
-    return out
+    """Shrink already-used log_mood results, whose payload carries past entries."""
+    return _compact_spent(messages, tool_names=(LOG_MOOD_TOOL_NAME,))
 
 
 # -- graph construction ------------------------------------------------------
@@ -774,17 +659,5 @@ def build_agent(
     return graph.compile().with_config({"recursion_limit": recursion_limit})
 
 
-def _resolve_model(model: str | BaseChatModel | None) -> BaseChatModel:
-    if model is None:
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(model=DEFAULT_MODEL)
-    if isinstance(model, str):
-        from langchain_openai import ChatOpenAI
-
-        return ChatOpenAI(model=model)
-    return model
-
-
-def _model_name_of(model: BaseChatModel) -> str:
-    return getattr(model, "model_name", None) or getattr(model, "model", "") or ""
+_resolve_model = resolve_model
+_model_name_of = model_name_of
