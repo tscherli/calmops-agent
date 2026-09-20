@@ -112,6 +112,30 @@ def append_checkin_row(
         return {"status": "error", "row_id": row["row_id"], "error": str(exc)}
 
 
+def measure_awaiting_rating(path: Path | str | None = None) -> str:
+    """The measure from the last check-in, if nothing has rated it yet.
+
+    Lets the rating buttons still mean something after the window is closed
+    and reopened -- "come back later and say how it went" is the whole point
+    of a rating being its own row, and it would not survive a restart if the
+    id only lived in memory.
+
+    Empty when the last check-in named no measure_id (the user described one
+    in their own words, and the schema has nothing to attach a rating to) or
+    when a rating has already been written since.
+    """
+    rows = read_checkin_rows(path)
+    last_checkin = None
+    for index, row in enumerate(rows):
+        if not is_rating_row(row):
+            last_checkin = index
+    if last_checkin is None:
+        return ""
+    if any(is_rating_row(row) for row in rows[last_checkin + 1 :]):
+        return ""
+    return rows[last_checkin].get("measure_id") or ""
+
+
 def read_checkin_rows(path: Path | str | None = None) -> list[dict[str, str]]:
     log_path = Path(path) if path is not None else CHECKIN_LOG_PATH
     if not log_path.exists():
@@ -173,6 +197,13 @@ def make_log_checkin(log_path: Path | str | None = None, measures_path: Path | s
         if is_checkin:
             # the signal the clients use to start the next conversation fresh
             update["checkin_logged"] = True
+            # What the rating buttons attach to later. Reported by the write
+            # rather than read back out of the model's tool call, for the same
+            # reason the receipts are: this is what actually reached the file.
+            # Empty for a measure the user described in their own words -- the
+            # schema ties a rating to a measure_id, so there is nothing to
+            # attach one to.
+            update["last_measure_id"] = measure_id
         return _reply(
             json.dumps({"status": "ok", "row_id": result["row_id"], "kind": result["kind"]}),
             tool_call_id,

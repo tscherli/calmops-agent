@@ -12,6 +12,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+import typing
 from collections.abc import Sequence
 from pathlib import Path
 from tkinter import scrolledtext
@@ -27,6 +28,8 @@ from agent.graph import build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
 from agent.safety import CRISIS_RESOURCES, screen_for_crisis
 from observability.tracing import RunRecorder
+from tools.checkin_log import Helpfulness, append_checkin_row, measure_awaiting_rating
+from tools.measures import Energy, Goal
 
 # How often the main thread checks the worker's queue while a turn runs.
 # Small enough that a receipt looks instant, large enough to cost nothing.
@@ -34,16 +37,30 @@ _POLL_MS = 50
 
 LOG_TOOL_NAME = "log_checkin"
 
+# Derived from the schema's own Literals rather than duplicated here, so a
+# vocabulary change updates the buttons instead of drifting from them.
+_ENERGY_OPTIONS = list(typing.get_args(Energy))
+_GOAL_OPTIONS = list(typing.get_args(Goal))
+_RATING_OPTIONS = list(typing.get_args(Helpfulness))
+
+_RATING_LABELS = {"helped": "helped", "somewhat": "somewhat", "didnt_help": "not helpful"}
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CONSENT_PATH = BASE_DIR / "state" / "consent_ack.json"
 
 CONSENT_TEXT = (
     "Data & Privacy Disclaimer\n\n"
-    "This tool shares what you type -- including personal reflections on your mood "
-    "and work situations -- with OpenAI's API (to power the agent), and optionally "
-    "LangSmith (for tracing). Mood entries themselves are saved to a local CSV file "
-    "on your own machine, never sent to any storage service.\n\n"
+    "This tool shares what you type -- including personal reflections on how you "
+    "are doing and what is going on at work -- with OpenAI's API (to power the "
+    "agent), and optionally LangSmith (for tracing). It may also run a web search "
+    "through OpenAI when it looks for ideas beyond your own list.\n\n"
+    "Your check-in log and your list of measures are plain CSV files on your own "
+    "machine. They are never sent to any storage service, but their contents are "
+    "included in what goes to the API while you are having a conversation.\n\n"
+    "The buttons in this window -- your energy and goal, and how well something "
+    "worked -- are recorded without asking the model anything. Everything you type "
+    "is sent.\n\n"
     "If you are not comfortable with a large language model processing your "
     "personal information, do not use this software.\n\n"
     "This is a self-reflection aid, not a substitute for professional mental health "
@@ -77,6 +94,7 @@ class ChatApp:
         recorder: RunRecorder | None = None,
         opener_message: str | None = None,
         opener_events: "Sequence[dict]" = (),
+        log_path: Path | None = None,
     ) -> None:
         self.root = root
         self.root.title("Job Load Agent")
@@ -85,6 +103,15 @@ class ChatApp:
         # one function the eval harness uses too -- the two implemented this
         # separately once and drifted apart without anything failing.
         self.state: dict = {"messages": []}
+        # The rating buttons write straight to the log, so they need the same
+        # path the graph's logging tool uses -- injectable for the same reason
+        # everything else here is.
+        self.log_path = log_path
+        # Which measure a rating would be about. Restored from the log so the
+        # buttons still work after the window has been closed and reopened.
+        self.last_measure_id: str = measure_awaiting_rating(log_path)
+        self._idea_pending = False
+        self._rating_mode: str | None = None
         self.graph = agent_graph if agent_graph is not None else build_agent()
         self.recorder = recorder if recorder is not None else RunRecorder()
         self._opener_message = opener_message
@@ -127,6 +154,10 @@ class ChatApp:
         self.history.tag_configure("tool", font=("TkFixedFont", 8), foreground="gray45")
         self.history.tag_configure("tool_error", font=("TkFixedFont", 8), foreground="firebrick")
 
+        self.controls = tk.Frame(self.root)
+        self.controls.pack(fill="x", padx=10, pady=(0, 2))
+        self._build_control_buttons()
+
         input_frame = tk.Frame(self.root)
         input_frame.pack(fill="x", padx=10, pady=(0, 10))
         self.entry = tk.Entry(input_frame)
@@ -135,10 +166,139 @@ class ChatApp:
         self.send_button = tk.Button(input_frame, text="Send", command=self._on_send)
         self.send_button.pack(side="left", padx=(5, 0))
 
+        self._refresh_controls()
+
         for event in self._opener_events:
             self._append_tool_event(event)
         if self._opener_message:
             self._append_message("Agent", self._opener_message)
+
+    # -- The buttons: a click is a fact, and costs no model call -------------
+
+    def _build_control_buttons(self) -> None:
+        """Three groups, none of which asks the model anything.
+
+        A click is unambiguous self-report, so it is better data than a
+        sentence the model has to interpret -- and the energy/goal pair skips
+        the `ask` station entirely, which is one model call instead of two.
+        """
+        self._buttons: list[tk.Button] = []
+
+        self.choice_frame = tk.Frame(self.controls)
+        for field, options in (("energy", _ENERGY_OPTIONS), ("goal", _GOAL_OPTIONS)):
+            row = tk.Frame(self.choice_frame)
+            row.pack(fill="x")
+            tk.Label(row, text=f"{field}:", width=7, anchor="w").pack(side="left")
+            for value in options:
+                button = tk.Button(
+                    row, text=value, command=lambda f=field, v=value: self._on_choice_click(f, v)
+                )
+                button.pack(side="left", padx=2, pady=1)
+                self._buttons.append(button)
+
+        self.rating_frame = tk.Frame(self.controls)
+        self._rating_buttons: dict[str, tk.Button] = {}
+        for value in _RATING_OPTIONS:
+            button = tk.Button(
+                self.rating_frame,
+                text=_RATING_LABELS[value],
+                command=lambda v=value: self._on_rating_click(v),
+            )
+            self._rating_buttons[value] = button
+            self._buttons.append(button)
+
+        self.idea_frame = tk.Frame(self.controls)
+        self.idea_button = tk.Button(
+            self.idea_frame, text="discuss my idea", command=self._on_idea_click
+        )
+        self.idea_button.pack(side="left", padx=2, pady=1)
+        self._buttons.append(self.idea_button)
+
+    def _refresh_controls(self) -> None:
+        """Show only the buttons that mean something right now.
+
+        The rating pair is the one that matters: a rating is a second row
+        about a measure that was actually logged, so offering it before any
+        row exists would promise something the schema cannot hold. While
+        suggestions are on screen the same strip shows only "not helpful",
+        which is a rejection rather than a rating.
+        """
+        self._show(self.choice_frame, not (self.state.get("energy") and self.state.get("goal")))
+
+        if self.last_measure_id:
+            self._rating_mode = "rate"
+        elif self.state.get("offered"):
+            self._rating_mode = "reject"
+        else:
+            self._rating_mode = None
+        self._show(self.rating_frame, self._rating_mode is not None)
+        not_helpful = self._rating_buttons["didnt_help"]
+        not_helpful.pack(side="left", padx=2, pady=1)
+        for value in ("helped", "somewhat"):
+            if self._rating_mode == "rate":
+                self._rating_buttons[value].pack(side="left", padx=2, pady=1, before=not_helpful)
+            else:
+                self._rating_buttons[value].pack_forget()
+
+        self._show(self.idea_frame, bool(self.state.get("offered")) and not self._idea_pending)
+
+    @staticmethod
+    def _show(frame: tk.Frame, visible: bool) -> None:
+        if visible:
+            frame.pack(fill="x", pady=1)
+        else:
+            frame.pack_forget()
+
+    def _on_choice_click(self, field: str, value: str) -> None:
+        """One value, straight into the payload state. Once both are in, the
+        turn runs and route_start goes to `suggest` -- `ask` never happens."""
+        self.state[field] = value
+        self._append_message("You", f"{field}: {value}")
+        self._refresh_controls()
+        if self.state.get("energy") and self.state.get("goal"):
+            self._run_turn(
+                f"I'm feeling {self.state['energy']} and I want to {self.state['goal']}."
+            )
+
+    def _on_rating_click(self, value: str) -> None:
+        """Either a rejection or a rating -- never a model call, and in the
+        rating case never even a graph run."""
+        if self._rating_mode == "reject":
+            self._append_message("You", _RATING_LABELS[value])
+            self._run_turn(_RATING_LABELS[value], rejected=True)
+            return
+
+        self._append_message("You", _RATING_LABELS[value])
+        try:
+            result = append_checkin_row(
+                measure_id=self.last_measure_id, helpfulness=value, path=self.log_path
+            )
+        except Exception as exc:  # never let an unhandled exception reach the UI
+            self._append_message("App", f"Something went wrong saving that: {exc}")
+            return
+
+        if result["status"] == "ok":
+            self._append_tool_event(
+                {"tool": LOG_TOOL_NAME, "exit_code": 0,
+                 "detail": f"rating row {result['row_id'][:8]}"}
+            )
+            # One rating per check-in: the row is written, so there is nothing
+            # left for these buttons to be about.
+            self.last_measure_id = ""
+        else:
+            self._append_tool_event(
+                {"tool": LOG_TOOL_NAME, "exit_code": 1,
+                 "detail": f"write failed: {result.get('error', 'unknown error')}"}
+            )
+        self._refresh_controls()
+
+    def _on_idea_click(self) -> None:
+        """Arms the next Send. The idea travels in the payload, so `debate`
+        gets it as a fact rather than having to spot it in the prose -- and
+        the crisis gate still screens the text like any other message."""
+        self._idea_pending = True
+        self._append_message("App", "Go ahead -- type your idea and press Send.")
+        self._refresh_controls()
 
     def _append_message(self, sender: str, text: str) -> None:
         self.history.configure(state="normal")
@@ -179,6 +339,8 @@ class ChatApp:
         state = "disabled" if busy else "normal"
         self.entry.configure(state=state)
         self.send_button.configure(state=state)
+        for button in self._buttons:
+            button.configure(state=state)
 
     # -- Free text: crisis gate first, then the real agent --------------------------------------------------
 
@@ -194,9 +356,13 @@ class ChatApp:
             self._append_message("App", CRISIS_RESOURCES)
             return
 
-        self._run_turn(user_text)
+        extra: dict = {}
+        if self._idea_pending:
+            extra["idea"] = user_text
+            self._idea_pending = False
+        self._run_turn(user_text, **extra)
 
-    def _run_turn(self, user_text: str) -> None:
+    def _run_turn(self, user_text: str, **extra) -> None:
         """Run one turn off the main thread, reporting tool receipts live.
 
         The graph used to be invoked directly here, which froze the Tk event
@@ -209,7 +375,7 @@ class ChatApp:
         queue; every widget call happens back on the main thread in _drain.
         """
         messages_before = list(self.state.get("messages") or []) + [HumanMessage(content=user_text)]
-        payload = {**self.state, "messages": messages_before}
+        payload = {**self.state, **extra, "messages": messages_before}
         events: queue.Queue = queue.Queue()
         self._set_busy(True)
         threading.Thread(target=self._stream_worker, args=(payload, events), daemon=True).start()
@@ -286,11 +452,18 @@ class ChatApp:
         # model speaks Responses-API content blocks.
         self._append_message("Agent", message_text(messages[-1]))
 
+        # Read before the reset: the graph clears its state on a completed
+        # check-in, but the measure that row named is exactly what the rating
+        # buttons will be about afterwards.
+        if result.get("last_measure_id"):
+            self.last_measure_id = result["last_measure_id"]
+
         # One shared decision, not a second copy of it here: on a completed
         # check-in this clears the transcript *and* the station fields, and
         # otherwise compacts spent tool payloads and carries the rest.
         self.state = next_turn_state(result)
 
+        self._refresh_controls()
         self._set_busy(False)
 
 

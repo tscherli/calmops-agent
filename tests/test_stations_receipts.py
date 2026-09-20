@@ -190,6 +190,33 @@ def test_a_logged_check_in_ends_the_conversation(measures_file, log_file):
     assert result["complete"] is True
 
 
+def test_the_written_check_in_reports_the_measure_it_named(measures_file, log_file):
+    """What the rating buttons attach to later, reported by the write itself
+    rather than read back out of the model's tool call. Lose this and the
+    window silently stops offering a rating -- nothing fails, the button just
+    never appears."""
+    graph = agent_that_calls(
+        measures_file,
+        log_file,
+        call("log_checkin", {"energy": "wired", "circumstances": "A rough one.", "measure_id": "breathe"}),
+    )
+    result = run(graph, {"messages": [HumanMessage(content="yes")], **BASE})
+    assert result["last_measure_id"] == "breathe"
+
+
+def test_a_measure_in_the_users_own_words_names_no_id_to_rate(measures_file, log_file):
+    """The schema ties a rating to a measure_id. Reporting one that is not
+    there would make the window offer a rating it cannot write."""
+    graph = agent_that_calls(
+        measures_file,
+        log_file,
+        call("log_checkin", {"energy": "wired", "circumstances": "A rough one.",
+                             "measure_taken": "rearranged my desk"}),
+    )
+    result = run(graph, {"messages": [HumanMessage(content="yes")], **BASE})
+    assert not result.get("last_measure_id")
+
+
 def test_a_rating_does_not_end_the_conversation(measures_file, log_file):
     """Saying 'that helped' mid-conversation must not wipe the context."""
     graph = agent_that_calls(

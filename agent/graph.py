@@ -118,6 +118,7 @@ class State(TypedDict, total=False):
     debate_turns: int
     rejected: bool              # set by the UI's "not helpful" button
     checkin_logged: bool        # a check-in row was written this turn
+    last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
     tool_events: Annotated[list[dict[str, Any]], merge_tool_events]
 
