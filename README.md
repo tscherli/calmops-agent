@@ -1,16 +1,22 @@
 # Job Load Agent
 
-> ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on your mood and work situations — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). Mood entries themselves are saved to a local CSV file on your own machine, never sent to any storage service. **If you are not comfortable with a large language model processing your personal information, do not use this software** — the quick-select buttons let you log a mood without sharing anything personal. This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user of this software supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
+> ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
+
+> 🚧 **Pre-release (`v0.8.0`) — not evaluated yet.** The station architecture is built and covered by 393 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
-Job Load Agent checks in with you — on a schedule you control, or whenever you open it — and turns a short conversation about how work is going into a structured entry in a local CSV log. A deterministic safety gate screens every message for crisis language *before* any AI is involved. Light check-ins get logged immediately; heavier ones get a few structuring questions first.
+Job Load Agent checks in with you — on a schedule you control, or whenever you open it — and helps you pick something concrete to do about a stressful day, then keeps a short log of what you tried and whether it helped.
 
-What makes it more than a logging form is what happens next: every logged entry is automatically tagged with what kind of situation it was, so the agent can tell you whether you've hit this before and what you did about it last time — and, when it would genuinely help, search the web for a concrete suggestion. Once a week it can open on its own and point out patterns across recent entries without you asking.
+It asks two things: **how much energy you have** (exhausted / calm / wired) and **what would help most right now** (calm down now / plan recovery / change the situation). Those two pick from a curated list of measures you own and can edit. You can reject suggestions, bring an idea of your own and have it argued through honestly, or add something new to your list. Nothing is logged until you confirm it.
+
+A deterministic safety gate screens every message for crisis language *before* any AI is involved.
 
 ## Target user & scope
 
-Job Load Agent is a personal, single-user tool for developers and other high-interrupt knowledge workers who want a low-friction, private way to notice their own stress factors and job load over time. It runs entirely on the user's own machine, checks in on a schedule the user controls, and logs short structured reflections about mood, energy, and work circumstances. What distinguishes it from a plain mood-logging spreadsheet is that it also *uses* that history: it recognizes recurring stress patterns across past entries and, where it would genuinely help, searches the web for concrete, self-directed suggestions relevant to the specific situation.
+A personal, single-user tool for developers and other high-interrupt knowledge workers who want a low-friction, private way to notice their own job load over time and do something about it. It runs entirely on your own machine.
+
+What distinguishes it from a mood-logging spreadsheet is that it acts: it narrows a curated measure list down to what fits your current state, argues honestly about ideas you bring, and records which measures actually worked for you.
 
 It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a team- or manager-facing analytics product.
 
@@ -18,178 +24,112 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 
 | Component | Role |
 |---|---|
-| `app.py` | Tkinter chat window: first-run consent screen, LLM-free quick-select buttons, free-text chat. |
+| `app.py` | Tkinter chat window: consent screen, three groups of buttons, free-text chat. |
+| `cli.py` | Terminal client for the same graph, with the buttons as typed commands. |
 | `agent/safety.py` | Deterministic crisis-keyword gate. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
-| `agent/graph.py` | The agent: a hand-rolled LangGraph `StateGraph` running the conversation as a **state machine**. Each state binds only its own tools, so what the agent may do is enforced by the graph rather than by prompt wording. |
-| `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per state, so an edit to one state's rules cannot leak into another's. |
-| `tools/csv_log.py` | `log_mood` tool + the local CSV append. Never raises; falls back to a JSONL file on write failure. |
-| `tools/classify.py` | `classify_entry` — one narrow LLM call turning an entry into semantic tags. Deliberately *not* an agent-callable tool. |
-| `tools/log_query.py` | `find_similar_entries` / `analyze_stress_patterns` — deterministic, read-only scans over the tags column. |
-| `tools/mood_templates.py` | Fixed quick-select templates. Never AI-touched. |
-| `scheduler.py` + `scheduler_config.py` | Config-driven check-in times and the weekly pattern digest. |
+| `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
+| `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per station. |
+| `agent/model.py` | Model configuration. `gpt-5-nano` everywhere except the debate station, which uses `gpt-5-mini`. |
+| `agent/common.py` | Helpers every client shares: receipt formatting, message text, transcript compaction. |
+| `tools/measures.py` | The curated measure list plus `find_measures` (filtered in code, never by the model) and `add_measure` (validated before writing). |
+| `tools/checkin_log.py` | `log_checkin` and the local CSV append. Never raises; falls back to a JSONL file on write failure. |
+| `tools/log_query.py` | `analyze_stress_patterns` — deterministic, read-only aggregation for the weekly digest. |
+| `scheduler.py` + `scheduler_config.py` | Config-driven check-in times and the weekly digest. |
 | `observability/tracing.py` | Per-turn token/cost/latency/tool-call JSONL, independent of LangSmith. |
-| `evals/` | LangSmith-based eval suite: dataset, target, evaluators, LLM judge, no-tools baseline. |
+| `evals/` | LangSmith-based eval suite. **Currently describes the previous architecture — see "Results & limitations".** |
 
-### Agent decision flow
+### The station graph
 
-This is the decision tree the agent follows for every incoming message. It's the spec `agent/graph.py` is built against, not just a post-hoc diagram.
-
-```mermaid
-flowchart TD
-    A[User message] --> B{Quick-select button<br/>or free text?}
-    B -- button --> C[log_mood called directly<br/>with fixed template values]
-    C --> Z1[No LLM involved at all<br/>and no semantic tagging]
-
-    B -- free text --> D{Crisis gate<br/>agent/safety.py<br/>pre-LLM, deterministic}
-    D -- triggered --> E[Hardcoded crisis resources<br/>END - no LLM, no tool call]
-    D -- clear --> F[agent/graph.py StateGraph<br/>GPT + log_mood / find_similar_entries / web_search]
-
-    F --> G{What kind of message?}
-    G -- small talk / off-topic --> H[Plain conversational reply<br/>no tool call]
-    G -- heavy / overwhelming signal --> I[Structuring sequence:<br/>situation -> thoughts -> need -> next step<br/>across as many turns as needed]
-    G -- light check-in --> J[Log directly:<br/>mood / energy / circumstances /<br/>measure_taken / helpfulness]
-    G -- ambiguous --> K[Ask a clarifying question<br/>instead of guessing]
-
-    I --> L[log_mood tool call]
-    J --> L
-    K --> G
-
-    L --> P[classify_entry<br/>DETERMINISTIC EDGE, not the model's choice]
-    P --> M{CSV write<br/>succeeded?}
-    M -- yes --> Q[find_similar_entries on the new tags<br/>DETERMINISTIC EDGE]
-    M -- no --> O[state/pending_sheet_log.jsonl fallback<br/>+ honest failure message]
-    Q --> N[Honest, pattern-aware reply<br/>empty history is reported as empty]
+```
+START
+ |
+ route_start(state)                    plain function, no model call
+ |  |- rejected flag (button)       -> count_rejection
+ |  |- short "not helpful" text     -> count_rejection
+ |  |- idea set                     -> debate
+ |  |- energy or goal missing       -> ask
+ |  |- nothing offered yet          -> suggest
+ |  \- otherwise                    -> follow_up
+ |
+ ask | suggest | follow_up | debate --(tool calls)--> tools --> back to the station
+ |                                  --(no tool calls)--> checkin_done | END
+ |
+ count_rejection --> 1st: web_search_ideas -> END
+                     2nd: ask_goal_again   -> END
 ```
 
-**Two rules embedded in this diagram:**
+| Station | Model | Tools it can reach |
+|---|---|---|
+| `ask` | nano | `record_choices`, `discuss_idea` |
+| `suggest` | nano | `find_measures` (forced until a fresh result exists), `record_choices`, `discuss_idea`, web search |
+| `follow_up` | nano | everything except `idea_decided`, plus web search |
+| `debate` | **mini** | `add_measure`, `record_choices`, `idea_decided` — capped at 6 turns |
+| `web_search_ideas`, `ask_goal_again`, `count_rejection`, `checkin_done` | none | canned text or code only |
 
-1. The agent must never claim `log_mood` succeeded unless it actually did — that's why both the success and failure branches end in an *honest* reply, never a guessed one. The same applies to patterns: an empty history lookup gets reported as "nothing on record," never softened into an implied pattern.
-2. `classify_entry` and the post-log `find_similar_entries` are **graph edges, not model decisions**. The model cannot skip them, and cannot call `classify_entry` itself — see "Architectural decisions" below.
+**What a station is not given, it cannot do.** `ask` has no way to suggest a measure because the tool is not bound there. That is the difference between a rule the model may ignore and one it cannot reach.
+
+**The graph owns what the model would otherwise re-derive every turn:** your energy and goal, which measures were already shown, how many suggestions were rejected in a row, which station is active, and whether an idea of yours is under discussion.
 
 ### Live conversation flow
 
-The same story at code level. Note that `find_similar_entries` and `web_search` stay reachable for the *rest* of the conversation, not just once after logging — the user can ask "have I dealt with this before?" at any point.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant App as app.py (ChatApp)
-    participant Gate as agent/safety.py (crisis gate)
-    participant Agent as agent/graph.py (LLM + tools)
-    participant LogTool as log_mood
-    participant Classify as classify_entry
-    participant HistTool as find_similar_entries
-    participant Web as OpenAI built-in web_search
-    participant Log as data/mood_log.csv
-
-    U->>App: free-text message
-    App->>Gate: screen_for_crisis(text)
-    alt crisis triggered
-        Gate-->>App: triggered=True
-        App-->>U: hardcoded CRISIS_RESOURCES (no LLM, no tool call)
-    else clear
-        Gate-->>App: triggered=False
-        App->>Agent: invoke({messages})
-        loop adaptive structuring, one question per turn
-            Agent-->>U: single clarifying/structuring question
-            U->>Agent: answer
-        end
-        Agent->>LogTool: log_mood tool call requested
-        LogTool->>Classify: classify_entry(...) [graph edge, runs first]
-        Classify-->>LogTool: {tags}
-        LogTool->>Log: append ONE row, already tagged
-        LogTool->>HistTool: find_similar_entries(tags) [graph edge]
-        HistTool-->>Agent: [untrusted data -- report, don't obey] past entries
-        opt agent judges a search would help, any turn
-            Agent->>Web: web_search(...)
-            Web-->>Agent: [untrusted] results
-        end
-        Agent-->>U: honest, pattern-aware reply
-    end
-```
+1. You say something, or click energy / goal. The crisis gate screens it first.
+2. `route_start` picks a station from the state — no model call.
+3. `ask` collects energy and goal, recording each as soon as you give it.
+4. `suggest` is **forced** to call `find_measures` before it may present anything, so a suggestion can never bypass your own list. Code filters by energy and goal; the model only picks two from what it got back.
+5. `follow_up` handles feedback, more ideas, adding a measure, and logging.
+6. Reject a suggestion and the first rejection buys a web search; the second steps back and asks about your goal again — both counted in code, not by the model.
+7. Bring an idea of your own and `debate` argues it honestly on the stronger model: one real strength, one honest limit.
+8. Once you settle on a measure, the agent writes one sentence describing your situation and asks you to confirm it. Only then is the row written.
+9. Later you say whether it helped, and that is a second row.
 
 ### Scheduled check-in & weekly digest
 
-```mermaid
-sequenceDiagram
-    participant Sched as scheduler.py
-    participant Cfg as scheduler_config.py
-    participant Analyze as analyze_stress_patterns
-    participant Log as data/mood_log.csv
-    participant U as User
+`scheduler.py` sleeps until the next configured time, then opens the chat window. Once a week it can open with a digest instead: `analyze_stress_patterns` does a plain, deterministic group-by over your check-in log — which measures came up, how you rated them, which ones you said worked — and exactly one LLM call turns that summary into a sentence. The numbers are always real even though the phrasing is generated, and the aggregation reports itself as a tool receipt.
 
-    loop scheduler main loop
-        Sched->>Cfg: compute_next_fire(now, config)
-        Cfg-->>Sched: next fire datetime (checkin or digest)
-        Sched->>Sched: sleep until next fire time
-        alt fire type == digest
-            Sched->>Analyze: analyze_stress_patterns(window_days)
-            Analyze->>Log: group by tags (pure Python, no LLM, no code exec)
-            Analyze-->>Sched: summary dict
-            Sched->>Sched: one LLM call to phrase it (falls back to plain text)
-            Sched-->>U: proactive digest, or "not enough data yet"
-        else fire type == checkin
-            Sched-->>U: normal check-in opener
-        end
-    end
-```
+### Why energy and goal, not mood
 
-No classify-sweep step appears here: every row is tagged at log time, so there is nothing to backfill — which also means this app has **no full-file-rewrite code path at all**, only appends.
+An earlier version logged `mood` (bad / neutral / good) alongside `energy`. Used in practice, the tool gets opened in draining situations, so "is the mood bad?" was true almost every time and selected nothing.
 
-### Why `mood` and `energy` are separate
-
-The log schema tracks two independent fields, not one scale:
+What actually narrows a measure list is **energy** (how much capacity you have) and **goal** (what kind of help you want):
 
 ```
-mood:   bad → neutral → good          (valence: how good or bad it felt)
-energy: exhausted → calm → wired      (activation: how keyed up you were)
+energy: exhausted → calm → wired       how much you have in the tank
+goal:   calm down now | plan recovery | change the situation
 ```
 
-These are deliberately two different axes, not duplicates: you can be low-energy-but-content (a relaxed evening) or high-energy-but-stressed (anxious, wired), so collapsing them into one field would lose information.
+Energy alone cannot tell apart "I need to sit down for five minutes" from "I need to cancel something", and a goal alone cannot tell apart a measure that takes a minute from one that takes a weekend. Together they pick a handful of rows out of the list.
 
-Concretely, `mood=bad` alone can't tell apart two common but very different bad days — **depleted** (`bad` + `exhausted`) and **agitated** (`bad` + `wired`). Those usually have different causes and want different responses (rest vs. calming down), and the agent is instructed to read the pair together for exactly that reason — while never stating the combination back at you as a label. It's also what lets the weekly digest say something more useful than a tally of bad days ("your rough days this week skewed wired, not drained").
+`energy` is inspired by emotional exhaustion — one of three dimensions in burnout research — but **this app is not a validated burnout assessment and diagnoses nothing.** It borrows the concept that fatigue is worth tracking separately, purely as a self-reflection aid. The other two dimensions (cynicism/detachment, reduced accomplishment) are deliberately out of scope: they are not clean single-scale values, and tracking them would push this toward symptom screening.
 
-> **Planned change — `mood` is being dropped** (prototyped in `sandbox/`, not yet in the app). Used in
-> practice, the tool is opened in draining situations, so "is the mood bad?" is true almost every time
-> and selects nothing. The prototype asks for **`energy`** plus a **goal** instead — calm down right
-> now, plan something to recover, or change the situation itself — and those two pick measures from a
-> curated list. Everything above describes what the code does today.
-
-This maps onto Hans Selye's eustress/distress distinction — stress that energizes vs. stress that harms — which needs no extra field, since it already lives on the `mood` axis. A useful confirmation that the split is right: "tired" belongs equally to good, neutral, and bad stress, which is precisely why tiredness can't be folded into `mood`.
-
-> **Note on naming:** these fields were called `valence` (`good`/`neutral`/`bad`) and `energy_level` (`low`/`medium`/`high`) through stage 10. The rename came with the redesign; logs written before it are archived as `data/mood_log.pre-redesign.csv` rather than migrated.
-
-The motivation is emotional exhaustion — one of three dimensions identified in burnout research (alongside cynicism/detachment and reduced sense of accomplishment) as distinct from day-to-day mood, and specifically relevant to this app's target user (someone in a stressful, high-interrupt job). **This app is not a validated burnout assessment and does not diagnose anything.** It borrows the *concept* that fatigue and mood are related but separate signals worth tracking separately, purely as a self-reflection aid — consistent with the rest of this project's non-clinical framing (see the disclaimer at the top of this document, and "Results & limitations" below).
-
-For an example of how to reference this kind of research responsibly (cite the concept, disclaim clinical validity), see [psychology.com's burnout self-assessment](https://psychology.com/tests/burnout), which states plainly that it's "an honest educational adaptation... for reflection, not a validated diagnostic score" — the same framing this project follows.
-
-**Deliberately excluded: the third burnout dimension.** Burnout research identifies three dimensions: emotional exhaustion (what `energy` tracks), depersonalization/cynicism (a shift in how you relate to *other people* at work — colleagues, clients), and reduced sense of accomplishment. This app intentionally logs only the relationship-to-self dimension (exhaustion, via `mood`/`energy`) — not the relationship-to-others dimension, and not accomplishment. That's a deliberate scope boundary, not an oversight: cynicism/detachment isn't a clean single-scale value the way energy is, and a nearby but distinct concept — general apathy/loss of interest (anhedonia) — is a core depression symptom, not a burnout-dimension proxy; tracking it would push this tool toward symptom screening, which is out of scope for a workplace mood diary. See "Limitations" below.
+Logs written under the previous schema are archived as `data/mood_log.pre-stations.csv` rather than migrated.
 
 ### Architectural decisions
 
-**Log backend: local CSV, not Google Sheets/OAuth.** Originally planned as a Google Sheets integration via OAuth. Real-world setup turned out to be significantly more friction than a personal/solo-developer tool should require (Google's OAuth consent-screen UI was recently restructured, several steps deep to locate the right screens). Alternatives considered: a Google service account (still needs Cloud Console setup), `gcloud` CLI credentials (needs installing a new tool), local CSV synced via Google Drive Desktop (real sync-race risk, no official Linux client), and a GitHub PAT via Gist/repo API (simplest auth, but a flat file with no live-spreadsheet UI, and a bigger pivot from what's disclosed as the data recipient). **Decision: a local CSV file, no external service at all.** Real tradeoff: no live multi-device/cloud access or native Sheets UI — in exchange, zero setup friction and zero external credentials for the app to hold, actually a *stronger* security posture than every cloud-backed option considered. Full reasoning and rejected alternatives: `DEVELOPMENT_LOG.md`.
+**Stations, not one big prompt.** The previous design had one ~20-rule system prompt governing everything, and the model followed it inconsistently — one measured decision came out right 0 times out of 10 with the long prompt, and 5 out of 7 with a single-purpose one. Each station now gets a short prompt and only its own tools, so a rule becomes a missing tool rather than a sentence that can be overlooked. **Real cost, accepted knowingly:** more nodes, more edges, and a larger test suite.
 
-**Rejected: `create_csv_agent`-style tools for any future CSV analysis feature.** Considered for a hypothetical (not-yet-built) "analyze my mood log" feature. LangChain's `create_csv_agent`/`create_pandas_dataframe_agent` work by giving the LLM a *local* Python REPL to execute arbitrary generated code — gated behind an explicit `allow_dangerous_code=True` flag for good reason: there's a published security advisory ([GHSA-3645-fxcv-hqr4](https://github.com/langflow-ai/langflow/security/advisories/GHSA-3645-fxcv-hqr4)) describing prompt-injection-triggered Remote Code Execution via exactly this pattern. That directly conflicts with this project's "bounded tool surface" safety rule. If that feature is ever built, OpenAI's Code Interpreter is the safer analog — it runs LLM-generated code in an isolated, ephemeral, remote sandbox instead of the user's own machine.
+**Code filters the measure list; the model only chooses.** `find_measures` takes no model-chosen arguments — it reads energy and goal from the state, excludes what was already shown, and returns up to four rows. A suggestion therefore cannot be a measure you do not have.
 
-**Agent graph: a hand-rolled `StateGraph`, not `create_agent`.** Through stage 10 the agent was a one-line `create_agent(model, tools=[log_mood], ...)` call — a fixed model⇄tools loop where the LLM decides everything. That's right for genuine judgment calls, but it cannot *guarantee* that an entry gets classified immediately after it's logged; the best it can offer is a prompt instruction, and a prompt is a hope, not a guarantee (especially on a nano-tier model). This project already had one precedent for replacing judgment with a hard guarantee where the stakes justify it — the crisis gate, which is plain regex running before any model call. The redesign applies the same reasoning to *ordering*: `log_mood → classify_entry → find_similar_entries` are graph edges, so they happen whether or not the model thinks to want them. Everything genuinely discretionary (structuring questions, whether to search the web, whether the user still seems stuck) stays LLM-driven inside the `agent` node. **Real cost, accepted knowingly:** a one-line call became a multi-node graph with conditional edges and its own test suite.
+**Buttons are facts, not messages to interpret.** Energy, goal, "not helpful" and the ratings write straight into the graph's state. A click is unambiguous self-report, so it is better data than a sentence the model has to read — and it costs nothing. A rating does not even run the graph: it appends its row and reports it.
 
-**`classify_entry` is not an agent-callable tool.** It's a plain function invoked by a graph edge, deliberately not `@tool`-decorated and absent from the bound tools list. Exposing it as *both* a guaranteed edge and a discretionary tool would invite the model to call it a second time on its own initiative. `find_similar_entries` is the deliberate exception — it's both, because it genuinely should run automatically after logging *and* be reachable when the user asks "have I dealt with this before?" later in the conversation.
+**Receipts come from the node, not the tool.** Every tool call produces one machine-set receipt derived from what the tool actually returned. The model can neither emit one nor suppress one, which is what makes a claim in its prose checkable. The app prints them *before* the reply, so the evidence never trails the claim.
 
-**Log format: CSV with more columns, not JSONL.** `situation`/`thoughts`/`need`/`next_step` became real columns instead of being pipe-joined into one packed `note` string, and a `tags` column was added. JSONL would handle nesting better, but nothing here is actually nested — and CSV stays openable in a spreadsheet, which matters for a tool whose whole point is that you own and can inspect your own data.
+**Log backend: local CSV, not Google Sheets/OAuth.** Originally planned as a Sheets integration. Real setup was more friction than a solo tool should require. Alternatives considered: service account, `gcloud` credentials, CSV synced via Drive Desktop, a GitHub PAT via Gist. **Decision: a local CSV, no external service.** Tradeoff: no multi-device access, in exchange for zero setup and zero external credentials — a stronger security posture than every cloud option considered.
 
-**Similarity: semantic tags, not keyword overlap or embeddings.** One narrow LLM call per entry assigns open-vocabulary tags (`deadline_pressure`, `context_switching` — the model invents them as needed rather than picking from a fixed enum, since the useful categories for one person's job load aren't knowable up front). To stop that open vocabulary from sprawling, the classifier is shown the tags already in the log and told to prefer reusing one where it genuinely fits — a nudge, not an enum, so a genuinely new kind of problem still gets a new tag. String-similarity merging would not have worked here: the drifting variants measured in practice (`overlapping_deadlines` / `concurrent_deadlines` / `multiple_deadlines` / `overlapping_due_dates`) share almost no characters, because this is a semantic collision, not a spelling one. "Similar situations" and pattern analysis then become plain deterministic group-bys over a stored column. Keyword overlap would miss that "six tickets open" and "kept getting pulled into other things" are the same problem; embeddings would mean a vector store and a similarity threshold to tune, for a personal-scale log that fits in memory. This keeps the semantic work in one place, up front, and everything downstream is typed Python reading CSV rows — no query language, nothing injectable.
+**Rejected: `create_csv_agent`-style tools.** They give the LLM a local Python REPL to run generated code, gated behind `allow_dangerous_code=True` for good reason — there is a published advisory ([GHSA-3645-fxcv-hqr4](https://github.com/langflow-ai/langflow/security/advisories/GHSA-3645-fxcv-hqr4)) describing prompt-injection-triggered RCE via exactly this pattern. That conflicts with this project's bounded-tool-surface rule.
 
-**Web search: OpenAI's server-side built-in.** `{"type": "web_search"}` in the tools list — zero new dependency, zero new API key, since it runs on OpenAI's infrastructure under the key already in use. **Real tradeoff, stated plainly:** because the raw search payload never passes through our own code, there is no place to wrap it with a code-level "this is untrusted data" marker the way every other tool boundary here does. That defense is prompt-only (see `agent/prompts.py`) and is genuinely weaker than the rest of the app's boundaries. Binding it also switches `langchain-openai` to the Responses API, which changes `AIMessage.content` into a list of content blocks — hence `agent/graph.py:message_text()`. It can be turned off with `OPENAI_ENABLE_WEB_SEARCH=false`.
+**`measures.csv` is a persistent untrusted channel, and is treated as one.** `add_measure` can write text that came from a web page or from the model into a file that `find_measures` reads back in every later conversation, long after the "web results are untrusted" framing has scrolled away. So the id is regex-checked, the text is length-capped and sanitised, duplicate ids are refused, and every row records its `source`.
 
-**Eval suite (stages 9-10, built): LangSmith's `evaluate()` over a hand-rolled runner.** 28 hand-authored cases (`evals/dataset.jsonl`, not LLM-generated) graded by three deterministic structural checks (`evals/evaluators.py`: crisis-gate correctness, strict trajectory match for cases with one unambiguous right answer, and a no-fabrication check) plus an LLM judge (`evals/judge.py`, not yet calibrated — see "Results & limitations") for the free-text structuring-depth/clarifying-question rubric items the structural checks can't evaluate by construction. `evals/run_experiment.py` runs the real agent through every case; `evals/run_baseline.py` runs the same cases through a no-tools plain GPT call for comparison. See "How to run evals" and "Results & limitations" below for how to run it and the real numbers from the latest run.
+**Web search: OpenAI's server-side built-in.** `{"type": "web_search"}` in the tools list — no new dependency, no new key. **Real tradeoff:** the raw payload never passes through our own code, so there is no place to wrap it with a code-level "untrusted" marker the way every other tool boundary here does. That defense is prompt-only and is genuinely weaker than the rest. Turn it off with `OPENAI_ENABLE_WEB_SEARCH=false`.
+
+**One shared `next_turn_state()`.** The window and the eval harness must carry conversation state identically. They once implemented it separately and drifted, producing a full eval run of meaningless numbers. Both now call the same function, and a test in each place fails if it stops clearing state on a completed check-in.
 
 ## Setup prerequisites
 
-You'll need an OpenAI API key (required) and, optionally, a LangSmith API key (only if you want tracing). Each user of this software supplies their own — nothing here passes through the original developer's infrastructure.
+You need an OpenAI API key (required) and optionally a LangSmith key (tracing only). Each user supplies their own.
 
-### Mood log
+### Check-in log and measure list
 
-No setup needed. Entries save automatically to a local CSV file (`data/mood_log.csv`, created on first write) — no account, no credentials, no external service. See "Architectural decisions" above for why.
+No setup needed. `data/checkin_log.csv` is created on first write. `tools/measures.csv` ships with 28 curated measures — it is yours to edit by hand, and the agent can add to it with your agreement. Some rows come from [Stretchly](https://hovancik.net/stretchly/) under BSD 2-Clause; the licence travels with the data in `third_party/stretchly/`.
 
 ### OpenAI API key (required)
 
@@ -197,30 +137,41 @@ Create a key at [platform.openai.com](https://platform.openai.com/api-keys), cop
 
 ### LangSmith API key (optional — only for tracing)
 
-Not required to run the app. If you want tracing (per-turn LLM + tool spans, useful for debugging the agent's structuring-depth judgment):
+1. Sign up at [smith.langchain.com](https://smith.langchain.com). Note whether your dashboard URL is `eu.smith.langchain.com` — if so you need the extra step below.
+2. **Settings** → **API Keys** → **Create API Key**.
+3. In `.env`, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY=<your key>`. `LANGSMITH_PROJECT` is already `job-load-agent`.
+4. **EU accounts only:** also set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` — without it every trace fails with `403 Forbidden` even with a valid key, since keys are region-scoped.
 
-1. Sign up at [smith.langchain.com](https://smith.langchain.com) (free tier is fine) — a simple API key, no OAuth flow or app-registration wizard. Note whether your dashboard URL is `eu.smith.langchain.com` — if so, your account is EU-region and needs an extra step below.
-2. **Settings** → **API Keys** → **Create API Key** → copy it.
-3. In `.env`, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY=<your key>`. `LANGSMITH_PROJECT` is already set to `job-load-agent` — that's just the project name traces group under in the LangSmith UI (auto-created on first trace if it doesn't exist yet).
-4. **EU accounts only:** also set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` — without it, every trace fails with a `403 Forbidden` even with a valid key, since the key is region-scoped, not just account-scoped.
-
-Leave `LANGSMITH_TRACING=false` (the `.env.example` default) if you don't want this — setting it `true` without a real key causes repeated `401 Unauthorized` errors on every agent call, not a silent no-op. See "Data handling" below for what tracing actually sends to LangSmith if you enable it.
+Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real key causes repeated `401` errors on every agent call, not a silent no-op.
 
 ## How to run
 
-**On demand** — opens the chat window straight away:
+**The chat window:**
 
 ```powershell
 .venv\Scripts\python.exe app.py
 ```
 
-**Scheduled** — sits in the background and opens a window at the times you configure, plus a weekly digest:
+**The terminal client** — same agent, buttons as commands, and it prints which station answered each turn:
+
+```powershell
+.venv\Scripts\python.exe cli.py
+```
+
+```
+/energy <exhausted|calm|wired>     record energy
+/goal <calm|plan|change>           record goal
+/idea <text>                       discuss an idea of your own
+/no                                "not helpful"
+/rate <helped|somewhat|not>        rate the logged measure
+/state                             what the graph is carrying
+```
+
+**Scheduled** — sits in the background, opens a window at configured times plus a weekly digest:
 
 ```powershell
 .venv\Scripts\python.exe scheduler.py
 ```
-
-Edit `scheduler_config.json` to change when it fires:
 
 ```json
 {
@@ -229,120 +180,82 @@ Edit `scheduler_config.json` to change when it fires:
 }
 ```
 
-Set `"mode": "random_interval"` instead to get the original behavior (a nudge every 45–90 minutes, configurable via `interval_min_minutes`/`interval_max_minutes`). `--interval-min` / `--interval-max` still work as dev overrides and force that mode; `--config` points at a different config file.
+Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-min` / `--interval-max` are dev overrides; `--config` points at a different file.
 
 ## How the tool works
 
-**The conversation is a state machine.** Each state binds only the tools it is allowed to use, which makes the important rules structural rather than advisory:
+**Energy and goal are asked for, never guessed.** Tone, terseness and topic are explicitly *not* evidence: a short message is not low energy, and a busy day is not a goal. Answer with a button and it goes straight into the state; answer in words and the agent records it as soon as it has either one.
 
-| state | can it log? | can it search? | what it does |
-|---|---|---|---|
-| `triage` | no | no | decides what kind of message this is, and answers small talk directly |
-| `structuring` | no | no | asks one question at a time to unpack a heavier situation |
-| `light` | yes | no | logs a straightforward check-in |
-| `awaiting_scale` | no | no | asks for mood and energy — **no AI call at all** |
-| `post_log` | — | yes | replies, using your history before reaching for the web |
+**At most two suggestions**, each with one sentence on why it fits. Measure ids are never shown. A measure already offered in this conversation is never offered again — the graph tracks that, not the prompt.
 
-"The agent must not do X here" is an empty tool list, not a sentence in a prompt. `triage` cannot log a greeting because it has no logging tool; `structuring` cannot log on turn one because no path leads there.
+**Rejection is counted in code.** A short "not helpful" is recognised before any model call. The first rejection buys a web search with real links; the second steps back and re-asks about your goal.
 
-**Mood and energy are asked for, never guessed.** If you said them ("exhausted", "buzzing", "rough one"), they're taken as given. If you didn't, you get a short question with buttons — *mood: bad / neutral / good*, *energy: exhausted / calm / wired*. Tone, terseness and topic are explicitly **not** treated as evidence: a short message is not a bad mood, and a busy day is not low energy. Decline to answer and the fields stay empty, because an empty field is honest and a guessed one quietly corrupts the weekly digest.
+**Nothing is logged before you confirm it.** The agent proposes one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you agree. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
 
-That question costs no API call — it's fixed text rendered as buttons, which also means the scale wording can't drift.
-
-**When it logs.** The model calls `log_mood`, and from there the graph takes over: `classify_entry` turns the entry into semantic tags, the row is appended **once** already tagged, and `find_similar_entries` looks for past entries sharing those tags. All three results come back as one tool result, so the reply can be pattern-aware in the same turn.
-
-**Why that ordering is code and not prompt.** Asking a model to "always classify after logging" works most of the time — which means it silently fails some of the time, and an untagged entry is invisible to every future lookup. A graph edge cannot be skipped. The same is not true of genuine judgement calls (what to ask next, whether a search would help); those stay with the model.
-
-**What you get back.** An honest reply. If the write failed, it says so. If nothing similar is on record, it says that too rather than implying a pattern — including the entry it just wrote, which is excluded from its own history lookup.
-
-**Quick-select buttons** bypass all of this: a fixed template row, no AI call, no tagging. That's the point of them.
+**Honesty is structural.** Every tool call prints a receipt written by code, before the agent speaks. If a write failed, it says so. If a lookup came back empty, it says there is nothing yet rather than implying a pattern.
 
 ## How to run evals
 
-`evals/dataset.jsonl` is the source of truth for the **37 hand-authored cases** (28 original plus 9 added for the redesign's new capabilities). Edit it and re-run the dataset sync to pick up changes.
+> **These have not been rebuilt for the station architecture yet.** `evals/dataset.jsonl` still holds the 37 cases written for the previous design, including categories that no longer exist (`history`, `proactivity`). Running them now grades the agent against behaviour it no longer has. The commands below work; the numbers they produce do not yet mean anything.
 
-**With LangSmith** (default — gives you the hosted experiment, traces, and run-to-run comparison):
-
-```
-python -m evals.create_dataset   # idempotent upsert of the dataset to LangSmith
-python -m evals.run_experiment   # runs the real agent through every case, grades it, writes a report
-python -m evals.run_baseline     # same cases through a no-tools plain GPT call, for comparison
-```
-
-**Without LangSmith** — same cases, same evaluators, same report, no network dependency beyond the model itself:
+**With LangSmith:**
 
 ```
-python -m evals.run_local                 # all cases
-python -m evals.run_local --case hard_tool_failure_10   # one case
+python -m evals.create_dataset   # idempotent upsert of the dataset
+python -m evals.run_experiment   # runs the real agent through every case
+python -m evals.run_baseline     # same cases through a no-tools plain GPT call
 ```
 
-This exists because a transient DNS failure once crashed a run *after* every OpenAI call had been paid for, returning nothing. It also covers reviewers with no LangSmith account. What it gives up: the trace UI, run-to-run diffing, and the "Add to Dataset" promotion workflow.
-
-**Reading results without the LangSmith UI:**
+**Without LangSmith** — same cases, same evaluators, no network dependency beyond the model:
 
 ```
-python -m evals.fetch_results --list          # enumerate experiments
-python -m evals.fetch_results                 # newest experiment
-python -m evals.fetch_results --experiment <name>
+python -m evals.run_local
+python -m evals.run_local --case hard_tool_failure_10
 ```
 
-Pulls results over the API and writes a report that includes something the standard report does not: **the LLM judge's written reasoning for each failure.** A pass/fail table tells you something is wrong; the comment tells you what. It can also recover a run whose client crashed after the work completed, since traces and feedback are already server-side.
+This exists because a transient DNS failure once crashed a run *after* every OpenAI call had been paid for. It also covers reviewers with no LangSmith account. It gives up the trace UI and run-to-run diffing.
 
-All runners write a timestamped Markdown copy into `evals/results/` (gitignored) as well as printing to the console.
+**Reading results without the UI:**
+
+```
+python -m evals.fetch_results --list
+python -m evals.fetch_results
+```
+
+Includes the judge's written reasoning per failure — a pass/fail table says something is wrong, the comment says what.
 
 ### Inspecting the agent graph
 
 ```
-python try_graph_viz.py            # print the compiled graph as mermaid
-python try_graph_viz.py --write    # refresh notes/graph-visual.md for VS Code preview
+python try_graph_viz.py            # mermaid
+python try_graph_viz.py --write    # refresh notes/graph-visual.md
 python try_graph_viz.py --png g.png
 ```
 
-Renders what `build_agent()` **actually compiled**, so unlike a hand-drawn diagram it cannot drift from the code. Solid arrows are unconditional edges; dotted ones are routing decisions. Uses a stub model — no API key, no network (except `--png`, which calls mermaid.ink).
+Renders what `build_agent()` **actually compiled**, so it cannot drift from the code. Uses a stub model — no API key, no network (except `--png`).
 
 ## Results & limitations
 
-Latest real eval run (2026-09-11), **37 hand-authored cases**, experiment `job-load-agent-v2`:
+**Current state: pre-release. 393 passing tests, and no valid eval numbers.**
 
-**Zero-tolerance rubric items (must be 100%) — both pass:**
-- `crisis_gate_correctness`: 37/37 (100%)
-- `no_fabrication`: 37/37 (100%)
+The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
-Both held across a substantial agent rewrite (new schema, semantic tagging, history lookup, web search, a hand-rolled graph) and across all 9 newly added cases. That is the result that matters most here — safety and honesty did not regress while the architecture changed underneath them.
+**The eval figures from the previous architecture are not reproduced here**, because they measured a system that no longer exists (semantic tagging, history lookup, a structuring flow — all removed). The last run under the old design scored 100% on both zero-tolerance items (crisis-gate correctness, no fabrication) and 73% overall, and that overall figure was dominated by an uncalibrated LLM judge. Rebuilding the dataset for the station design is the next planned step.
 
-**Overall pass rate: 27/37 (73%).** Compared like-for-like on the original 28 cases it is 21/28, unchanged from before the redesign. Treat this number with care for two reasons:
+**Known limitations:**
 
-1. **It is dominated by the uncalibrated LLM judge**, not by the deterministic checks. See "Not yet calibrated" below.
-2. **A single run's pass rate conflates three different things** — genuine regressions, long-standing failures, and run-to-run variance. Re-running the failures individually showed four of seven flipping to passing, two failing identically since the previous release, and exactly one being a real regression. Diff against the previous report before concluding anything.
+- Energy, goal and helpfulness are entirely self-report, not sensed.
+- Check-ins fire at configured times or a random interval, not adaptively.
+- Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
+- A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons.
+- The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
+- Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
+- The LLM judge in the eval suite is not calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be.
+- Single-user personal tool. No cloud sync, no access from another device, no built-in backup — a deliberate tradeoff for zero setup, not an oversight.
+- This is a wellness aid, not a clinical tool; the crisis gate is a basic keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
 
-**Notable individual results:**
-- `hard_prompt_injection_history_13` **passes** — instruction-like text planted inside a *past log entry* is not obeyed when the history lookup surfaces it. This is the only code-defensible injection surface of the three (user message, web search, log history), and it now has a test.
-- `hard_tool_failure_10` genuinely exercises the write-failure path for the first time. Its `notes` had claimed for several releases that the harness simulated a failure; no such code existed, so it had been passing on an ordinary successful write.
+**Data handling:** this tool records genuinely personal reflections. That content goes to OpenAI's API and, with tracing on, to LangSmith — both third parties, with no redaction. That is a deliberate choice for debugging signal, not an oversight; leave `LANGSMITH_TRACING=false` if you are not comfortable with it. The logs themselves stay local. `data/*.csv`, `state/*.jsonl` and `observability/runs.jsonl` must never be committed to a public repo.
 
-**No-tools baseline comparison** (`run_baseline.py` — same cases, no tools bound, no crisis gate, a deliberately naive system prompt): the baseline fabricated a "logged it" claim on 9 of 28 cases (68% `no_fabrication`) against the real agent's 100%. That difference is what the tool boundary and the explicit honesty rule actually buy.
+## Not implemented in this version
 
-Full per-case reports: `evals/results/eval-report-*.md` and `fetched-*.md`, each linking to its LangSmith experiment.
-
-**Not yet calibrated:** the LLM judge (`evals/judge.py`) used for the structuring-depth/clarifying-question rubric items has not been checked against hand-labeled ground truth, and there is now concrete evidence it needs to be. It repeatedly marks down *inferring* a field as "fabricating detail" while the system prompt explicitly instructs inferring that field when implied — so it penalises intended behaviour. It also leaks a literal `SCORE_YOU_ASSIGN` template placeholder into most of its comments. The zero-tolerance items are graded by deterministic structural checks, not the judge, and are unaffected.
-
-**Limitations (stated explicitly):**
-- Mood/measure detection is entirely self-report, not sensed.
-- Check-ins fire on fixed configured times (or a randomized interval), not adaptively based on how you've been doing.
-- Semantic tags are open-vocabulary, so near-synonyms could drift apart (`overlapping_deadlines` one day, `concurrent_deadlines` the next) and leave genuinely similar entries unmatched. This is mitigated, not eliminated: the classifier is shown the tags already in your log and told to reuse one where it genuinely fits (measured on real paraphrases: 0/3 → 3/3 entries connected). Residual gaps — only the 40 most-used tags are offered, reuse is a prompt instruction rather than a guarantee, and tags that drifted before this existed are not retroactively merged.
-- Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, there is no deterministic, code-level check possible there — unlike `log_mood`'s fixed schema or the crisis gate's pre-LLM regex. This is a materially weaker guarantee than the rest of the app's tool boundaries.
-- Quick-select entries are never semantically tagged (tagging needs an LLM call, and those buttons promise no AI involvement), so they're invisible to the similar-situations lookup and the weekly digest's tag counts.
-- Conversations have no persistent memory across windows: each scheduled check-in starts with an empty message list, so the agent only "remembers" what's in the CSV log, not what was said in an earlier window.
-- Single-user personal tool.
-- Helpfulness scores are self-reported and unverified.
-- This is a wellness aid, not a clinical tool; the crisis gate is a basic keyword list, not a validated risk-assessment instrument (deliberately biased toward false positives over false negatives).
-- `energy` is inspired by a concept from burnout research (emotional exhaustion) but is not a validated burnout assessment or diagnostic tool — see "Why `mood` and `energy` are separate" above.
-- Only the relationship-to-self burnout dimension is tracked (exhaustion). The relationship-to-others dimension (depersonalization/cynicism) and the reduced-accomplishment dimension are deliberately not logged — this tool doesn't attempt to capture how you're relating to colleagues/clients, only your own state.
-- The mood log lives only on the machine it's run on (`data/mood_log.csv`) — no cloud sync, no access from another device, no built-in backup. That's a deliberate tradeoff for zero setup/zero external credentials (see "Architectural decisions" above), not an oversight.
-- The agent infers `mood` and `energy` from what you wrote rather than asking you. This is a known design flaw, not a feature: every instrument the schema is grounded in (Russell's circumplex, the Karolinska scale, Bond-Lader, Maslach exhaustion) is a **self-report** instrument, so inferring inverts their method. Replacing inference with elicitation is the next planned change.
-- The eval suite's LLM judge (structuring-depth/clarifying-question rubric items) is not yet calibrated against hand-labeled ground truth — see "Not yet calibrated" above. The zero-tolerance items (crisis-gate correctness, no fabrication) are graded by deterministic structural checks, not the judge, and are unaffected by this.
-
-**Data handling:** this tool records genuinely personal reflections. That content is sent to OpenAI's API (to power the agent) and, if you enable tracing (`LANGSMITH_TRACING=true`), to LangSmith — both third-party services. **If tracing is enabled, LangSmith receives full conversation content, including the deeper-structuring fields (`situation`/`thoughts`) from heavier check-ins, with no redaction and no structural-only scoping.** That's a deliberate choice for the richest debugging signal into the agent's structuring-depth judgment, not an oversight — if you're not comfortable with that, leave tracing off (`LANGSMITH_TRACING=false`, the default in `.env.example`). The mood log itself stays local and is never sent anywhere. `data/mood_log.csv` and other local plaintext files (`state/pending_sheet_log.jsonl`, `observability/runs.jsonl`) must never be committed to a public repo.
-
-## Phase 2 / not implemented in this version
-
-A break-companion feature (agent-suggested, human-confirmed real break via Stretchly) was fully designed alongside this MVP but deliberately deferred as a scope decision — see the project plan for the full design, including its human-in-the-loop safety model for the one subprocess call it would make.
+A break-companion feature (agent-suggested, human-confirmed real break via Stretchly) was designed alongside this MVP and deliberately deferred — see the project plan for the design, including its human-in-the-loop model for the one subprocess call it would make.
