@@ -6,7 +6,7 @@ numbers that are already true. These tests pin the two things that actually
 matter for honesty: a thin week must not be dressed up as a pattern, and a
 failed LLM call must not silently cancel the digest.
 """
-from typing import Any, Optional
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -19,7 +19,7 @@ from scheduler_config import Fire, SchedulerConfig
 
 class StubChatModel(BaseChatModel):
     reply: str = "Here's your week."
-    error: Optional[str] = None
+    error: str | None = None
     received_messages: list = Field(default_factory=list)
 
     def bind_tools(self, tools: Any, **kwargs: Any):
@@ -40,22 +40,23 @@ def _summary(**overrides) -> dict:
     base = {
         "window_days": 7,
         "entry_count": 4,
+        "rating_count": 2,
         "enough_data": True,
-        "top_tags": [("deadline_pressure", 4), ("context_switching", 2)],
-        "mood_counts": {"bad": 3, "neutral": 1},
         "energy_counts": {"wired": 3},
-        "measures_taken": [],
+        "top_measures": [("Walk for five minutes.", 4), ("Say no to one request today.", 2)],
+        "helpfulness_counts": {"Walk for five minutes.": {"helped": 2}},
+        "best_measures": ["Walk for five minutes."],
     }
     base.update(overrides)
     return base
 
 
 def test_uses_the_model_phrasing_when_there_is_enough_data():
-    model = StubChatModel(reply="You logged deadline_pressure 4 times this week.")
+    model = StubChatModel(reply="A five-minute walk came up four times this week.")
 
     opener = build_digest_opener(_summary(), model=model)
 
-    assert opener == "You logged deadline_pressure 4 times this week."
+    assert opener == "A five-minute walk came up four times this week."
 
 
 def test_thin_week_says_not_enough_data_without_calling_the_model():
@@ -74,14 +75,26 @@ def test_llm_failure_falls_back_to_a_factual_opener():
 
     opener = build_digest_opener(_summary(), model=model)
 
-    assert "deadline_pressure" in opener
+    assert "Walk for five minutes." in opener
+    assert "helped" in opener
+
+
+def test_the_fallback_reports_a_count_when_nothing_has_been_rated():
+    """With no verdicts in, the honest thing to say is what they did, not
+    what worked."""
+    summary = _summary(best_measures=[], helpfulness_counts={}, rating_count=0)
+
+    opener = build_digest_opener(summary, model=StubChatModel(error="outage"))
+
+    assert "Walk for five minutes." in opener
     assert "4 times" in opener
+    assert "helped" not in opener
 
 
 def test_empty_model_reply_falls_back_too():
     opener = build_digest_opener(_summary(), model=StubChatModel(reply="   "))
 
-    assert "deadline_pressure" in opener
+    assert "Walk for five minutes." in opener
 
 
 def test_real_counts_are_what_gets_sent_to_the_model():
@@ -90,8 +103,27 @@ def test_real_counts_are_what_gets_sent_to_the_model():
     build_digest_opener(_summary(), model=model)
 
     sent = str(model.received_messages[0][1].content)
-    assert "deadline_pressure (4x)" in sent
-    assert "'bad': 3" in sent
+    assert "Walk for five minutes. (4x)" in sent
+    assert "'wired': 3" in sent
+    assert "check-ins in the last 7 days: 4" in sent
+
+
+def test_what_worked_is_sent_separately_from_what_was_tried():
+    """The one thing this opener must not do is congratulate someone on a
+    measure they rated as no help. Leaving the model to infer that from the
+    counts is how that happens, so the summary states it."""
+    model = StubChatModel()
+    summary = _summary(
+        top_measures=[("Take a day off.", 3), ("Walk for five minutes.", 1)],
+        helpfulness_counts={"Take a day off.": {"didnt_help": 3}},
+        best_measures=[],
+    )
+
+    build_digest_opener(summary, model=model)
+
+    sent = str(model.received_messages[0][1].content)
+    assert "what they tried: Take a day off. (3x)" in sent
+    assert "what they rated as helping: nothing rated yet" in sent
 
 
 def test_checkin_fire_uses_the_plain_opener():
