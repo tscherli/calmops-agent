@@ -1,7 +1,6 @@
 import json
 
 import pytest
-
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from observability.tracing import RunRecorder, summarize_turn
@@ -170,3 +169,24 @@ def test_a_turn_without_model_metadata_still_uses_the_passed_model():
     record = summarize_turn([], [message], "gpt-5-nano", 1.0)
     assert record.models_used == ["gpt-5-nano"]
     assert record.estimated_cost_usd == pytest.approx(0.05)
+
+
+# -- the suite must not write to the file it measures against ----------------
+
+
+def test_a_default_recorder_never_points_at_the_real_runs_log():
+    """The recorder's fallback path is what production uses to answer "what
+    does a turn cost". A test appending to it writes a zero-token row, which
+    drags the mean down and makes a budget look met when it is not.
+
+    Asserted on the resolved path rather than by counting rows afterwards:
+    the damage is cumulative and invisible, so the check has to fail the
+    moment the isolation slips, not once someone reads the file.
+    """
+    from pathlib import Path
+
+    from observability.tracing import RunRecorder
+
+    real = Path(__file__).resolve().parent.parent / "observability" / "runs.jsonl"
+
+    assert RunRecorder().log_path != real

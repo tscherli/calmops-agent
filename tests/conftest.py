@@ -22,6 +22,10 @@ os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGCHAIN_TRACING_V2"] = "false"   # legacy name, still honoured
 os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-a-real-key")
 
+# A second isolation the suite needs for the same reason as the tracing
+# switch above, found the same way -- by looking at the real file. See
+# `isolated_runs_log` below.
+
 
 import time
 import tkinter as tk
@@ -57,6 +61,28 @@ def _new_root(attempts: int = 3) -> tk.Tk:
             last = exc
             time.sleep(0.2)
     raise AssertionError(f"Tk could not be constructed after {attempts} attempts: {last}")
+
+
+@pytest.fixture(autouse=True)
+def isolated_runs_log(tmp_path, monkeypatch):
+    """No test may append to the real `observability/runs.jsonl`.
+
+    `RunRecorder` falls back to that path whenever it is constructed without
+    one, and `ChatApp` constructs its own recorder when a test does not pass
+    it a stub. So every UI test that ran a turn wrote a row into the file the
+    project uses to measure what a real turn costs.
+
+    The rows are not merely extra: they carry zero tokens and zero cost,
+    because a stubbed model reports no usage. Measured before this fixture
+    existed, 355 of 520 rows were fixture noise, and the mean cost per turn
+    read three times cheaper than the truth. A budget check against that file
+    would have passed while saying nothing.
+
+    Patched here rather than in each test module because the failure is
+    silent, shows up nowhere near the test that caused it, and only surfaces
+    when someone finally reads the file to answer a cost question.
+    """
+    monkeypatch.setattr("observability.tracing.RUNS_LOG_PATH", tmp_path / "runs.jsonl")
 
 
 @pytest.fixture
