@@ -106,6 +106,34 @@ def test_an_unfinished_turn_keeps_every_station_field():
         assert carried[field] == value, field
 
 
+def test_a_real_measure_payload_survives_compaction():
+    """The shape matters, not just the size.
+
+    find_measures answers with a JSON *list*. Compaction used to assume the
+    log's dict and called .get on it, which raised AttributeError on the
+    second turn of every conversation that reached a suggestion -- and the
+    clients reported it as "something went wrong". The old test used
+    "x" * 400, which is not JSON at all, so it took the parse-failure branch
+    and never touched the assumption.
+    """
+    import json
+
+    from agent.common import as_tool_content
+
+    payload = as_tool_content(
+        [{"measure_id": f"m{i}", "measure": "Something to try." * 3} for i in range(4)]
+    )
+    assert len(payload) > 200 and isinstance(json.loads(payload), list)
+
+    carried = next_turn_state(
+        {"messages": [ToolMessage(content=payload, name="find_measures", tool_call_id="a")], **LIVE}
+    )
+
+    kept = carried["messages"][0].content
+    assert len(kept) < len(payload)
+    assert "4 results" in kept, "the marker should say what was dropped"
+
+
 def test_only_the_fat_payload_shrinks():
     """find_measures returns the whole measure list; the log's receipt is small
     and is what the next station reads to know a row exists."""

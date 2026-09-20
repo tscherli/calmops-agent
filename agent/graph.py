@@ -136,21 +136,33 @@ def state_tool_reply(text: str, tool_call_id: str, name: str, **update: Any) -> 
 
 @tool
 def record_choices(
-    energy: Energy,
-    goal: Goal,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    energy: Energy | None = None,
+    goal: Goal | None = None,
 ) -> Command:
-    """Record the user's energy and goal, or change either when they say so.
+    """Record the user's energy, their goal, or either one on its own.
+
+    Call this the moment the user gives you one of them. Do not wait for the
+    other: telling them you noted it records nothing, and the next turn will
+    have forgotten it.
 
     energy: how they feel right now - exhausted, calm or wired.
     goal: what would help them most - "calm down now" (a few minutes),
     "plan recovery" (something for later, hours or days), or
     "change the situation" (act on the cause of the stress).
-    Only use what the user actually said; if either is missing, ask instead.
+    Only pass what the user actually said; ask for whatever is still missing.
     """
-    return state_tool_reply(
-        f"Noted: {energy}, {goal}.", tool_call_id, "record_choices", energy=energy, goal=goal
-    )
+    # Only the values actually given: passing None would blank a value
+    # recorded on an earlier turn.
+    update = {name: value for name, value in (("energy", energy), ("goal", goal)) if value}
+    if not update:
+        return state_tool_reply(
+            "Nothing recorded: pass the energy or the goal the user gave.",
+            tool_call_id,
+            "record_choices",
+        )
+    noted = ", ".join(f"{name} {value}" for name, value in update.items())
+    return state_tool_reply(f"Noted: {noted}.", tool_call_id, "record_choices", **update)
 
 
 @tool

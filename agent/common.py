@@ -150,8 +150,21 @@ def compact_spent_tool_messages(
         ):
             try:
                 data = json.loads(message.content)
-                slim = {"status": data.get("status"), "row_id": data.get("row_id")}
             except (ValueError, TypeError):
+                data = None
+            # The marker has to survive whatever shape the tool returned.
+            # find_measures answers with a *list*; assuming the log's dict
+            # here raised AttributeError on the second turn of every
+            # conversation that got as far as a suggestion, and the clients
+            # caught it as "something went wrong".
+            if isinstance(data, dict):
+                slim = {"status": data.get("status"), "row_id": data.get("row_id")}
+            elif isinstance(data, list):
+                slim = {
+                    "status": "ok",
+                    "note": f"{len(data)} results, already shown earlier in this conversation",
+                }
+            else:
                 slim = {"status": "ok"}
             out.append(
                 ToolMessage(
@@ -164,3 +177,27 @@ def compact_spent_tool_messages(
         else:
             out.append(message)
     return out
+
+
+def format_tool_event(event: dict[str, Any]) -> str:
+    """One line describing what a tool actually did.
+
+    Shared by every client so there is exactly one way the user is told an
+    entry was saved. Two formats would mean two things to trust, and the
+    whole point of a receipt is that it is the one part of the conversation
+    the model cannot write.
+
+    A tool that never ran has no exit code, and says "skipped" rather than
+    reporting a 0. An unverified event is one we did not witness in our own
+    code -- currently only the server-side web search -- and saying so is the
+    point.
+    """
+    exit_code = event.get("exit_code")
+    status = "skipped" if exit_code is None else f"exit {exit_code}"
+    line = f"  > {event.get('tool', '?')} -> {status}"
+    detail = event.get("detail") or ""
+    if detail:
+        line += f" - {detail}"
+    if not event.get("verified", True):
+        line += "  [provider-reported]"
+    return line

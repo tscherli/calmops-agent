@@ -23,9 +23,10 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage
 
-from agent.common import message_text
+from agent.common import format_tool_event, message_text
 from agent.graph import build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
+from agent.prompts import choice_sentence
 from agent.safety import CRISIS_RESOURCES, screen_for_crisis
 from observability.tracing import RunRecorder
 from tools.checkin_log import Helpfulness, append_checkin_row, measure_awaiting_rating
@@ -255,10 +256,12 @@ class ChatApp:
         self.state[field] = value
         self._append_message("You", f"{field}: {value}")
         self._refresh_controls()
-        if self.state.get("energy") and self.state.get("goal"):
-            self._run_turn(
-                f"I'm feeling {self.state['energy']} and I want to {self.state['goal']}."
-            )
+        # Every click runs a turn, including the first of the pair. What a
+        # half-answered pair means is the ask station's job, not this
+        # window's: with both, route_start reaches `suggest`; with one, `ask`
+        # asks for the other. Waiting for both left a click doing nothing
+        # visible at all.
+        self._run_turn(choice_sentence(self.state.get("energy"), self.state.get("goal")))
 
     def _on_rating_click(self, value: str) -> None:
         """Either a rejection or a rating -- never a model call, and in the
@@ -313,18 +316,9 @@ class ChatApp:
         anything about it -- so the evidence arrives ahead of the claim. The
         agent cannot produce one of these and cannot suppress one.
         """
-        exit_code = event.get("exit_code")
-        status = "skipped" if exit_code is None else f"exit {exit_code}"
-        detail = event.get("detail") or ""
-        # An unverified event is one we did not witness in our own code --
-        # currently only the server-side web_search. Saying so is the point.
-        source = "" if event.get("verified", True) else "  [provider-reported]"
-        line = f"  > {event.get('tool', '?')} -> {status}"
-        if detail:
-            line += f" · {detail}"
-        tag = "tool_error" if exit_code == 1 else "tool"
+        tag = "tool_error" if event.get("exit_code") == 1 else "tool"
         self.history.configure(state="normal")
-        self.history.insert("end", f"{line}{source}\n", tag)
+        self.history.insert("end", f"{format_tool_event(event)}\n", tag)
         self.history.configure(state="disabled")
         self.history.see("end")
 
@@ -427,7 +421,18 @@ class ChatApp:
                     self._set_busy(False)
                     return
                 elif kind == "done":
-                    self._finish_turn(data, messages_before, time.time() - start)
+                    # _finish_turn runs here, on the main thread, outside the
+                    # worker's try/except. An exception in it used to leave
+                    # the input disabled forever with the traceback on stderr
+                    # -- from the user's side, a window that answered once and
+                    # then froze. A failure has to be visible and recoverable.
+                    try:
+                        self._finish_turn(data, messages_before, time.time() - start)
+                    except Exception as exc:  # never let the UI lock up silently
+                        self._append_message(
+                            "App", f"Something went wrong finishing that turn: {exc}"
+                        )
+                        self._set_busy(False)
                     return
         except queue.Empty:
             pass

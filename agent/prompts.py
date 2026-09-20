@@ -60,7 +60,9 @@ evidence: a short message is not low energy, and a packed day is not a goal.
 the three options in one short sentence each.
 - A tentative answer counts: "maybe changing the situation" names one of the three, so record it. \
 Never ask them to repeat something they already said.
-- As soon as both are known, call record_choices. Suggest nothing yourself.
+- Call record_choices the moment you learn either one, without waiting for the other. Saying \
+"got it" records nothing: if you do not call the tool, the next turn will not know. Then ask for \
+whatever is still missing. Suggest nothing yourself.
 - If the user brings an idea of their own for what could help, call discuss_idea with it."""
 
 
@@ -164,3 +166,24 @@ def debate_prompt(idea: str, *, nudge: bool = False) -> str:
     """The debate station's prompt for one specific idea."""
     text = f"{STATION_BASE}\n\n{DEBATE_PROMPT.format(idea=idea)}"
     return f"{text}\n\n{DEBATE_DECIDE_NUDGE}" if nudge else text
+
+
+def choice_sentence(energy: str | None, goal: str | None) -> str:
+    """What a button click says on the user's behalf.
+
+    A click is a fact, so it goes into the payload state directly -- but the
+    transcript still needs a sentence, or the station would answer a turn
+    with nothing in it. One version for every client: two phrasings of the
+    same click would give the model two things to interpret.
+
+    Either value alone is a valid click. The graph decides what happens
+    next: with both, route_start reaches `suggest` and the ask station never
+    runs; with one, `ask` asks for the other.
+    """
+    if energy and goal:
+        return f"I'm feeling {energy} and I want to {goal}."
+    if energy:
+        return f"I'm feeling {energy}."
+    if goal:
+        return f"What would help me most is to {goal}."
+    return ""

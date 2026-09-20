@@ -222,15 +222,19 @@ def test_the_choice_buttons_are_offered_until_both_answers_are_in(tk_root):
     assert _visible(app.choice_frame)
 
 
-def test_one_click_records_one_value_without_asking_the_model(tk_root):
-    """A click is unambiguous self-report. Reading it back out of a sentence
-    would cost a model call and could get it wrong."""
-    app = ChatApp(tk_root, skip_consent=True, agent_graph=_PoisonGraph())
+def test_one_click_runs_a_turn_so_the_agent_can_ask_for_the_other(tk_root):
+    """A click is unambiguous self-report, and it goes into the payload
+    directly. But what a half-answered pair means is the ask station's job:
+    waiting for both left the first click doing nothing visible at all."""
+    stub = _StubGraph()
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
 
     app._on_choice_click("energy", "wired")
+    settle(tk_root, app)
 
-    assert app.state["energy"] == "wired"
-    assert _visible(app.choice_frame), "goal is still missing, so keep asking"
+    assert stub.invoked_with["energy"] == "wired"
+    assert not stub.invoked_with.get("goal")
+    assert _visible(app.choice_frame), "goal is still missing, so keep offering it"
 
 
 def test_both_answers_run_a_turn_that_already_carries_them(tk_root):
@@ -241,6 +245,7 @@ def test_both_answers_run_a_turn_that_already_carries_them(tk_root):
     app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
 
     app._on_choice_click("energy", "wired")
+    settle(tk_root, app)
     app._on_choice_click("goal", "calm down now")
     settle(tk_root, app)
 
@@ -485,3 +490,26 @@ def test_the_consent_text_says_what_the_buttons_do_and_do_not_send(tk_root):
     assert "buttons" in lowered
     assert "everything you type is sent" in lowered
     assert "web search" in lowered
+
+
+def test_a_failure_after_the_reply_unlocks_the_window(tk_root):
+    """_finish_turn runs on the main thread, outside the worker's try/except.
+    An error there used to leave the input disabled forever with only a
+    stderr traceback -- a window that answered once and then froze, which is
+    indistinguishable from a hang. It has to say so and stay usable.
+
+    A recorder that cannot write stands in for the real case: anything
+    raising between the reply and _set_busy(False) has this effect.
+    """
+    class _BrokenRecorder:
+        def record_turn(self, *args, **kwargs):
+            raise OSError("disk full")
+
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=_StubGraph(),
+                  recorder=_BrokenRecorder())
+    app.entry.insert(0, "hello")
+    app._on_send()
+    settle(tk_root, app)
+
+    assert str(app.send_button.cget("state")) == "normal", "the window must stay usable"
+    assert "went wrong" in app.history.get("1.0", "end").lower()

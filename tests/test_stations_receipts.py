@@ -236,3 +236,39 @@ def test_a_claim_in_the_prose_does_not_produce_a_receipt(measures_file, log_file
     result = graph.invoke({"messages": [HumanMessage(content="hi")], **BASE})
     assert receipts(result) == []
     assert not log_file.exists()
+
+
+def test_one_value_on_its_own_is_recorded(measures_file, log_file):
+    """The bug this was found through: the tool used to require both, so a
+    user who said only "I am tired" had their energy acknowledged in prose
+    and stored nowhere. The next turn had forgotten it."""
+    graph = agent_that_calls(
+        measures_file, log_file, call("record_choices", {"energy": "exhausted"})
+    )
+    result = run(graph, {"messages": [HumanMessage(content="i am tired")]})
+
+    assert result["energy"] == "exhausted"
+    assert not result.get("goal")
+
+
+def test_the_second_value_arrives_without_blanking_the_first(measures_file, log_file):
+    """Passing None for the value that was not given must not erase what an
+    earlier turn recorded -- which is what a plain **update would do."""
+    graph = agent_that_calls(
+        measures_file, log_file, call("record_choices", {"goal": "calm down now"})
+    )
+    result = run(
+        graph,
+        {"messages": [HumanMessage(content="calm down now")], "energy": "exhausted"},
+    )
+
+    assert result["energy"] == "exhausted"
+    assert result["goal"] == "calm down now"
+
+
+def test_a_call_with_neither_value_records_nothing_and_says_so(measures_file, log_file):
+    graph = agent_that_calls(measures_file, log_file, call("record_choices", {}))
+    result = run(graph, {"messages": [HumanMessage(content="hello")]})
+
+    assert not result.get("energy") and not result.get("goal")
+    assert "Nothing recorded" in str(result["messages"][-2].content)
