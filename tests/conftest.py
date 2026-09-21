@@ -29,13 +29,39 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-a-real-key")
 
 import time
 import tkinter as tk
+import uuid
+from collections.abc import Callable
 from typing import Any
 
 import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langgraph.types import Command
 from pydantic import Field
+
+
+def approve_all(request: dict) -> dict:
+    return {"type": "approve"}
+
+
+def invoke_approving(graph, state: dict, decide: Callable[[dict], dict] = approve_all) -> dict:
+    """Run one turn the way the clients do: a fresh thread, every pause answered.
+
+    `decide` gets each action request and returns the decision for it. The
+    result carries `pauses`, how many times the turn stopped for the user, so a
+    test can assert on the count rather than infer it.
+    """
+    config = {"configurable": {"thread_id": uuid.uuid4().hex}}
+    result = graph.invoke(state, config)
+    pauses = 0
+    while result.get("__interrupt__"):
+        pauses += 1
+        requests = result["__interrupt__"][0].value["action_requests"]
+        decisions = [{"id": r["id"], **decide(r)} for r in requests]
+        result = graph.invoke(Command(resume={"decisions": decisions}), config)
+    result["pauses"] = pauses
+    return result
 
 
 def _new_root(attempts: int = 3) -> tk.Tk:

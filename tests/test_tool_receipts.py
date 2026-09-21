@@ -99,7 +99,7 @@ class _StreamingStub:
         self.final_state = final_state or {}
         self.payloads: list[dict] = []
 
-    def stream(self, payload, stream_mode=None):
+    def stream(self, payload, config=None, stream_mode=None):
         self.payloads.append(payload)
         for event in self.events:
             yield ("updates", {"follow_up": {"tool_events": [event]}})

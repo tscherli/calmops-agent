@@ -13,6 +13,7 @@ import threading
 import time
 import tkinter as tk
 import typing
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 from tkinter import scrolledtext
@@ -22,6 +23,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from agent.common import format_tool_event, message_text
 from agent.graph import build_agent, next_turn_state
@@ -62,6 +65,9 @@ CONSENT_TEXT = (
     "The buttons in this window -- your energy and goal, and how well something "
     "worked -- are recorded without asking the model anything. Everything you type "
     "is sent.\n\n"
+    "Nothing is written to your log or your list of measures without you: when "
+    "the agent wants to, it shows exactly what it would write and waits for you "
+    "to approve, edit or reject it.\n\n"
     "If you are not comfortable with a large language model processing your "
     "personal information, do not use this software.\n\n"
     "This is a self-reflection aid, not a substitute for professional mental health "
@@ -113,7 +119,15 @@ class ChatApp:
         self.last_measure_id: str = measure_awaiting_rating(log_path)
         self._idea_pending = False
         self._rating_mode: str | None = None
-        self.graph = agent_graph if agent_graph is not None else build_agent()
+        # The approval card's working state while a turn is paused: the
+        # requests still to answer and the decisions given so far.
+        self._pending_requests: list[dict] = []
+        self._decisions: list[dict] = []
+        # The checkpointer is what lets a turn pause on the approval card and
+        # resume; it only ever has to hold one turn (a fresh thread per turn).
+        self.graph = (
+            agent_graph if agent_graph is not None else build_agent(checkpointer=InMemorySaver())
+        )
         self.recorder = recorder if recorder is not None else RunRecorder()
         self._opener_message = opener_message
         # Receipts for work done before this window existed -- the scheduler's
@@ -155,6 +169,9 @@ class ChatApp:
         self.history.tag_configure("tool", font=("TkFixedFont", 8), foreground="gray45")
         self.history.tag_configure("tool_error", font=("TkFixedFont", 8), foreground="firebrick")
 
+        self.approval_frame = tk.Frame(self.root, relief="groove", borderwidth=2, padx=6, pady=6)
+        self._build_approval_card()
+
         self.controls = tk.Frame(self.root)
         self.controls.pack(fill="x", padx=10, pady=(0, 2))
         self._build_control_buttons()
@@ -173,6 +190,86 @@ class ChatApp:
             self._append_tool_event(event)
         if self._opener_message:
             self._append_message("Agent", self._opener_message)
+
+    # -- The approval card: nothing is written without a click --------------
+
+    def _build_approval_card(self) -> None:
+        """Three fixed buttons; only the text shown changes.
+
+        The model decides nothing about this card: the description is built by
+        the graph from the call's own arguments, and the buttons are always the
+        same three. The entry holds the one value Edit may change.
+        """
+        self.approval_label = tk.Label(
+            self.approval_frame, text="", anchor="w", justify="left", wraplength=520
+        )
+        self.approval_label.pack(fill="x")
+        self.approval_entry = tk.Entry(self.approval_frame)
+        buttons = tk.Frame(self.approval_frame)
+        buttons.pack(fill="x", pady=(4, 0))
+        self.approve_button = tk.Button(buttons, text="Approve", command=lambda: self._on_decision("approve"))
+        self.edit_button = tk.Button(buttons, text="Save my edit", command=lambda: self._on_decision("edit"))
+        self.reject_button = tk.Button(buttons, text="Reject", command=lambda: self._on_decision("reject"))
+        for button in (self.approve_button, self.edit_button, self.reject_button):
+            button.pack(side="left", padx=2)
+
+    def _show_approval(self, paused: dict, messages_before: list, start: float, config: dict) -> None:
+        """A turn stopped for the user. Input stays locked; only the card works."""
+        self._pending_requests = list(paused.get("action_requests") or [])
+        self._decisions = []
+        self._resume_args = (messages_before, start, config)
+        if not self._pending_requests:
+            self._resume_turn()
+            return
+        self._show_request(self._pending_requests[0])
+
+    def _show_request(self, request: dict) -> None:
+        self.approval_label.configure(text=f"Approval needed: {request.get('description', '')}")
+        editable = request.get("editable")
+        self.approval_entry.delete(0, "end")
+        if editable:
+            self.approval_entry.insert(0, str((request.get("args") or {}).get(editable, "")))
+            self.approval_entry.pack(fill="x", pady=(4, 0), before=self.approve_button.master)
+            self.edit_button.configure(state="normal")
+        else:
+            self.approval_entry.pack_forget()
+            self.edit_button.configure(state="disabled")
+        self.approval_frame.pack(fill="x", padx=10, pady=(0, 4), before=self.controls)
+
+    def _on_decision(self, kind: str) -> None:
+        """Record one decision; ask the next question or resume the turn.
+
+        An edit with nothing in it is a rejection: a write must never happen
+        because an answer was unclear.
+        """
+        if not self._pending_requests:
+            return
+        request = self._pending_requests.pop(0)
+        call_id = request.get("id", "")
+        editable = request.get("editable")
+        edited = self.approval_entry.get().strip()
+        if kind == "approve":
+            self._decisions.append({"id": call_id, "type": "approve"})
+            self._append_message("You", f"approved - {request.get('description', '')}")
+        elif kind == "edit" and editable and edited:
+            args = {**(request.get("args") or {}), editable: edited}
+            self._decisions.append({"id": call_id, "type": "edit", "args": args})
+            self._append_message("You", f'edited - "{edited}"')
+        else:
+            self._decisions.append({"id": call_id, "type": "reject"})
+            self._append_message("You", f"rejected - {request.get('description', '')}")
+
+        if self._pending_requests:
+            self._show_request(self._pending_requests[0])
+        else:
+            self._resume_turn()
+
+    def _resume_turn(self) -> None:
+        """Continue the paused turn on its own thread with the decisions."""
+        self.approval_frame.pack_forget()
+        messages_before, start, config = self._resume_args
+        decisions, self._decisions = self._decisions, []
+        self._start_worker(Command(resume={"decisions": decisions}), config, messages_before, start)
 
     # -- The buttons: a click is a fact, and costs no model call -------------
 
@@ -261,7 +358,11 @@ class ChatApp:
         # window's: with both, route_start reaches `suggest`; with one, `ask`
         # asks for the other. Waiting for both left a click doing nothing
         # visible at all.
-        self._run_turn(choice_sentence(self.state.get("energy"), self.state.get("goal")))
+        # The flag makes the click count like record_choices: with both values
+        # set, the turn is a fresh lookup in the user's list.
+        self._run_turn(
+            choice_sentence(self.state.get("energy"), self.state.get("goal")), choices_clicked=True
+        )
 
     def _on_rating_click(self, value: str) -> None:
         """Either a rejection or a rating -- never a model call, and in the
@@ -370,12 +471,26 @@ class ChatApp:
         """
         messages_before = list(self.state.get("messages") or []) + [HumanMessage(content=user_text)]
         payload = {**self.state, **extra, "messages": messages_before}
-        events: queue.Queue = queue.Queue()
+        # A fresh thread per turn: the carried state goes in as before, and the
+        # checkpointer only has to span a pause within this one turn.
+        config = {"configurable": {"thread_id": uuid.uuid4().hex}}
         self._set_busy(True)
-        threading.Thread(target=self._stream_worker, args=(payload, events), daemon=True).start()
-        self.root.after(_POLL_MS, lambda: self._drain(events, messages_before, time.time()))
+        self._start_worker(payload, config, messages_before, time.time())
 
-    def _stream_worker(self, payload: dict, events: "queue.Queue") -> None:
+    def _start_worker(self, graph_input, config: dict, messages_before: list, start: float) -> None:
+        """One stretch of a turn on the worker thread: to its end or to a pause.
+
+        Used for the first stretch and again for the resume after the card,
+        so both go through the same queue, the same polling and the same error
+        handling.
+        """
+        events: queue.Queue = queue.Queue()
+        threading.Thread(
+            target=self._stream_worker, args=(graph_input, config, events), daemon=True
+        ).start()
+        self.root.after(_POLL_MS, lambda: self._drain(events, messages_before, start, config))
+
+    def _stream_worker(self, graph_input, config: dict, events: "queue.Queue") -> None:
         """Worker thread: no Tk calls in here, only queue puts.
 
         `updates` carries each node's state change as that node finishes --
@@ -383,21 +498,30 @@ class ChatApp:
         after each step, so the last one is the final state the old invoke()
         used to return. One state field serves both the live line and the
         eval, which still calls invoke().
+
+        A pause for the approval card arrives as an update under
+        `__interrupt__` whose value is a tuple, not a node's dict. Read like the
+        others it raised, and the handler below turned it into "something went
+        wrong" -- a working app that looked broken.
         """
         try:
             final = None
-            for mode, chunk in self.graph.stream(payload, stream_mode=["updates", "values"]):
+            paused = None
+            for mode, chunk in self.graph.stream(graph_input, config, stream_mode=["updates", "values"]):
                 if mode == "updates":
-                    for node_update in (chunk or {}).values():
+                    for node, node_update in (chunk or {}).items():
+                        if node == "__interrupt__":
+                            paused = node_update[0].value
+                            continue
                         for event in (node_update or {}).get("tool_events") or []:
                             events.put(("event", event))
                 elif mode == "values":
-                    final = chunk
-            events.put(("done", final))
+                    final = {k: v for k, v in chunk.items() if k != "__interrupt__"}
+            events.put(("interrupt", paused) if paused is not None else ("done", final))
         except Exception as exc:  # never let an unhandled exception reach the UI
             events.put(("error", exc))
 
-    def _drain(self, events: "queue.Queue", messages_before: list, start: float) -> None:
+    def _drain(self, events: "queue.Queue", messages_before: list, start: float, config: dict) -> None:
         """Main thread: drain whatever the worker has produced, then either
         finish the turn or schedule another poll."""
         # The window can be closed while a turn is still running. Without this
@@ -420,6 +544,11 @@ class ChatApp:
                     )
                     self._set_busy(False)
                     return
+                elif kind == "interrupt":
+                    # Not the end of the turn: no next_turn_state here, since
+                    # the paused state is incomplete. The card resumes it.
+                    self._show_approval(data, messages_before, start, config)
+                    return
                 elif kind == "done":
                     # _finish_turn runs here, on the main thread, outside the
                     # worker's try/except. An exception in it used to leave
@@ -436,7 +565,7 @@ class ChatApp:
                     return
         except queue.Empty:
             pass
-        self.root.after(_POLL_MS, lambda: self._drain(events, messages_before, start))
+        self.root.after(_POLL_MS, lambda: self._drain(events, messages_before, start, config))
 
     def _finish_turn(self, result: dict | None, messages_before: list, latency: float) -> None:
         if result is None:

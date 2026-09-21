@@ -92,7 +92,7 @@ class _StubGraph:
     def invoke(self, payload):
         return self._final(payload)
 
-    def stream(self, payload, stream_mode=None):
+    def stream(self, payload, config=None, stream_mode=None):
         """Mirror the real graph's ("updates", {node: update}) / ("values",
         state) tuple stream, so the app's consumption of it is under test."""
         final = self._final(payload)
@@ -105,7 +105,7 @@ class _RaisingGraph:
     def invoke(self, payload):
         raise RuntimeError("simulated agent failure")
 
-    def stream(self, payload, stream_mode=None):
+    def stream(self, payload, config=None, stream_mode=None):
         raise RuntimeError("simulated agent failure")
         yield  # pragma: no cover -- makes this a generator
 
@@ -513,3 +513,224 @@ def test_a_failure_after_the_reply_unlocks_the_window(tk_root):
 
     assert str(app.send_button.cget("state")) == "normal", "the window must stay usable"
     assert "went wrong" in app.history.get("1.0", "end").lower()
+
+
+# -- the approval card -------------------------------------------------------
+
+
+ADD_REQUEST = {
+    "id": "w1",
+    "name": "add_measure",
+    "args": {"measure_id": "foam_roll", "measure": "Roll your back."},
+    "description": 'Add to your list: "Roll your back."',
+    "editable": "measure",
+}
+RATE_REQUEST = {
+    "id": "w2",
+    "name": "log_checkin",
+    "args": {"measure_id": "breathe", "helpfulness": "helped"},
+    "description": 'Rate "breathe" as: helped',
+    "editable": None,
+}
+
+
+class _PausingGraph:
+    """Pauses once the way the real graph reports it, then finishes on the
+    resume. Records every resume value and thread, so the tests assert on
+    what was sent and how often -- the worker swallows exceptions, so the
+    absence of an error line proves nothing."""
+
+    def __init__(self, *requests):
+        from langgraph.types import Interrupt
+
+        self.interrupt = Interrupt(value={"action_requests": list(requests) or [ADD_REQUEST]})
+        self.resumes: list[dict] = []
+        self.configs: list[dict] = []
+
+    def stream(self, graph_input, config=None, stream_mode=None):
+        from langgraph.types import Command
+
+        self.configs.append(config)
+        if isinstance(graph_input, Command):
+            self.resumes.append(graph_input.resume)
+            yield ("values", {"messages": self.payload["messages"] + [AIMessage(content="after the card")]})
+            return
+        self.payload = graph_input
+        yield ("updates", {"__interrupt__": (self.interrupt,)})
+        yield ("values", {**graph_input, "__interrupt__": (self.interrupt,)})
+
+
+def settle_until_card(root, app, timeout=5.0):
+    """Pump the event loop until the approval card is on screen. The Send
+    button stays disabled during a pause, so `settle` would wait forever."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        root.update()
+        if app.approval_frame.winfo_manager() == "pack":
+            return
+        time.sleep(0.01)
+    raise AssertionError("the approval card never appeared")
+
+
+def paused_app(tk_root, graph):
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=graph)
+    app.entry.insert(0, "add it")
+    app._on_send()
+    settle_until_card(tk_root, app)
+    return app
+
+
+def test_a_pause_shows_the_card_and_never_the_error_line(tk_root):
+    graph = _PausingGraph()
+    app = paused_app(tk_root, graph)
+
+    history = app.history.get("1.0", "end")
+    assert "went wrong" not in history.lower()
+    assert "Roll your back." in app.approval_label.cget("text")
+
+
+def test_while_paused_only_the_card_can_be_used(tk_root):
+    """A second message mid-pause would start a turn over the paused one."""
+    app = paused_app(tk_root, _PausingGraph())
+    assert str(app.entry.cget("state")) == "disabled"
+    assert str(app.send_button.cget("state")) == "disabled"
+    assert str(app.approve_button.cget("state")) == "normal"
+
+
+def test_approve_resumes_once_on_the_same_thread_and_finishes_the_turn(tk_root):
+    graph = _PausingGraph()
+    app = paused_app(tk_root, graph)
+
+    app._on_decision("approve")
+    settle(tk_root, app)
+
+    assert graph.resumes == [{"decisions": [{"id": "w1", "type": "approve"}]}]
+    assert graph.configs[0] == graph.configs[1]
+    assert "after the card" in app.history.get("1.0", "end")
+    assert app.approval_frame.winfo_manager() == ""
+
+
+def test_reject_sends_a_rejection(tk_root):
+    graph = _PausingGraph()
+    app = paused_app(tk_root, graph)
+
+    app._on_decision("reject")
+    settle(tk_root, app)
+
+    assert graph.resumes == [{"decisions": [{"id": "w1", "type": "reject"}]}]
+
+
+def test_an_edit_sends_the_entrys_text_with_the_other_arguments_unchanged(tk_root):
+    graph = _PausingGraph()
+    app = paused_app(tk_root, graph)
+    assert app.approval_entry.get() == "Roll your back."
+
+    app.approval_entry.delete(0, "end")
+    app.approval_entry.insert(0, "Roll gently, five minutes.")
+    app._on_decision("edit")
+    settle(tk_root, app)
+
+    decision = graph.resumes[0]["decisions"][0]
+    assert decision["type"] == "edit"
+    assert decision["args"] == {"measure_id": "foam_roll", "measure": "Roll gently, five minutes."}
+
+
+def test_an_empty_edit_is_a_rejection_not_an_approval(tk_root):
+    graph = _PausingGraph()
+    app = paused_app(tk_root, graph)
+
+    app.approval_entry.delete(0, "end")
+    app._on_decision("edit")
+    settle(tk_root, app)
+
+    assert graph.resumes[0]["decisions"][0]["type"] == "reject"
+
+
+def test_a_rating_cannot_be_edited(tk_root):
+    app = paused_app(tk_root, _PausingGraph(RATE_REQUEST))
+    assert str(app.edit_button.cget("state")) == "disabled"
+
+
+def test_two_writes_are_two_cards_and_one_resume(tk_root):
+    graph = _PausingGraph(ADD_REQUEST, RATE_REQUEST)
+    app = paused_app(tk_root, graph)
+
+    app._on_decision("approve")
+    tk_root.update()
+    assert "breathe" in app.approval_label.cget("text"), "the second card follows the first"
+    assert graph.resumes == [], "no resume until every write is answered"
+    app._on_decision("reject")
+    settle(tk_root, app)
+
+    assert graph.resumes == [
+        {"decisions": [{"id": "w1", "type": "approve"}, {"id": "w2", "type": "reject"}]}
+    ]
+
+
+def _real_graph_logging(tmp_path, log):
+    import csv
+
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agent.graph import build_agent
+    from tests.conftest import StubChatModel
+    from tools.measures import MEASURE_COLUMNS
+
+    measures = tmp_path / "measures.csv"
+    with measures.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerow(["breathe", "recover", "Take a few slow breaths.", "exhausted;calm;wired", "minutes", "user"])
+    call = AIMessage(content="", tool_calls=[{
+        "name": "log_checkin",
+        "args": {"energy": "wired", "circumstances": "Deadline week.", "measure_id": "breathe"},
+        "id": "w1",
+    }])
+    model = StubChatModel(responses=[call, AIMessage(content="Thanks.")])
+    return build_agent(model=model, log_path=log, measures_path=measures, checkpointer=InMemorySaver())
+
+
+@pytest.mark.parametrize("decision,rows", [("approve", 1), ("reject", 0)])
+def test_through_the_real_graph_only_an_approval_reaches_the_log(tk_root, tmp_path, decision, rows):
+    """End to end: stub model, real graph, real file, real window."""
+    log = tmp_path / "log.csv"
+    graph = _real_graph_logging(tmp_path, log)
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=graph, log_path=log)
+    app.state.update({"energy": "wired", "goal": "calm down now", "offered": ["breathe"]})
+
+    app.entry.insert(0, "yes, log it")
+    app._on_send()
+    settle_until_card(tk_root, app)
+    app._on_decision(decision)
+    settle(tk_root, app)
+
+    written = read_checkin_rows(log) if log.exists() else []
+    assert len(written) == rows
+    assert "went wrong" not in app.history.get("1.0", "end").lower()
+
+
+# -- a choice click means a fresh lookup ---------------------------------------
+
+
+def test_a_choice_click_marks_the_turn_as_a_click(tk_root):
+    """The graph only forces a fresh lookup when it knows the values came from
+    a button; a click that did not say so would reach follow_up after the goal
+    question, where the model invented options (first hand test, turn 7)."""
+    stub = _StubGraph()
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
+
+    app._on_choice_click("goal", "plan recovery")
+    settle(tk_root, app)
+
+    assert stub.invoked_with["choices_clicked"] is True
+
+
+def test_free_text_is_never_marked_as_a_click(tk_root):
+    stub = _StubGraph()
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
+
+    app.entry.insert(0, "that sounds good")
+    app._on_send()
+    settle(tk_root, app)
+
+    assert not stub.invoked_with.get("choices_clicked")

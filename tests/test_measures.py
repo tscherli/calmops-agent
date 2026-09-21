@@ -5,14 +5,17 @@ import pytest
 
 from tools.measures import (
     FIND_MEASURES_BATCH,
+    GOALS,
     MEASURE_COLUMNS,
     MEASURES_PATH,
     fits_goal,
     make_add_measure,
     make_find_measures,
+    make_search_measures,
     matching_measures,
     measure_ids,
     read_measures,
+    search_measures_by_words,
 )
 
 ROWS = [
@@ -108,11 +111,75 @@ def test_find_measures_records_what_it_showed(measures_file):
     assert command.update["messages"][0].name == "find_measures"
 
 
-def test_find_measures_without_recorded_choices_is_skipped_not_guessed(measures_file):
+def test_find_measures_without_an_energy_is_skipped_not_guessed(measures_file):
     command = _call(make_find_measures(measures_file), {}, state={"offered": []})
     message = command.update["messages"][0]
     assert message.additional_kwargs["receipt"]["status"] == "skipped"
     assert "offered" not in command.update
+
+
+def _goals_of(ids, path):
+    return {g for g in GOALS if any(fits_goal(r, g) for r in read_measures(path) if r["measure_id"] in ids)}
+
+
+def test_without_a_goal_one_batch_spans_every_goal(measures_file):
+    """Someone who does not know what would help gets a choice across goals.
+    In file order the fixture's first four cover only two of them."""
+    ids = {m["measure_id"] for m in matching_measures("exhausted", None, path=measures_file)}
+    assert _goals_of(ids, measures_file) == set(GOALS)
+    assert all("exhausted" in r["fits_energy"] for r in read_measures(measures_file) if r["measure_id"] in ids)
+
+
+def test_without_a_goal_the_shipped_list_offers_more_than_quick_recoveries():
+    """The real list has fourteen quick recoveries for "exhausted" before any
+    other row: a hand test got four of them and nothing else."""
+    ids = {m["measure_id"] for m in matching_measures("exhausted", None, path=MEASURES_PATH)}
+    assert _goals_of(ids, MEASURES_PATH) == set(GOALS)
+
+
+def test_find_measures_with_energy_alone_looks_across_goals(measures_file):
+    command = _call(make_find_measures(measures_file), {}, state={"energy": "exhausted", "offered": []})
+    receipt = command.update["messages"][0].additional_kwargs["receipt"]
+    assert receipt["status"] == "ok"
+    assert "(any goal)" in receipt["detail"]
+    assert command.update["offered"]
+
+
+# -- search_measures ---------------------------------------------------------
+
+
+def test_search_finds_a_measure_by_a_word_stem(measures_file):
+    """"is walking in my list?" -- the walk has to be found."""
+    assert [m["measure_id"] for m in search_measures_by_words("walking", measures_file)] == ["short_walk"]
+
+
+def test_search_matches_the_id_as_well_as_the_text(measures_file):
+    assert "day_off" in [m["measure_id"] for m in search_measures_by_words("day", measures_file)]
+
+
+def test_search_with_only_filler_words_finds_nothing(measures_file):
+    """Otherwise "is there something for this in my list" would match half the
+    list: "for" alone is in "Walk for five minutes" and "Block an hour for
+    focused work". (An earlier version of this test used words no row
+    contained, so it passed with the filter removed -- it tested nothing.)"""
+    query = "is there something for this already in the list"
+    assert any("for" in r["measure"].split() for r in read_measures(measures_file))
+    assert search_measures_by_words(query, measures_file) == []
+
+
+def test_search_for_something_absent_says_so(measures_file):
+    assert search_measures_by_words("swimming", measures_file) == []
+
+
+def test_search_measures_takes_only_words_and_changes_nothing(measures_file):
+    """It reads: no state, no Command, no `offered` -- asking whether a walk is
+    in the list is not the same as offering one."""
+    tool = make_search_measures(measures_file)
+    assert list(tool.args) == ["words"]
+    before = measures_file.read_bytes()
+    result = tool.invoke({"words": "walk"})
+    assert isinstance(result, list)
+    assert measures_file.read_bytes() == before
 
 
 # -- add_measure -------------------------------------------------------------
@@ -143,6 +210,15 @@ def test_a_web_idea_keeps_its_link_and_an_own_idea_is_marked_agent(measures_file
     rows = {r["measure_id"]: r["source"] for r in read_measures(measures_file)}
     assert rows["from_web"] == "web:https://example.org/a"
     assert rows["from_agent"] == "agent"
+
+
+def test_a_link_makes_it_a_web_idea_even_if_the_model_says_user(measures_file):
+    """A hand test: two web ideas went through the debate station, whose prompt
+    says from_user true, and were saved as "user" with their links dropped."""
+    _add(measures_file, measure_id="digital_reset", from_user=True,
+         source_url="  https://news.va.gov/147153/reclaim-your-focus-benefits-digital-reset/ ")
+    row = read_measures(measures_file)[-1]
+    assert row["source"] == "web:https://news.va.gov/147153/reclaim-your-focus-benefits-digital-reset/"
 
 
 def test_a_duplicate_id_is_refused(measures_file):

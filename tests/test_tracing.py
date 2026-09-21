@@ -163,6 +163,35 @@ def test_built_in_web_searches_are_counted_and_charged():
     assert record.estimated_cost_usd == pytest.approx(0.01)
 
 
+def test_a_dated_model_id_is_priced_as_the_model_it_names():
+    """OpenAI reports the snapshot id, not the name the app asked for. Keyed
+    on the exact string, every real turn priced at $0 and still reported the
+    model in unpriced_models -- a warning written on every line and read on
+    none (DEVELOPMENT_LOG, stage 53)."""
+    record = summarize_turn([], [_ai("hi", "gpt-5-nano-2025-08-07", 1_000_000, 0)], "gpt-5-nano", 1.0)
+    assert record.unpriced_models == []
+    assert record.estimated_cost_usd == pytest.approx(0.05)
+
+
+def test_a_neighbouring_model_is_not_priced_under_a_cheaper_one():
+    """Only a date suffix is dropped. gpt-5.4-nano is a different, pricier
+    model and must stay unpriced rather than borrow gpt-5-nano's rate."""
+    record = summarize_turn([], [_ai("hi", "gpt-5.4-nano", 1_000_000, 0)], "gpt-5-nano", 1.0)
+    assert record.unpriced_models == ["gpt-5.4-nano"]
+    assert record.estimated_cost_usd == 0.0
+
+
+def test_cached_input_tokens_are_priced_at_the_cached_rate():
+    """Every station prompt starts with the same base, so much of the input is
+    served from OpenAI's cache at a tenth of the price. Pricing it at the full
+    rate overstates the cost of exactly the long, repeated prompts."""
+    message = _ai("hi", "gpt-5-nano", 1_000_000, 0)
+    message.usage_metadata["input_token_details"] = {"cache_read": 800_000}
+    record = summarize_turn([], [message], "gpt-5-nano", 1.0)
+    # 200k uncached @ $0.05/1M + 800k cached @ $0.005/1M
+    assert record.estimated_cost_usd == pytest.approx(0.01 + 0.004)
+
+
 def test_a_turn_without_model_metadata_still_uses_the_passed_model():
     message = AIMessage(content="hi")
     message.usage_metadata = {"input_tokens": 1_000_000, "output_tokens": 0, "total_tokens": 1_000_000}

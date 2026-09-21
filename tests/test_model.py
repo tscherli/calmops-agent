@@ -66,3 +66,29 @@ def test_debate_defaults_to_the_stronger_model():
     """Honest pushback instead of agreement is where small models are weakest."""
     assert model_name_of(resolve_debate_model(None)) == DEBATE_MODEL
     assert DEBATE_MODEL != DEFAULT_MODEL
+
+
+# -- the graph, built the way the real clients build it ----------------------
+
+
+def test_the_graph_the_clients_build_debates_on_the_stronger_model():
+    """app.py and cli.py call build_agent() with no arguments. Every other
+    test injects a model, so the resolver above could be right while the graph
+    never used it -- which is what happened: the debate ran on nano in a real
+    session, and no test noticed (DEVELOPMENT_LOG, stage 53)."""
+    from agent.graph import build_agent
+
+    models = build_agent().station_models
+    assert models["debate"] == DEBATE_MODEL
+    assert models["ask"] == DEFAULT_MODEL
+
+
+def test_an_injected_model_keeps_the_debate_offline():
+    """A test that injects a stub must not have the debate station build a
+    real OpenAI client behind its back."""
+    from agent.graph import build_agent
+    from tests.conftest import StubChatModel
+
+    stub = StubChatModel(responses=[])
+    models = build_agent(model=stub).station_models
+    assert models["debate"] == models["ask"]

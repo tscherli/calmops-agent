@@ -16,6 +16,7 @@ graph.invoke() call instead.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,13 +77,39 @@ class TurnRecord:
         }
 
 
+_SNAPSHOT_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def _price_key(model: str, pricing: dict[str, dict[str, float]]) -> str | None:
+    """The pricing entry a reported model name belongs to, if any.
+
+    OpenAI reports the snapshot it served (`gpt-5-nano-2025-08-07`), not the
+    name the app asked for. Only that date suffix is dropped: anything else
+    stays an exact match, so `gpt-5.4-nano` never borrows `gpt-5-nano`'s rate.
+    """
+    if model in pricing:
+        return model
+    base = _SNAPSHOT_SUFFIX.sub("", model)
+    return base if base in pricing else None
+
+
 def _estimate_cost(
-    model: str, input_tokens: int, output_tokens: int, pricing: dict[str, dict[str, float]]
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    pricing: dict[str, dict[str, float]],
+    cached_tokens: int = 0,
 ) -> float:
-    rates = pricing.get(model)
-    if rates is None:
+    key = _price_key(model, pricing)
+    if key is None:
         return 0.0
-    return (input_tokens / 1_000_000) * rates["input"] + (output_tokens / 1_000_000) * rates["output"]
+    rates = pricing[key]
+    cached = min(cached_tokens, input_tokens)
+    return (
+        ((input_tokens - cached) / 1_000_000) * rates["input"]
+        + (cached / 1_000_000) * rates.get("cached_input", rates["input"])
+        + (output_tokens / 1_000_000) * rates["output"]
+    )
 
 
 def _model_of(message: AIMessage, fallback: str) -> str:
@@ -146,16 +173,18 @@ def summarize_turn(
                 name = _model_of(message, model)
                 tokens_in = message.usage_metadata.get("input_tokens", 0)
                 tokens_out = message.usage_metadata.get("output_tokens", 0)
-                totals = per_model.setdefault(name, [0, 0])
+                details = message.usage_metadata.get("input_token_details") or {}
+                totals = per_model.setdefault(name, [0, 0, 0])
                 totals[0] += tokens_in
                 totals[1] += tokens_out
+                totals[2] += details.get("cache_read", 0) or 0
                 input_tokens += tokens_in
                 output_tokens += tokens_out
         if isinstance(message, ToolMessage):
             tool_calls.append(ToolCallSummary(name=message.name or "", status=message.status))
 
-    for name, (tokens_in, tokens_out) in per_model.items():
-        cost += _estimate_cost(name, tokens_in, tokens_out, pricing)
+    for name, (tokens_in, tokens_out, tokens_cached) in per_model.items():
+        cost += _estimate_cost(name, tokens_in, tokens_out, pricing, cached_tokens=tokens_cached)
     cost += web_searches * web_search_usd_per_call
 
     return TurnRecord(
@@ -167,7 +196,7 @@ def summarize_turn(
         latency_seconds=latency_seconds,
         tool_calls=tool_calls,
         models_used=sorted(per_model),
-        unpriced_models=sorted(name for name in per_model if name not in pricing),
+        unpriced_models=sorted(name for name in per_model if _price_key(name, pricing) is None),
         web_searches=web_searches,
     )
 

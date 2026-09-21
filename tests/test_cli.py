@@ -36,7 +36,7 @@ class StubGraph:
         self.final_state = final_state or {}
         self.payloads: list[dict] = []
 
-    def stream(self, payload, stream_mode=None):
+    def stream(self, payload, config=None, stream_mode=None):
         self.payloads.append(payload)
         for event in self.events:
             yield ("updates", {"follow_up": {"tool_events": [event]}})
@@ -363,3 +363,211 @@ def test_either_order_ends_with_both_values():
 
     assert s.graph.payloads[-1]["goal"] == "calm down now"
     assert s.graph.payloads[-1]["energy"] == "exhausted"
+
+
+# -- the approval card -------------------------------------------------------
+
+
+ADD_REQUEST = {
+    "id": "w1",
+    "name": "add_measure",
+    "args": {"measure_id": "foam_roll", "measure": "Roll your back."},
+    "description": 'Add to your list: "Roll your back."',
+    "editable": "measure",
+}
+RATE_REQUEST = {
+    "id": "w2",
+    "name": "log_checkin",
+    "args": {"measure_id": "breathe", "helpfulness": "helped"},
+    "description": 'Rate "breathe" as: helped',
+    "editable": None,
+}
+
+
+class PausingGraph:
+    """Pauses once, the way the real graph reports it, then finishes on the
+    resume. Records every resume value so a test asserts on what was sent,
+    and how often, instead of trusting the absence of an error line."""
+
+    def __init__(self, *requests):
+        from langgraph.types import Interrupt
+
+        self.interrupt = Interrupt(value={"action_requests": list(requests) or [ADD_REQUEST]})
+        self.resumes: list[dict] = []
+        self.configs: list[dict] = []
+
+    def stream(self, graph_input, config=None, stream_mode=None):
+        from langgraph.types import Command
+
+        self.configs.append(config)
+        if isinstance(graph_input, Command):
+            self.resumes.append(graph_input.resume)
+            yield ("values", {"messages": self.payload["messages"] + [AIMessage(content="after the card")]})
+            return
+        self.payload = graph_input
+        yield ("updates", {"__interrupt__": (self.interrupt,)})
+        yield ("values", {**graph_input, "__interrupt__": (self.interrupt,)})
+
+
+def answering(*answers):
+    replies = iter(answers)
+
+    def ask(prompt):
+        return next(replies)
+
+    return ask
+
+
+def test_a_pause_shows_the_card_and_never_the_error_line():
+    """Read like a node update, the pause raised, and the client's own error
+    handler turned it into 'something went wrong' -- a working app, visibly."""
+    graph = PausingGraph()
+    s = session(graph, ask=answering("a"))
+
+    s.handle("add it")
+
+    text = output(s)
+    assert "went wrong" not in text
+    assert 'Add to your list: "Roll your back."' in text
+    assert graph.resumes == [{"decisions": [{"id": "w1", "type": "approve"}]}]
+    assert "after the card" in text
+
+
+def test_the_resume_goes_to_the_same_thread_as_the_pause():
+    """A resume on another thread would find no pause to continue."""
+    graph = PausingGraph()
+    session(graph, ask=answering("a")).handle("add it")
+    assert graph.configs[0] == graph.configs[1]
+    assert graph.configs[0]["configurable"]["thread_id"]
+
+
+def test_each_turn_gets_its_own_thread():
+    graph = StubGraph()
+    seen = []
+    original = graph.stream
+
+    def spy(payload, config=None, stream_mode=None):
+        seen.append(config["configurable"]["thread_id"])
+        return original(payload, config, stream_mode)
+
+    graph.stream = spy
+    s = session(graph)
+    s.handle("one")
+    s.handle("two")
+    assert len(set(seen)) == 2
+
+
+@pytest.mark.parametrize("answer", ["r", "", "maybe", "no"])
+def test_anything_but_an_approval_rejects(answer):
+    graph = PausingGraph()
+    s = session(graph, ask=answering(answer))
+
+    s.handle("add it")
+
+    assert graph.resumes == [{"decisions": [{"id": "w1", "type": "reject"}]}]
+    assert "nothing is written" in output(s)
+
+
+def test_an_edit_sends_the_users_text_with_the_other_arguments_unchanged():
+    graph = PausingGraph()
+    s = session(graph, ask=answering("e", "Roll gently, five minutes."))
+
+    s.handle("add it")
+
+    decision = graph.resumes[0]["decisions"][0]
+    assert decision["type"] == "edit"
+    assert decision["args"] == {"measure_id": "foam_roll", "measure": "Roll gently, five minutes."}
+
+
+def test_an_empty_edit_is_a_rejection_not_an_approval():
+    graph = PausingGraph()
+    session(graph, ask=answering("e", "")).handle("add it")
+    assert graph.resumes[0]["decisions"][0]["type"] == "reject"
+
+
+def test_a_rating_has_nothing_to_edit():
+    """The card offers what the request allows; 'e' on a rating is not an
+    approval of anything."""
+    graph = PausingGraph(RATE_REQUEST)
+    s = session(graph, ask=answering("e"))
+
+    s.handle("it helped")
+
+    assert "[e]dit" not in output(s)
+    assert graph.resumes[0]["decisions"] == [{"id": "w2", "type": "reject"}]
+
+
+def test_closed_input_rejects_instead_of_crashing():
+    def closed(prompt):
+        raise EOFError
+
+    graph = PausingGraph()
+    s = session(graph, ask=closed)
+
+    s.handle("add it")
+
+    assert graph.resumes[0]["decisions"][0]["type"] == "reject"
+
+
+def test_two_writes_get_two_questions_and_one_resume():
+    graph = PausingGraph(ADD_REQUEST, RATE_REQUEST)
+    session(graph, ask=answering("a", "r")).handle("both")
+    assert graph.resumes == [
+        {"decisions": [{"id": "w1", "type": "approve"}, {"id": "w2", "type": "reject"}]}
+    ]
+
+
+def test_an_approved_check_in_reaches_the_real_log(tmp_path):
+    """End to end through the real graph: stub model, real tools node, real
+    file. The only way into the log is the card."""
+    import csv
+
+    from langchain_core.messages import AIMessage as AI
+    from langgraph.checkpoint.memory import InMemorySaver
+
+    from agent.graph import build_agent
+    from tests.conftest import StubChatModel
+    from tools.measures import MEASURE_COLUMNS
+
+    measures = tmp_path / "measures.csv"
+    with measures.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerow(["breathe", "recover", "Take a few slow breaths.", "exhausted;calm;wired", "minutes", "user"])
+    log = tmp_path / "log.csv"
+    call = AI(content="", tool_calls=[{
+        "name": "log_checkin",
+        "args": {"energy": "wired", "circumstances": "Deadline week.", "measure_id": "breathe"},
+        "id": "w1",
+    }])
+    model = StubChatModel(responses=[call, AI(content="Thanks.")])
+    graph = build_agent(model=model, log_path=log, measures_path=measures, checkpointer=InMemorySaver())
+
+    s = session(graph, ask=answering("a"), log_path=log)
+    s.state.update({"energy": "wired", "goal": "calm down now", "offered": ["breathe"]})
+    s.handle("yes, log it")
+
+    rows = list(csv.DictReader(log.open(encoding="utf-8", newline="")))
+    assert [r["circumstances"] for r in rows] == ["Deadline week."]
+    assert "went wrong" not in output(s)
+
+
+# -- a choice command means a fresh lookup -------------------------------------
+
+
+def test_a_choice_command_marks_the_turn_as_a_click():
+    """Same rule as the window: the graph forces a fresh lookup only when it
+    knows the values came from a button."""
+    s = session()
+
+    s.handle("/goal plan")
+
+    assert s.graph.payloads[-1]["choices_clicked"] is True
+
+
+def test_free_text_is_never_marked_as_a_click():
+    s = session()
+
+    s.handle("that sounds good")
+
+    assert not s.graph.payloads[-1].get("choices_clicked")

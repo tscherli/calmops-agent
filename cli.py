@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import time
 import typing
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from agent.common import format_tool_event, message_text
 from agent.graph import build_agent, next_turn_state
@@ -62,6 +65,10 @@ HELP = """Commands (everything else is sent to the agent as a message):
   /state                             what the graph is carrying right now
   /help                              this
   /quit                              leave
+
+Nothing is written without you: when the agent wants to add a measure or log a
+check-in, it shows what it would write and waits for [a]pprove, [e]dit or
+[r]eject.
 """
 
 
@@ -88,11 +95,15 @@ class Session:
         log_path: Path | None = None,
         recorder: RunRecorder | None = None,
         out: Callable[[str], None] = print,
+        ask: Callable[[str], str] = input,
     ) -> None:
-        self.graph = graph if graph is not None else build_agent()
+        # The checkpointer is what lets a turn pause on the approval card and
+        # resume; it only ever has to hold one turn (a fresh thread per turn).
+        self.graph = graph if graph is not None else build_agent(checkpointer=InMemorySaver())
         self.log_path = log_path
         self.recorder = recorder
         self.out = out
+        self.ask = ask
         self.state: dict[str, Any] = {"messages": []}
         self.last_measure_id: str = measure_awaiting_rating(log_path)
 
@@ -126,17 +137,16 @@ class Session:
 
         messages_before = list(self.state.get("messages") or []) + [HumanMessage(content=text)]
         payload = {**self.state, **extra, "messages": messages_before}
+        # A fresh thread per turn: the carried state goes in as today, and the
+        # checkpointer only has to span a pause within this one turn.
+        config = {"configurable": {"thread_id": uuid.uuid4().hex}}
 
         started = time.time()
-        final: dict[str, Any] | None = None
         try:
-            for mode, chunk in self.graph.stream(payload, stream_mode=["updates", "values"]):
-                if mode == "updates":
-                    for node_update in (chunk or {}).values():
-                        for event in (node_update or {}).get("tool_events") or []:
-                            self.out(format_tool_event(event))
-                elif mode == "values":
-                    final = chunk
+            final, paused = self._stream(payload, config)
+            while paused is not None:
+                decisions = self._decide(paused)
+                final, paused = self._stream(Command(resume={"decisions": decisions}), config)
         except Exception as exc:  # never let a traceback end the session
             self.out(f"Something went wrong and I couldn't process that: {exc}")
             return
@@ -146,6 +156,59 @@ class Session:
             return
 
         self._finish(final, messages_before, time.time() - started)
+
+    def _stream(self, graph_input: Any, config: dict) -> tuple[dict | None, dict | None]:
+        """Run the graph up to the end of the turn or up to the next pause.
+
+        A pause arrives as an update under `__interrupt__` whose value is a
+        tuple, not a node's dict. Read like the other updates, it raised, and
+        the error handler above turned it into "something went wrong".
+        """
+        final: dict[str, Any] | None = None
+        paused: dict | None = None
+        for mode, chunk in self.graph.stream(graph_input, config, stream_mode=["updates", "values"]):
+            if mode == "updates":
+                for node, node_update in (chunk or {}).items():
+                    if node == "__interrupt__":
+                        paused = node_update[0].value
+                        continue
+                    for event in (node_update or {}).get("tool_events") or []:
+                        self.out(format_tool_event(event))
+            elif mode == "values":
+                final = {k: v for k, v in chunk.items() if k != "__interrupt__"}
+        return final, paused
+
+    def _decide(self, paused: dict) -> list[dict]:
+        """The approval card, one question per pending write.
+
+        Anything but an explicit approve or a non-empty edit is a rejection:
+        a write must never happen because an answer was unclear.
+        """
+        decisions: list[dict] = []
+        for request in paused.get("action_requests") or []:
+            call_id = request.get("id", "")
+            editable = request.get("editable")
+            self.out(f"\n  Approval needed: {request.get('description', '')}")
+            choices = "[a]pprove / [e]dit / [r]eject" if editable else "[a]pprove / [r]eject"
+            try:
+                answer = self.ask(f"  {choices}: ").strip().lower()
+                if answer.startswith("e") and editable:
+                    current = (request.get("args") or {}).get(editable, "")
+                    edited = self.ask(f"  new text (was: {current}): ").strip()
+                else:
+                    edited = ""
+            except (EOFError, KeyboardInterrupt):
+                answer, edited = "", ""
+
+            if answer.startswith("a"):
+                decisions.append({"id": call_id, "type": "approve"})
+            elif answer.startswith("e") and editable and edited:
+                args = {**(request.get("args") or {}), editable: edited}
+                decisions.append({"id": call_id, "type": "edit", "args": args})
+            else:
+                self.out("  not approved - nothing is written")
+                decisions.append({"id": call_id, "type": "reject"})
+        return decisions
 
     def _finish(self, result: dict, messages_before: list, latency: float) -> None:
         if not any(e.get("tool") == "log_checkin" for e in result.get("tool_events") or []):
@@ -224,7 +287,11 @@ class Session:
         # client's: with both values route_start reaches `suggest`, and with
         # one it reaches `ask`, which asks for the other. Holding the turn
         # back instead left the command looking ignored.
-        self.run_turn(choice_sentence(self.state.get("energy"), self.state.get("goal")))
+        # The flag makes the click count like record_choices: with both values
+        # set, the turn is a fresh lookup in the user's list.
+        self.run_turn(
+            choice_sentence(self.state.get("energy"), self.state.get("goal")), choices_clicked=True
+        )
 
     def _idea(self, argument: str) -> None:
         if not argument:

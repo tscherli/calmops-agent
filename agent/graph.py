@@ -9,16 +9,25 @@ own tools.
         |- nothing suggested yet                     -> suggest
         \- otherwise                                 -> follow_up
 
-    ask | suggest | follow_up | debate --(tool calls)--> tools --> back to the
+    ask | suggest | follow_up | debate --(reads only)--> tools --> back to the
                                          station, or to the rejection path
+                                       --(any write)--> review --> tools
                                        --(no tool calls)--> checkin_done | END
+
+    tools --(idea_decided)--> close_idea -> END  (fixed text, from the results)
 
     count_rejection -> 1st: web_search_ideas -> END
                        2nd: ask_goal_again   -> END
 
-What a station is not given, it cannot do: `ask` has no way to suggest a
-measure, because the tool is not bound there. That is the difference between a
-rule the model may ignore and one it cannot reach.
+What a station is not given, it cannot do: `ask` has no way to write
+anything, because no write tool is bound there. That is the difference between
+a rule the model may ignore and one it cannot reach. Reading the user's own
+measure list is given freely -- it changes nothing -- so a suggestion can come
+from the list even before the goal is known.
+
+The same idea for side effects: the model may call a write tool, but the call
+only runs once the user has approved it on a card. `review` pauses the graph
+for that decision; the tools node refuses any write without one.
 
 The graph owns what the model would otherwise have to re-derive from the
 transcript every turn: the user's energy and goal, which measures were already
@@ -27,22 +36,26 @@ and whether an idea of the user's is under discussion.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, InjectedToolCallId, tool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from agent.common import (
     as_tool_content,
     compact_spent_tool_messages,
+    last_ai_tool_calls,
     merge_tool_events,
     message_text,
     pending_tool_calls,
@@ -58,15 +71,41 @@ from agent.model import (
 )
 from agent.prompts import (
     ASK_GOAL_AGAIN,
-    SEARCH_INSTRUCTION,
+    IDEA_ADD_MISSING,
+    IDEA_ADDED_LINE,
+    IDEA_ALREADY_LISTED_LINE,
+    IDEA_DROPPED,
+    IDEA_NOT_APPROVED_LINE,
+    IDEA_NOT_SAVED_LINE,
+    IDEA_TRY,
+    IDEA_TRY_WHAT_WAS_ADDED,
     STATION_PROMPTS,
     debate_prompt,
+    search_instruction,
 )
 from tools.checkin_log import make_log_checkin
-from tools.measures import Energy, Goal, make_add_measure, make_find_measures
+from tools.measures import (
+    Energy,
+    Goal,
+    make_add_measure,
+    make_find_measures,
+    make_search_measures,
+    read_measures,
+)
 
 DEFAULT_RECURSION_LIMIT = 25
 WEB_SEARCH_TOOL: dict[str, str] = {"type": "web_search"}
+
+# The tools whose effect outlives the conversation. The model may call them;
+# they run only after the user approves on a card. Everything else -- reading
+# measures, searching, recording energy and goal -- changes nothing that lasts,
+# so it runs at once.
+WRITE_TOOLS = frozenset({"add_measure", "log_checkin"})
+
+# What the Edit button on the card changes, per write tool.
+EDITABLE_ARG = {"add_measure": "measure", "log_checkin": "circumstances"}
+
+REJECTED_TEXT = "Not done: the user did not approve this."
 
 # The debate station runs on the stronger model, so it ends in a decision
 # rather than drifting: after this many turns it asks the user to choose.
@@ -101,6 +140,15 @@ NOT_HELPFUL_PHRASES = (
     "nicht hilfreich",
     "bringt nichts",
 )
+# Besides the phrase, a bare rejection has a few words at most ("that's",
+# "really", "sorry") and nothing that starts a reason or another request.
+# "no its not useful to add it if its already there" fit the character limit
+# and was taken for a rejection; it praised the suggestion. Missing the
+# shortcut costs little -- the model reads the message and can reject itself.
+NOT_HELPFUL_MAX_EXTRA_WORDS = 5
+CARRIES_MORE_WORDS = frozenset(
+    "but if since because to add log save aber wenn weil da hinzu".split()
+)
 
 Station = Literal["ask", "suggest", "follow_up", "debate"]
 
@@ -117,10 +165,23 @@ class State(TypedDict, total=False):
     idea: str | None            # an idea of the user's, while it is discussed
     debate_turns: int
     rejected: bool              # set by the UI's "not helpful" button
+    choices_clicked: bool       # set by the UI's energy/goal buttons
     checkin_logged: bool        # a check-in row was written this turn
     last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
+    approvals: dict[str, dict[str, Any]]  # the user's card decisions, by tool call id
     tool_events: Annotated[list[dict[str, Any]], merge_tool_events]
+
+
+def _parsed(content: Any) -> Any:
+    """The value inside a tool message, for its receipt: "3 results", not the
+    first 60 characters of the JSON."""
+    if not isinstance(content, str):
+        return content
+    try:
+        return json.loads(content)
+    except ValueError:
+        return content
 
 
 # -- tools that only touch the state -----------------------------------------
@@ -202,6 +263,92 @@ def idea_decided(
 # -- plain functions ---------------------------------------------------------
 
 
+def goal_question_unanswered(state: State) -> bool:
+    """Is this turn the user's reply to the goal question?
+
+    The energy is known, the goal is not, the last turn ended in `ask`, and
+    the station is answering the user's message, not a tool result. A first
+    click on an energy button has no `ask` turn before it, so the goal is
+    still asked normally.
+    """
+    messages = state.get("messages") or []
+    return bool(
+        messages
+        and isinstance(messages[-1], HumanMessage)
+        and state.get("energy")
+        and not state.get("goal")
+        and state.get("step") == "ask"
+    )
+
+
+def _last_tool_batch(messages: Sequence[BaseMessage]) -> list[ToolMessage]:
+    """The tool results since the last model message."""
+    batch: list[ToolMessage] = []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            break
+        batch.append(message)
+    return batch[::-1]
+
+
+def _this_turn(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Everything since the user's last message, a resumed pause included."""
+    for index in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[index], HumanMessage):
+            return list(messages[index + 1 :])
+    return list(messages)
+
+
+def idea_closing(
+    messages: Sequence[BaseMessage], approvals: dict[str, dict[str, Any]] | None = None
+) -> str:
+    """What to tell the user once their idea is decided, from what ran.
+
+    It reads the whole turn, not the last batch: a model may add in one
+    message and decide in the next. Reading only the last batch said
+    "Nothing was added" right after two rows were written.
+
+    Each measure is named, with the reason in plain words when it was not
+    added. "Part of it is in your list now -- the notes above say what
+    wasn't added" left the user to decode a cut-off note written for the
+    model ("already exists. Pick anothe...").
+    """
+    calls = {c.get("name"): c for c in last_ai_tool_calls(messages)}
+    outcome = (calls.get("idea_decided") or {}).get("args", {}).get("outcome")
+    if outcome == "try":
+        return IDEA_TRY
+    if outcome == "drop":
+        return IDEA_DROPPED
+    turn = _this_turn(messages)
+    results = [m for m in turn if isinstance(m, ToolMessage) and m.name == "add_measure"]
+    if not results:
+        return IDEA_ADD_MISSING
+    asked = {
+        c.get("id"): c.get("args") or {}
+        for m in turn
+        if isinstance(m, AIMessage)
+        for c in m.tool_calls or []
+        if c.get("name") == "add_measure"
+    }
+    lines = []
+    for result in results:
+        decision = (approvals or {}).get(result.tool_call_id) or {}
+        args = decision.get("args") if decision.get("type") == "edit" else None
+        measure = str((args or asked.get(result.tool_call_id) or {}).get("measure") or "this idea")
+        if result.status != "error":
+            template = IDEA_ADDED_LINE
+        elif result.content == REJECTED_TEXT:
+            template = IDEA_NOT_APPROVED_LINE
+        elif "already exists" in str(result.content):
+            template = IDEA_ALREADY_LISTED_LINE
+        else:
+            template = IDEA_NOT_SAVED_LINE
+        lines.append(template.format(measure=measure.rstrip(".")))
+    if any(m.status != "error" for m in results):
+        lines.append(IDEA_TRY_WHAT_WAS_ADDED)
+    return "\n".join(lines)
+
+
 def web_search_enabled() -> bool:
     return os.environ.get("OPENAI_ENABLE_WEB_SEARCH", "true").strip().lower() not in {
         "0",
@@ -222,7 +369,11 @@ def says_not_helpful(text: str) -> bool:
     if len(stripped) > NOT_HELPFUL_MAX_CHARS:
         return False
     lowered = stripped.lower().replace("\u2019", "'")
-    return any(phrase in lowered for phrase in NOT_HELPFUL_PHRASES)
+    phrase = next((p for p in NOT_HELPFUL_PHRASES if p in lowered), None)
+    if phrase is None:
+        return False
+    extra = re.findall(r"[\w']+", lowered.replace(phrase, " ", 1))
+    return len(extra) <= NOT_HELPFUL_MAX_EXTRA_WORDS and not CARRIES_MORE_WORDS & set(extra)
 
 
 def station_for(state: State) -> Station:
@@ -245,6 +396,36 @@ def last_human_text(messages: Sequence[BaseMessage]) -> str:
         if message.__class__.__name__ == "HumanMessage":
             return message_text(message)
     return ""
+
+
+def action_request(call: dict[str, Any]) -> dict[str, Any]:
+    """What the approval card shows for one pending write call.
+
+    The description is built here from the call's own arguments, not written
+    by the model: the card has to show what will actually be written, or an
+    approval means nothing.
+    """
+    name = call.get("name") or ""
+    args = dict(call.get("args") or {})
+    if name == "add_measure":
+        description = f'Add to your list: "{args.get("measure", "")}"'
+    elif name == "log_checkin" and args.get("helpfulness"):
+        description = f'Rate "{args.get("measure_id", "")}" as: {args["helpfulness"]}'
+    elif name == "log_checkin":
+        measure = args.get("measure_id") or args.get("measure_taken") or "no measure"
+        description = f'Log: "{args.get("circumstances", "")}" (measure: {measure})'
+    else:
+        description = f"{name}: {args}"
+    editable = EDITABLE_ARG.get(name)
+    if name == "log_checkin" and args.get("helpfulness"):
+        editable = None
+    return {
+        "id": call.get("id") or "",
+        "name": name,
+        "args": args,
+        "description": description,
+        "editable": editable,
+    }
 
 
 CARRIED_FIELDS = ("energy", "goal", "offered", "rejections", "step", "idea", "debate_turns")
@@ -290,24 +471,40 @@ def build_agent(
     log_path: Path | str | None = None,
     measures_path: Path | str | None = None,
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
+    checkpointer: BaseCheckpointSaver | None = None,
 ):
     """Build the station graph.
 
     model/tools/log_path/measures_path are injectable so tests and eval runs
     exercise the real wiring without OpenAI, the real log or the real measure
     list.
+
+    `checkpointer` is what lets a turn pause for the user's approval and be
+    resumed. Without one there is nobody to ask, so a write is refused rather
+    than run: a graph that cannot pause must not write unapproved.
     """
+    can_ask = checkpointer is not None
     base_model = resolve_model(model)
-    debate_base = resolve_debate_model(debate_model) if debate_model is not None else None
+    # Nothing injected is how the real clients call this, so the debate gets
+    # its own stronger model. An injected model with no debate model means a
+    # test: the debate then shares it, and no real client is built behind it.
+    if debate_model is not None:
+        debate_base = resolve_debate_model(debate_model)
+    elif model is None:
+        debate_base = resolve_debate_model(None)
+    else:
+        debate_base = None
     search_on = web_search_enabled()
 
     find_measures = make_find_measures(measures_path)
+    search_measures = make_search_measures(measures_path)
     add_measure = make_add_measure(measures_path)
     log_checkin = make_log_checkin(log_path, measures_path)
 
     all_tools: list[BaseTool] = list(tools) if tools is not None else [
         record_choices,
         find_measures,
+        search_measures,
         add_measure,
         log_checkin,
         suggestion_not_helpful,
@@ -322,10 +519,13 @@ def build_agent(
             return list(all_tools)
         return [by_name[n] for n in names if n in by_name]
 
+    station_models: dict[str, str] = {}
+
     def bind(station: str, bound: Sequence[Any], *, force: Any = None, use_debate: bool = False):
         chosen = debate_base if (use_debate and debate_base is not None) else base_model
         effort = STATION_REASONING_EFFORT.get(station)
         name = model_name_of(chosen)
+        station_models[station] = name or getattr(chosen, "_llm_type", "")
         if effort and name and supports_reasoning_effort(name):
             try:
                 chosen = chosen.bind(reasoning_effort=effort)
@@ -338,27 +538,39 @@ def build_agent(
         return chosen.bind_tools(list(bound))
 
     web = [WEB_SEARCH_TOOL] if search_on else []
-    ask_model = bind("ask", pick("record_choices", "discuss_idea"))
-    suggest_tools = pick("find_measures", "record_choices", "discuss_idea") + web
-    suggest_model = bind("suggest", suggest_tools)
-    lookup_model = bind("suggest", suggest_tools, force="find_measures")
-    follow_up_model = bind(
-        "follow_up",
-        pick(
-            "record_choices",
-            "find_measures",
-            "add_measure",
-            "log_checkin",
-            "suggestion_not_helpful",
-            "discuss_idea",
-        )
-        + web,
+    # Reading the user's list is allowed everywhere a user might ask about it:
+    # reads change nothing, so the read/write split makes them safe to give.
+    # `ask` can look measures up (with energy alone, if the goal is unknown)
+    # but still cannot write.
+    ask_tools = pick("record_choices", "discuss_idea", "find_measures", "search_measures")
+    ask_model = bind("ask", ask_tools)
+    # The turn after the goal question: a tool call is required -- record_choices
+    # if they named a goal, find_measures if they did not. Left free, nano
+    # answered "pick one for me" with box breathing from its own head.
+    ask_must_act = bind("ask", ask_tools, force="required")
+    suggest_tools = pick("find_measures", "record_choices", "discuss_idea")
+    suggest_model = bind("suggest", suggest_tools + web)
+    lookup_model = bind("suggest", suggest_tools + web, force="find_measures")
+    follow_up_tools = pick(
+        "record_choices",
+        "find_measures",
+        "search_measures",
+        "add_measure",
+        "log_checkin",
+        "suggestion_not_helpful",
+        "discuss_idea",
     )
-    debate_tools = pick("add_measure", "record_choices", "idea_decided")
+    follow_up_model = bind("follow_up", follow_up_tools + web)
+    debate_tools = pick("add_measure", "record_choices", "idea_decided", "find_measures", "search_measures")
     debate_station_model = bind("debate", debate_tools, use_debate=True)
+    # This station reads untrusted web pages, so it gets no write tool at all:
+    # once untrusted text is in the context, it must not be able to trigger a
+    # lasting effect. The approval card would stop it too; this is the layer
+    # underneath.
+    search_tools = [t for t in all_tools if t.name not in WRITE_TOOLS]
     search_model = bind(
         "web_search_ideas",
-        list(all_tools) + web,
+        search_tools + web,
         # Forcing a tool that is not bound is a 400, so the kill switch also
         # turns the forcing off.
         force=WEB_SEARCH_TOOL if search_on else None,
@@ -373,8 +585,26 @@ def build_agent(
         return chosen.invoke(messages)
 
     def ask(state: State) -> dict[str, Any]:
-        """Find out energy and goal. Cannot suggest: the tool is not bound here."""
-        return {"messages": [_reply(ask_model, STATION_PROMPTS["ask"], state)], "step": "ask"}
+        """Find out energy and goal. It may look measures up in the user's list
+        when asked, but cannot write: no write tool is bound here.
+
+        Once the goal question has had its turn, the user's reply must lead to
+        a tool: their goal recorded, or their own list looked up. A reply from
+        the model's own head is then impossible, not just discouraged.
+        """
+        chosen = ask_must_act if goal_question_unanswered(state) else ask_model
+        return {"messages": [_reply(chosen, STATION_PROMPTS["ask"], state)], "step": "ask"}
+
+    def close_idea(state: State) -> dict[str, Any]:
+        """The end of a discussed idea, said by code from what actually ran.
+
+        After an approved add_measure the graph went back to `ask`, which has no
+        write tool, and told the user it "can't directly add items" while the
+        row was already in the file. Text built from the results cannot say
+        that.
+        """
+        text = idea_closing(state["messages"], state.get("approvals"))
+        return {"messages": [AIMessage(content=text)], "step": None}
 
     def suggest(state: State) -> dict[str, Any]:
         """Look up measures, then present at most two.
@@ -408,9 +638,17 @@ def build_agent(
         }
 
     def web_search_ideas(state: State) -> dict[str, Any]:
-        """After the first rejection: a model call that has to search."""
+        """After the first rejection: a model call that has to search.
+
+        It is told what the user's list already holds, read fresh here, so the
+        web brings something new rather than a measure they have.
+        """
+        already_listed = [row["measure"] for row in read_measures(measures_path)]
         response = _reply(
-            search_model, STATION_PROMPTS["suggest"], state, trailing=SEARCH_INSTRUCTION
+            search_model,
+            STATION_PROMPTS["suggest"],
+            state,
+            trailing=search_instruction(already_listed),
         )
         update: dict[str, Any] = {"messages": [response], "step": "follow_up"}
         if web_search_ran(response):
@@ -437,6 +675,36 @@ def build_agent(
     def checkin_done(state: State) -> dict[str, Any]:
         """The conversation reached its end; clients start the next one fresh."""
         return {"complete": True, "checkin_logged": False}
+
+    def review(state: State) -> dict[str, Any]:
+        """Pause for the user's decision on every pending write, all at once.
+
+        Its own node, with no side effects, because LangGraph re-runs a paused
+        node from the start on resume: inside the tools node, the reads before
+        the pause would run twice. One interrupt per run, carrying every write
+        of the message -- a model can ask for five at once.
+
+        A decision counts only if it names a pending call and a known type;
+        anything else leaves that call without approval, which the tools node
+        treats as a rejection.
+        """
+        requests = [
+            action_request(call)
+            for call in pending_tool_calls(state["messages"])
+            if call.get("name") in WRITE_TOOLS
+        ]
+        answer = interrupt({"action_requests": requests}) if can_ask else {}
+        decisions = answer.get("decisions") if isinstance(answer, dict) else None
+        approvals = dict(state.get("approvals") or {})
+        pending_ids = {r["id"] for r in requests}
+        for decision in decisions or []:
+            if (
+                isinstance(decision, dict)
+                and decision.get("id") in pending_ids
+                and decision.get("type") in {"approve", "edit", "reject"}
+            ):
+                approvals[decision["id"]] = decision
+        return {"approvals": approvals}
 
     # -- the tools node ------------------------------------------------------
 
@@ -468,10 +736,21 @@ def build_agent(
         outputs: list[BaseMessage] = []
         events: list[dict[str, Any]] = []
         update: dict[str, Any] = {}
+        approvals = state.get("approvals") or {}
 
         for call in pending_tool_calls(state["messages"]):
             name = call.get("name") or ""
             call_id = call.get("id") or ""
+            if name in WRITE_TOOLS:
+                decision = approvals.get(call_id) or {}
+                if decision.get("type") not in {"approve", "edit"}:
+                    outputs.append(
+                        ToolMessage(content=REJECTED_TEXT, name=name, tool_call_id=call_id, status="error")
+                    )
+                    events.append(tool_event(name, "rejected", "not approved"))
+                    continue
+                if decision.get("type") == "edit" and isinstance(decision.get("args"), dict):
+                    call = {**call, "args": decision["args"]}
             target = by_name.get(name)
             if target is None:
                 outputs.append(
@@ -508,12 +787,18 @@ def build_agent(
                     )
                 )
             else:
+                if isinstance(result, ToolMessage):
+                    # Invoked with the whole call, a plain-returning tool comes
+                    # back as its own ToolMessage. Stringifying that handed the
+                    # model "content='[...]' name=..." instead of the rows.
+                    content = result.content
+                    value = _parsed(content)
+                else:
+                    content, value = as_tool_content(result), result
                 outputs.append(
-                    ToolMessage(
-                        content=as_tool_content(result), name=name, tool_call_id=call_id, status="success"
-                    )
+                    ToolMessage(content=content, name=name, tool_call_id=call_id, status="success")
                 )
-                events.append(tool_event(name, "ok", result_detail(result)))
+                events.append(tool_event(name, "ok", result_detail(value)))
 
         update["messages"] = outputs
         update["tool_events"] = events
@@ -527,13 +812,27 @@ def build_agent(
 
     def route_start(state: State) -> str:
         """Before any model call. A button click is a fact; a short "not
-        helpful" is close enough to one; everything else goes to a station."""
+        helpful" is close enough to one; everything else goes to a station.
+
+        An energy/goal click with both values set means a fresh lookup in the
+        user's own list, however much was offered before -- the same rule
+        `after_tools` applies to record_choices. The buttons skip that tool,
+        so without this a click after the goal question reached follow_up,
+        where the lookup is optional, and the model invented options instead.
+        """
         messages = state.get("messages") or []
         offered = state.get("offered")
         if state.get("rejected"):
             return "count_rejection"
         if offered and not state.get("idea") and says_not_helpful(last_human_text(messages)):
             return "count_rejection"
+        if (
+            state.get("choices_clicked")
+            and state.get("energy")
+            and state.get("goal")
+            and not state.get("idea")
+        ):
+            return "suggest"
         return station_for(state)
 
     def after_tools(state: State) -> str:
@@ -547,13 +846,20 @@ def build_agent(
         if name == "record_choices":
             # New answers mean a fresh lookup rather than more of the same.
             return station_for(state) if station_for(state) == "ask" else "suggest"
-        if name == "idea_decided":
-            return station_for(state)
+        if "idea_decided" in {m.name for m in _last_tool_batch(state["messages"])}:
+            return "close_idea"
         return state.get("step") or station_for(state)
 
     def after_station(state: State) -> str:
-        """A station either asked for tools, ended the check-in, or replied."""
-        if pending_tool_calls(state["messages"]):
+        """A station either asked for tools, ended the check-in, or replied.
+
+        A message with any write in it goes past the review first; reads alone
+        go straight to the tools.
+        """
+        pending = pending_tool_calls(state["messages"])
+        if any(call.get("name") in WRITE_TOOLS for call in pending):
+            return "review"
+        if pending:
             return "tools"
         if state.get("checkin_logged"):
             return "checkin_done"
@@ -569,16 +875,19 @@ def build_agent(
     graph.add_node("web_search_ideas", web_search_ideas)
     graph.add_node("ask_goal_again", ask_goal_again)
     graph.add_node("checkin_done", checkin_done)
+    graph.add_node("review", review)
+    graph.add_node("close_idea", close_idea)
 
     graph.add_conditional_edges(
         START, route_start, ["count_rejection", "ask", "suggest", "follow_up", "debate"]
     )
     for name in ("ask", "suggest", "follow_up", "debate"):
-        graph.add_conditional_edges(name, after_station, ["tools", "checkin_done", END])
+        graph.add_conditional_edges(name, after_station, ["review", "tools", "checkin_done", END])
+    graph.add_edge("review", "tools")
     graph.add_conditional_edges(
         "tools",
         after_tools,
-        ["ask", "suggest", "follow_up", "debate", "web_search_ideas", "ask_goal_again"],
+        ["ask", "suggest", "follow_up", "debate", "web_search_ideas", "ask_goal_again", "close_idea"],
     )
     graph.add_conditional_edges(
         "count_rejection", after_rejection, ["web_search_ideas", "ask_goal_again"]
@@ -586,25 +895,23 @@ def build_agent(
     graph.add_edge("web_search_ideas", END)
     graph.add_edge("ask_goal_again", END)
     graph.add_edge("checkin_done", END)
+    graph.add_edge("close_idea", END)
 
-    compiled = graph.compile().with_config({"recursion_limit": recursion_limit})
+    compiled = graph.compile(checkpointer=checkpointer).with_config(
+        {"recursion_limit": recursion_limit}
+    )
     # Handy for tests and for try_graph_viz.py, which render the shape.
+    # The same lists the stations were bound with, not a second copy of them.
     compiled.station_tools = {  # type: ignore[attr-defined]
-        "ask": [t.name for t in pick("record_choices", "discuss_idea")],
-        "suggest": [t.name for t in pick("find_measures", "record_choices", "discuss_idea")],
-        "follow_up": [
-            t.name
-            for t in pick(
-                "record_choices",
-                "find_measures",
-                "add_measure",
-                "log_checkin",
-                "suggestion_not_helpful",
-                "discuss_idea",
-            )
-        ],
+        "ask": [t.name for t in ask_tools],
+        "suggest": [t.name for t in suggest_tools],
+        "follow_up": [t.name for t in follow_up_tools],
         "debate": [t.name for t in debate_tools],
+        "web_search_ideas": [t.name for t in search_tools],
     }
+    # Which model each station was built with, so a test can check the graph
+    # the clients actually get rather than the resolver in isolation.
+    compiled.station_models = dict(station_models)  # type: ignore[attr-defined]
     return compiled
 
 
@@ -612,7 +919,10 @@ __all__ = [
     "DEBATE_TURN_CAP",
     "DEFAULT_RECURSION_LIMIT",
     "NOT_HELPFUL_PHRASES",
+    "REJECTED_TEXT",
     "State",
+    "WRITE_TOOLS",
+    "action_request",
     "build_agent",
     "discuss_idea",
     "idea_decided",

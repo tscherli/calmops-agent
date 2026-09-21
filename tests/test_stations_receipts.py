@@ -7,12 +7,14 @@ just shows fewer lines, and the fabrication evaluator gets *stricter*, so the
 eval score looks fine while the guarantee is gone.
 """
 import csv
+import json
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from agent.graph import build_agent
-from tests.conftest import StubChatModel
+from tests.conftest import StubChatModel, invoke_approving
 from tools.measures import MEASURE_COLUMNS
 
 MEASURE_ROWS = [
@@ -42,14 +44,18 @@ def call(name, args, call_id="c1"):
 
 
 def run(graph, state):
-    return graph.invoke(state)
+    """One turn with every write approved: this file tests what a tool does
+    once it runs, not whether it may (that is tests/test_approval.py)."""
+    return invoke_approving(graph, state)
 
 
 def agent_that_calls(measures_file, log_file, *tool_calls, then="done"):
     """A graph whose model asks for the given tools, then replies."""
     responses = [*tool_calls, AIMessage(content=then)]
     model = StubChatModel(responses=responses)
-    graph = build_agent(model=model, log_path=log_file, measures_path=measures_file)
+    graph = build_agent(
+        model=model, log_path=log_file, measures_path=measures_file, checkpointer=InMemorySaver()
+    )
     graph.stub = model  # type: ignore[attr-defined]
     return graph
 
@@ -70,6 +76,7 @@ BASE = {"energy": "wired", "goal": "calm down now", "offered": ["breathe"], "ste
     [
         ("record_choices", {"energy": "calm", "goal": "plan recovery"}),
         ("find_measures", {}),
+        ("search_measures", {"words": "walk"}),
         ("suggestion_not_helpful", {}),
         ("discuss_idea", {"idea": "pause before replying"}),
         ("idea_decided", {"outcome": "drop"}),
@@ -132,6 +139,17 @@ def test_find_measures_records_what_it_showed(measures_file, log_file):
     result = run(graph, {"messages": [HumanMessage(content="ideas?")], "energy": "wired", "goal": "calm down now"})
     assert result["offered"]
     assert receipts(result, "find_measures")[0]["exit_code"] == 0
+
+
+def test_a_search_hands_the_model_the_rows_not_a_message_object(measures_file, log_file):
+    """Invoked with the whole call, a plain-returning tool comes back as a
+    ToolMessage. Stringified again, the model read "content='[...]' name=..."
+    in a real conversation instead of the rows."""
+    graph = agent_that_calls(measures_file, log_file, call("search_measures", {"words": "walking"}))
+    result = run(graph, {"messages": [HumanMessage(content="is walking in my list?")], **BASE})
+    reply = next(m for m in result["messages"] if getattr(m, "name", None) == "search_measures")
+    assert json.loads(reply.content)[0]["measure_id"] == "short_walk"
+    assert receipts(result, "search_measures")[0]["detail"] == "1 results"
 
 
 def test_an_idea_reaches_the_state_and_is_cleared_again(measures_file, log_file):
@@ -223,6 +241,7 @@ def test_a_rating_does_not_end_the_conversation(measures_file, log_file):
         measures_file, log_file, call("log_checkin", {"measure_id": "breathe", "helpfulness": "helped"})
     )
     result = run(graph, {"messages": [HumanMessage(content="it helped")], **BASE})
+    assert receipts(result, "log_checkin")[0]["exit_code"] == 0, "the rating must really be written"
     assert result.get("complete") is not True
 
 

@@ -38,6 +38,7 @@ Energy = Literal["exhausted", "calm", "wired"]
 Goal = Literal["calm down now", "plan recovery", "change the situation"]
 MeasureType = Literal["recover", "act"]
 Effort = Literal["minutes", "hours", "days"]
+GOALS: tuple[str, ...] = ("calm down now", "plan recovery", "change the situation")
 
 # One lookup returns a handful, not the whole list: the model picks two from
 # what it sees, and a later lookup in the same conversation returns the next
@@ -76,11 +77,19 @@ def fits_goal(row: dict[str, str], goal: str) -> bool:
 
 
 def matching_measures(
-    energy: str, goal: str, *, exclude: set[str] | None = None, path: Path | str | None = None
+    energy: str,
+    goal: str | None,
+    *,
+    exclude: set[str] | None = None,
+    path: Path | str | None = None,
 ) -> list[dict[str, str]]:
-    """Measures for this energy and goal that have not been shown yet."""
+    """Measures for this energy and goal that have not been shown yet.
+
+    Without a goal, every goal is allowed: someone who does not know yet what
+    would help still gets something from their own list, not an invented idea.
+    """
     seen = exclude or set()
-    return [
+    rows = [
         {
             "measure_id": row["measure_id"],
             "type": row["type"],
@@ -89,9 +98,65 @@ def matching_measures(
         }
         for row in read_measures(path)
         if energy in row["fits_energy"].split(";")
-        and fits_goal(row, goal)
+        and (goal is None or fits_goal(row, goal))
         and row["measure_id"] not in seen
-    ][:FIND_MEASURES_BATCH]
+    ]
+    if goal is None:
+        rows = _one_goal_at_a_time(rows)
+    return rows[:FIND_MEASURES_BATCH]
+
+
+def _one_goal_at_a_time(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Take turns between the goals, so a batch spans them.
+
+    In file order the first batch was four quick recoveries: the real list has
+    fourteen of them for "exhausted" before any act or plan row.
+    """
+    by_goal = [[r for r in rows if fits_goal(r, g)] for g in GOALS]
+    mixed = []
+    for turn in range(max((len(group) for group in by_goal), default=0)):
+        mixed.extend(group[turn] for group in by_goal if turn < len(group))
+    return mixed
+
+
+SEARCH_RESULTS = 5
+
+# Words that would match half the list and say nothing about what was asked.
+_SEARCH_STOPWORDS = frozenset(
+    "the and for with your you this that what into from about list measure measures already "
+    "there have does something".split()
+)
+
+
+def search_measures_by_words(words: str, path: Path | str | None = None) -> list[dict[str, str]]:
+    """Rows whose id or text share a word stem with the query.
+
+    A stem is the first four letters, so "walking" finds "walk" and "breathe"
+    finds "breaths" -- crude on purpose: the question it answers is "is
+    something like this already in my list?", and a near miss shown to the user
+    is better than a real match missed.
+    """
+    stems = {
+        word[:4]
+        for word in re.findall(r"[a-z]+", words.lower())
+        if len(word) >= 3 and word not in _SEARCH_STOPWORDS
+    }
+    if not stems:
+        return []
+    hits = []
+    for row in read_measures(path):
+        row_words = re.findall(r"[a-z]+", f"{row['measure_id']} {row['measure']}".lower())
+        if any(row_word.startswith(stem) for stem in stems for row_word in row_words):
+            hits.append(
+                {
+                    "measure_id": row["measure_id"],
+                    "type": row["type"],
+                    "effort": row["effort"],
+                    "fits_energy": row["fits_energy"],
+                    "measure": row["measure"],
+                }
+            )
+    return hits[:SEARCH_RESULTS]
 
 
 def append_measure(row: dict[str, str], path: Path | str | None = None) -> None:
@@ -125,20 +190,23 @@ def make_find_measures(path: Path | str | None = None):
         """Look up measures from the user's own list for their recorded energy and goal.
 
         Returns up to four measures that have not been shown in this
-        conversation yet. An empty list means the list has nothing left for
-        this combination; say so and search the web instead of inventing one.
+        conversation yet. If no goal is recorded yet, it returns measures for
+        their energy across every goal. An empty list means the list has
+        nothing left for this; say so instead of inventing one.
         """
         energy, goal = state.get("energy"), state.get("goal")
         offered = list(state.get("offered") or [])
-        if not (energy and goal):
+        if not energy:
             return _reply(
-                "Energy and goal are not recorded yet; ask the user first.",
+                "Energy is not recorded yet; ask the user first.",
                 tool_call_id,
                 "find_measures",
                 status="skipped",
             )
-        found = matching_measures(energy, goal, exclude=set(offered), path=path)
+        found = matching_measures(energy, goal or None, exclude=set(offered), path=path)
         detail = f"{len(found)} measures" if found else "no measures left for this"
+        if not goal:
+            detail += " (any goal)"
         return _reply(
             as_tool_content(found),
             tool_call_id,
@@ -148,6 +216,24 @@ def make_find_measures(path: Path | str | None = None):
         )
 
     return find_measures
+
+
+def make_search_measures(path: Path | str | None = None):
+    """The search tool, bound to one measure list (tests and evals pass their own)."""
+
+    @tool
+    def search_measures(words: str) -> list[dict[str, str]]:
+        """Search the user's own measure list by a few words.
+
+        Use it to answer whether something is already in their list, for
+        example "walk" or "breathing". Returns the matching rows; an empty list
+        means nothing in their list matches. It only reads: it changes nothing.
+
+        words: a few words for what you are looking for.
+        """
+        return search_measures_by_words(words, path)
+
+    return search_measures
 
 
 def make_add_measure(path: Path | str | None = None):
@@ -175,7 +261,8 @@ def make_add_measure(path: Path | str | None = None):
         fits_energy: the energy levels it suits.
         effort: how long it takes.
         source_url: the page the idea came from; empty if it is your own idea.
-        from_user: true when it is the user's own idea.
+        from_user: true when it is the user's own idea. A source_url wins:
+        an idea from a web page is saved as coming from the web.
         """
         clean_id = str(measure_id).strip().lower()
         if not MEASURE_ID_PATTERN.match(clean_id):
@@ -197,7 +284,12 @@ def make_add_measure(path: Path | str | None = None):
             return _reply(
                 "Not added: the measure text is empty.", tool_call_id, "add_measure", status="error"
             )
-        source = "user" if from_user else (f"web:{source_url.strip()}" if source_url.strip() else "agent")
+        # A link decides it: an idea with a page behind it came from the web,
+        # whatever the model says. Web ideas that reached the debate station
+        # were added with from_user true -- its prompt assumes every idea there
+        # is the user's -- and saved as "user" with their link thrown away.
+        url = source_url.strip()
+        source = f"web:{url}" if url else ("user" if from_user else "agent")
         append_measure(
             {
                 "measure_id": clean_id,

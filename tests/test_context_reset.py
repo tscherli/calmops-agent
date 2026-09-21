@@ -11,8 +11,10 @@ import csv
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from langgraph.checkpoint.memory import InMemorySaver
+
 from agent.graph import CARRIED_FIELDS, build_agent, next_turn_state, station_for
-from tests.conftest import StubChatModel
+from tests.conftest import StubChatModel, invoke_approving
 from tools.measures import MEASURE_COLUMNS
 
 MEASURE_ROWS = [
@@ -48,7 +50,10 @@ def call(name, args, call_id="c1"):
 def agent_that_calls(tmp_path, measures_file, tool_call):
     model = StubChatModel(responses=[tool_call, AIMessage(content="done")])
     return build_agent(
-        model=model, log_path=tmp_path / "checkin_log.csv", measures_path=measures_file
+        model=model,
+        log_path=tmp_path / "checkin_log.csv",
+        measures_path=measures_file,
+        checkpointer=InMemorySaver(),
     )
 
 
@@ -178,7 +183,9 @@ def test_a_logged_check_in_resets_and_the_next_sentence_starts_at_ask(tmp_path, 
         measures_file,
         call("log_checkin", {"energy": "wired", "circumstances": "A rough one.", "measure_id": "breathe"}),
     )
-    result = graph.invoke({"messages": [HumanMessage(content="yes, that is right")], **LIVE, "idea": None})
+    result = invoke_approving(
+        graph, {"messages": [HumanMessage(content="yes, that is right")], **LIVE, "idea": None}
+    )
     assert result["complete"] is True
     assert station_for(next_turn_state(result)) == "ask"
 
@@ -188,7 +195,8 @@ def test_a_rating_leaves_the_conversation_where_it_was(tmp_path, measures_file):
     graph = agent_that_calls(
         tmp_path, measures_file, call("log_checkin", {"measure_id": "breathe", "helpfulness": "helped"})
     )
-    result = graph.invoke({"messages": [HumanMessage(content="it helped")], **LIVE, "idea": None})
+    result = invoke_approving(graph, {"messages": [HumanMessage(content="it helped")], **LIVE, "idea": None})
+    assert result["pauses"] == 1, "the rating must really have been written, not refused"
     carried = next_turn_state(result)
     assert carried["energy"] == "wired" and carried["offered"] == ["breathe"]
     assert station_for(carried) == "follow_up"
