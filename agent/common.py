@@ -132,6 +132,47 @@ def pending_tool_calls(messages: Sequence[BaseMessage]) -> list[dict[str, Any]]:
     return [call for call in last_ai_tool_calls(messages) if call.get("id") not in answered]
 
 
+def drop_unanswered_tool_calls(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    """Leave out any model message whose tool calls were never answered.
+
+    OpenAI rejects a transcript that carries a call without its result ("No
+    tool output found for function call", 400), and it is rejected again on
+    every later turn: one such message ends the conversation for good. That
+    happened when a station with no path to the tools node called a tool.
+
+    The whole message goes, together with the results of its other calls --
+    dropping the calls alone would leave those results pointing at nothing.
+    """
+    answered = answered_tool_call_ids(messages)
+    orphaned = {
+        call.get("id")
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls or []
+        if call.get("id") not in answered
+    }
+    if not orphaned:
+        return list(messages)
+    broken_messages = {
+        id(message)
+        for message in messages
+        if isinstance(message, AIMessage)
+        and any(call.get("id") in orphaned for call in message.tool_calls or [])
+    }
+    dropped_calls = {
+        call.get("id")
+        for message in messages
+        if id(message) in broken_messages
+        for call in message.tool_calls or []
+    }
+    return [
+        message
+        for message in messages
+        if id(message) not in broken_messages
+        and not (isinstance(message, ToolMessage) and message.tool_call_id in dropped_calls)
+    ]
+
+
 def compact_spent_tool_messages(
     messages: list[BaseMessage], tool_names: Sequence[str] = ("find_measures",), limit: int = 200
 ) -> list[BaseMessage]:

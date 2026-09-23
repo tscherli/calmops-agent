@@ -5,6 +5,7 @@ import agent.common as common
 import agent.graph as graph
 from agent.common import (
     compact_spent_tool_messages,
+    drop_unanswered_tool_calls,
     message_text,
     pending_tool_calls,
     tool_event,
@@ -61,3 +62,61 @@ def test_compaction_only_touches_the_named_fat_tool():
     out = compact_spent_tool_messages(messages, tool_names=("log_checkin",))
     assert len(out[0].content) < 100
     assert out[1].content == fat
+
+
+# -- a call without its result poisons the whole conversation ----------------
+
+
+def _call_message(name="suggestion_not_helpful", call_id="c1", content=""):
+    return AIMessage(content=content, tool_calls=[{"name": name, "args": {}, "id": call_id}])
+
+
+def test_a_call_that_was_never_answered_is_left_out():
+    """A station whose only edge is to END called a tool in a hand test. The
+    unanswered call made OpenAI reject the transcript ("No tool output found
+    for function call", 400) on that turn and on every turn after it."""
+    messages = [HumanMessage(content="not helpful"), _call_message()]
+    assert drop_unanswered_tool_calls(messages) == messages[:1]
+
+
+def test_an_answered_call_is_kept():
+    messages = [
+        HumanMessage(content="ideas?"),
+        _call_message("find_measures", "c1"),
+        ToolMessage(content="[]", tool_call_id="c1", name="find_measures"),
+        AIMessage(content="here you go"),
+    ]
+    assert drop_unanswered_tool_calls(messages) == messages
+
+
+def test_the_results_of_a_dropped_message_go_with_it():
+    """Two calls in one message, one answered: keeping the answer alone would
+    leave a result pointing at a call the model never sees."""
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "find_measures", "args": {}, "id": "c1"},
+            {"name": "suggestion_not_helpful", "args": {}, "id": "c2"},
+        ],
+    )
+    messages = [
+        HumanMessage(content="hi"),
+        both,
+        ToolMessage(content="[]", tool_call_id="c1", name="find_measures"),
+    ]
+    assert drop_unanswered_tool_calls(messages) == messages[:1]
+
+
+def test_nothing_is_copied_when_every_call_was_answered():
+    """The common case must not rebuild the list or reorder anything."""
+    messages = [HumanMessage(content="hi"), AIMessage(content="hello")]
+    assert drop_unanswered_tool_calls(messages) == messages
+
+
+def test_the_next_turn_carries_no_unanswered_call():
+    """next_turn_state is what both clients hand to the next turn."""
+    carried = graph.next_turn_state(
+        {"messages": [HumanMessage(content="not helpful"), _call_message()], "energy": "wired"}
+    )
+    assert carried["messages"] == carried["messages"][:1]
+    assert not any(getattr(m, "tool_calls", None) for m in carried["messages"])

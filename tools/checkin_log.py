@@ -62,6 +62,21 @@ def is_rating_row(row: dict[str, str]) -> bool:
     return bool(row.get("helpfulness"))
 
 
+def _already_rated(measure_id: str, helpfulness: str, path: Path | str | None = None) -> bool:
+    """Is the very same verdict for this measure already the latest rating?
+
+    A model logged "instrumental_music_break helped" twice in one conversation,
+    which the digest counts as two successes. A *different* verdict is a
+    correction and is written: the newer row wins by being later.
+    """
+    for row in reversed(read_checkin_rows(path)):
+        if not is_rating_row(row):
+            return False
+        if row.get("measure_id") == measure_id:
+            return row.get("helpfulness") == helpfulness
+    return False
+
+
 def append_checkin_row(
     *,
     energy: str = "",
@@ -77,6 +92,9 @@ def append_checkin_row(
     Enforced here, not in the prompt:
     - a rating row (helpfulness set) carries only the measure; energy and the
       situation belong to the check-in row that came before it
+    - a rating that arrives with a situation and has no check-in waiting for it
+      writes that check-in first, rather than dropping what the user said
+    - the same measure is not rated twice in a row
     - a check-in row without any measure is not written at all: the row exists
       to record a measure the user settled on
     """
@@ -86,6 +104,27 @@ def append_checkin_row(
             "status": "skipped",
             "reason": "no measure yet: log once the user has settled on one",
         }
+    if rating and measure_id and _already_rated(measure_id, helpfulness, path):
+        return {
+            "status": "skipped",
+            "reason": f"{measure_id} already has this verdict; nothing new to record",
+        }
+
+    wrote_checkin = ""
+    if rating and (energy or circumstances) and measure_awaiting_rating(path) != measure_id:
+        # The user said how it went and what was going on in one breath. The
+        # rating row has no room for the situation, so it gets its own row
+        # first -- a hand test lost "feeling very tired at work" this way.
+        first = append_checkin_row(
+            energy=energy,
+            circumstances=circumstances,
+            measure_id=measure_id,
+            measure_taken=measure_taken,
+            path=path,
+        )
+        if first["status"] != "ok":
+            return first
+        wrote_checkin = first["row_id"]
 
     row = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -106,7 +145,12 @@ def append_checkin_row(
             if write_header:
                 writer.writeheader()
             writer.writerow(row)
-        return {"status": "ok", "row_id": row["row_id"], "kind": "rating" if rating else "checkin"}
+        return {
+            "status": "ok",
+            "row_id": row["row_id"],
+            "kind": "rating" if rating else "checkin",
+            "checkin_row_id": wrote_checkin,
+        }
     except Exception as exc:  # noqa: BLE001 - a logging failure must never end the turn
         _write_pending_fallback(row)
         return {"status": "error", "row_id": row["row_id"], "error": str(exc)}
@@ -192,7 +236,7 @@ def make_log_checkin(log_path: Path | str | None = None, measures_path: Path | s
                 status="error",
             )
 
-        is_checkin = result["kind"] == "checkin"
+        is_checkin = result["kind"] == "checkin" or bool(result.get("checkin_row_id"))
         update: dict[str, Any] = {"rejections": 0}
         if is_checkin:
             # the signal the clients use to start the next conversation fresh

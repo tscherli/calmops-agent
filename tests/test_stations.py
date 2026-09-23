@@ -199,14 +199,15 @@ def test_the_debate_station_can_keep_an_idea_and_check_the_list(agent):
     ]
 
 
-def test_the_search_station_cannot_write_anything(agent):
-    """It reads untrusted web pages. Once that text is in the context, it must
-    not be able to trigger a lasting effect -- the prompt-injection rule. It
-    used to bind every tool, both writes included."""
-    from agent.graph import WRITE_TOOLS
-
-    assert agent.station_tools["web_search_ideas"]
-    assert not WRITE_TOOLS & set(agent.station_tools["web_search_ideas"])
+def test_the_search_station_binds_no_local_tool_at_all(agent):
+    """Two reasons. It reads untrusted web pages, so it must not be able to
+    trigger a lasting effect. And its only edge is to END, so a call made here
+    is never answered: gpt-5-mini called suggestion_not_helpful in a hand test,
+    and the unanswered call broke every later turn with a 400."""
+    assert agent.station_tools["web_search_ideas"] == []
+    assert ("web_search_ideas", "tools") not in {
+        (e.source, e.target) for e in agent.get_graph().edges
+    }
 
 
 def test_the_stations_bind_only_their_own_tools(agent, measures_file):

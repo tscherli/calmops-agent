@@ -47,6 +47,10 @@ def checkin(path, measure_id="short_walk", energy="wired", **kwargs):
 
 
 def rating(path, measure_id="short_walk", helpfulness="helped"):
+    """One occasion: the check-in it belongs to, then the verdict. The writer
+    refuses the very same verdict twice with no check-in in between, which is
+    how a model logged one event as two successes."""
+    checkin(path, measure_id=measure_id)
     return append_checkin_row(path=path, measure_id=measure_id, helpfulness=helpfulness)
 
 
@@ -60,21 +64,22 @@ def summary(log_path, measures_file, **kwargs):
 def test_a_rating_is_not_an_entry(log_path, measures_file):
     """Counting verdicts as entries would turn a quiet week with one measure
     and three ratings into a busy one."""
-    checkin(log_path)
     rating(log_path)
     rating(log_path, helpfulness="somewhat")
 
     result = summary(log_path, measures_file)
 
-    assert result["entry_count"] == 1
+    assert result["entry_count"] == 2
     assert result["rating_count"] == 2
 
 
 def test_a_thin_week_is_reported_as_thin_even_with_many_ratings(log_path, measures_file):
     """N=1 must not become a trend because verdicts arrived about it."""
-    checkin(log_path)
-    for _ in range(4):
-        rating(log_path)
+    rating(log_path)
+    for _ in range(3):
+        append_checkin_row(
+            path=log_path, measure_id="short_walk", helpfulness="somewhat" if _ % 2 else "helped"
+        )
 
     assert summary(log_path, measures_file)["enough_data"] is False
 
@@ -216,7 +221,9 @@ def test_an_unrated_measure_is_not_claimed_to_have_worked(log_path, measures_fil
 def test_energy_is_counted_from_check_ins_only(log_path, measures_file):
     checkin(log_path, energy="wired")
     checkin(log_path, energy="exhausted")
-    rating(log_path)   # a rating blanks energy, so it must not show up as ""
+    # a rating blanks energy, so it must not show up as "" -- written directly,
+    # because the helper would add a check-in of its own
+    append_checkin_row(path=log_path, measure_id="short_walk", helpfulness="helped")
 
     result = summary(log_path, measures_file)
 

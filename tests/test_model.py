@@ -62,10 +62,13 @@ def test_a_name_is_built_and_an_instance_is_passed_through():
     assert resolve_model(built) is built
 
 
-def test_debate_defaults_to_the_stronger_model():
-    """Honest pushback instead of agreement is where small models are weakest."""
+def test_the_debate_model_is_its_own_setting():
+    """Honest pushback instead of agreement is where small models are weakest,
+    so the debate station is never resolved from OPENAI_MODEL. It may equal the
+    default (both are mini today) but it is set separately, so raising one does
+    not silently raise the other."""
     assert model_name_of(resolve_debate_model(None)) == DEBATE_MODEL
-    assert DEBATE_MODEL != DEFAULT_MODEL
+    assert resolve_debate_model(None) is not resolve_model(None)
 
 
 # -- the graph, built the way the real clients build it ----------------------

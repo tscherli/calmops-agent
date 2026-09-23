@@ -15,7 +15,13 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
-from agent.graph import REJECTED_TEXT, build_agent, goal_question_unanswered, idea_closing
+from agent.graph import (
+    REJECTED_TEXT,
+    build_agent,
+    goal_question_unanswered,
+    idea_closing,
+    station_for,
+)
 from agent.prompts import (
     IDEA_ADD_MISSING,
     IDEA_ADDED_LINE,
@@ -26,6 +32,7 @@ from agent.prompts import (
     IDEA_TRY_WHAT_WAS_ADDED,
 )
 from tests.conftest import StubChatModel, invoke_approving
+from tools.checkin_log import append_checkin_row, read_checkin_rows
 from tools.measures import MEASURE_COLUMNS, read_measures
 
 MEASURE_ROWS = [
@@ -135,11 +142,14 @@ def test_try_and_drop_get_their_own_text(measures_file, tmp_path, outcome, text)
     assert model.call_count == 1
 
 
-def test_the_closing_leaves_no_station_active(measures_file, tmp_path):
-    """Otherwise the next turn would count as the reply to a goal question."""
+def test_the_closing_hands_the_next_turn_to_follow_up(measures_file, tmp_path):
+    """What usually follows is "it worked", and log_checkin lives in follow_up.
+    With no station active the next turn went to `ask`, which answered a user
+    who had just tried a measure with the goal question."""
     result, _ = decide_turn(measures_file, tmp_path, decided("drop"))
-    assert result["step"] is None
+    assert result["step"] == "follow_up"
     assert result["idea"] is None
+    assert station_for(dict(result, messages=[])) == "follow_up"
 
 
 def _added(call_id="add1", **kwargs):
@@ -287,3 +297,117 @@ def test_after_a_tool_result_the_station_speaks_freely():
     assert goal_question_unanswered(state) is False
     state["messages"] = state["messages"][:1]
     assert goal_question_unanswered(state) is True
+
+
+# -- a conversation that reached follow_up stays there ------------------------
+
+
+def test_after_a_web_search_the_next_turn_can_write(measures_file, tmp_path):
+    """web_search_ideas ends in follow_up. With no goal recorded the next turn
+    used to go to `ask`, which has neither add_measure nor log_checkin: "add
+    both of them" then only worked if the model took the discuss_idea detour,
+    and once it just claimed it had added them."""
+    model = StubChatModel(responses=[AIMessage(content="", tool_calls=[add_call()])])
+    graph = build_agent(
+        model=model, log_path=tmp_path / "log.csv", measures_path=measures_file, checkpointer=InMemorySaver()
+    )
+    after_search = {
+        "messages": [HumanMessage(content="add both of them")],
+        "energy": "exhausted",
+        "offered": ["deep_breaths"],
+        "rejections": 1,
+        "step": "follow_up",
+    }
+    result = invoke_approving(graph, after_search)
+    assert result["pauses"] == 1  # the card, not a detour through the debate
+    assert "box_breathing" in {r["measure_id"] for r in read_measures(measures_file)}
+
+
+def test_it_worked_reaches_the_station_that_can_log(measures_file, tmp_path):
+    """"it worked both of it" was answered with the goal question, because the
+    turn after the closing went to `ask`."""
+    model = StubChatModel(responses=[AIMessage(content="how did it go?")])
+    graph = build_agent(model=model, log_path=tmp_path / "log.csv", measures_path=measures_file)
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="it worked")], "energy": "exhausted", "step": "follow_up"}
+    )
+    assert result["step"] == "follow_up"
+    assert "log_checkin" in graph.station_tools["follow_up"]
+
+
+def test_the_goal_question_still_comes_first_in_a_fresh_conversation(measures_file, tmp_path):
+    """The new rule must not swallow the opening: nothing has been offered and
+    no station is active, so the goal is still asked."""
+    assert station_for({"energy": "exhausted"}) == "ask"
+    assert station_for({"energy": "exhausted", "step": "ask", "offered": ["x"]}) == "ask"
+
+
+# -- a rating typed as words reaches the card ---------------------------------
+
+
+def rating_graph(measures_file, tmp_path, reply, checkpointer=True):
+    """A log with one check-in waiting for its rating."""
+    log = tmp_path / "log.csv"
+    append_checkin_row(
+        energy="exhausted", circumstances="Tired at work.", measure_id="deep_breaths", path=log
+    )
+    model = StubChatModel(responses=[reply])
+    graph = build_agent(
+        model=model,
+        log_path=log,
+        measures_path=measures_file,
+        checkpointer=InMemorySaver() if checkpointer else None,
+    )
+    return graph, model, log
+
+
+def test_helped_after_a_finished_conversation_reaches_the_card(measures_file, tmp_path):
+    """A logged check-in ends the conversation, so "helped" arrives with an
+    empty state and reached `ask`, which cannot log: the rating was lost."""
+    rate = AIMessage(
+        content="",
+        tool_calls=[{
+            "name": "log_checkin",
+            "id": "r1",
+            "args": {"measure_id": "deep_breaths", "helpfulness": "helped"},
+        }],
+    )
+    graph, _, log = rating_graph(measures_file, tmp_path, rate)
+    result = invoke_approving(graph, {"messages": [HumanMessage(content="helped")]})
+    assert result["pauses"] == 1  # the card asked before the row was written
+    assert read_checkin_rows(log)[-1]["helpfulness"] == "helped"
+
+
+def test_the_station_is_told_which_measure_is_waiting(measures_file, tmp_path):
+    """After the reset the transcript is gone; the log knows the measure."""
+    graph, model, _ = rating_graph(
+        measures_file, tmp_path, AIMessage(content="how did it go?"), checkpointer=False
+    )
+    graph.invoke({"messages": [HumanMessage(content="helped")]})
+    sent = " ".join(str(m.content) for m in model.received_messages[-1])
+    assert "deep_breaths" in sent
+
+
+@pytest.mark.parametrize(
+    "text,routed",
+    [("helped", True), ("it worked", True), ("somewhat", True), ("didn't help", True),
+     ("helped a lot, but I want to talk about my workload and what to change", False),
+     ("what would help?", False)],
+)
+def test_only_a_short_verdict_takes_the_shortcut(text, routed):
+    from agent.graph import says_rating
+
+    assert bool(says_rating(text)) is routed
+
+
+def test_a_rejection_still_wins_while_suggestions_are_on_screen(measures_file, tmp_path):
+    """With suggestions shown, "didn't help" is about them, not about a measure
+    waiting for a rating."""
+    graph, _, _ = rating_graph(
+        measures_file, tmp_path, AIMessage(content="ok"), checkpointer=False
+    )
+    result = graph.invoke(
+        {"messages": [HumanMessage(content="didn't help")], "energy": "exhausted",
+         "goal": "calm down now", "offered": ["deep_breaths"], "rejections": 1}
+    )
+    assert "step back" in result["messages"][-1].content

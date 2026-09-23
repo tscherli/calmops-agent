@@ -61,15 +61,67 @@ def test_a_rating_row_carries_only_the_verdict(log_file):
     """The situation belongs to the check-in row; repeating it here would store
     the same text twice and let the two copies drift."""
     append_checkin_row(
-        energy="wired",
-        circumstances="should be dropped",
+        energy="wired", circumstances="Deadlines piled up.", measure_id="short_walk", path=log_file
+    )
+    append_checkin_row(measure_id="short_walk", helpfulness="helped", path=log_file)
+    row = read_checkin_rows(log_file)[-1]
+    assert row["helpfulness"] == "helped"
+    assert row["energy"] == "" and row["circumstances"] == ""
+
+
+def test_a_verdict_that_arrives_with_the_situation_writes_both_rows(log_file):
+    """"they were both helpful" came with energy and the situation in one call.
+    The rating row has no room for either, so the situation was dropped and the
+    user asked three times why it had not been logged."""
+    result = append_checkin_row(
+        energy="exhausted",
+        circumstances="Very tired at work.",
         measure_id="short_walk",
         helpfulness="helped",
         path=log_file,
     )
-    row = read_checkin_rows(log_file)[0]
-    assert row["helpfulness"] == "helped"
-    assert row["energy"] == "" and row["circumstances"] == ""
+    situation, verdict = read_checkin_rows(log_file)
+    assert situation["circumstances"] == "Very tired at work."
+    assert situation["energy"] == "exhausted" and situation["helpfulness"] == ""
+    assert verdict["helpfulness"] == "helped" and verdict["measure_id"] == "short_walk"
+    assert result["checkin_row_id"] == situation["row_id"]
+
+
+def test_a_verdict_for_a_waiting_check_in_adds_no_second_one(log_file):
+    append_checkin_row(
+        energy="wired", circumstances="Deadlines piled up.", measure_id="short_walk", path=log_file
+    )
+    append_checkin_row(
+        energy="wired",
+        circumstances="Deadlines piled up.",
+        measure_id="short_walk",
+        helpfulness="helped",
+        path=log_file,
+    )
+    assert len(read_checkin_rows(log_file)) == 2
+
+
+def test_the_same_verdict_twice_is_refused(log_file):
+    """A model logged "instrumental_music_break helped" twice in one
+    conversation, which the digest counts as two successes."""
+    append_checkin_row(
+        energy="wired", circumstances="Deadlines piled up.", measure_id="short_walk", path=log_file
+    )
+    append_checkin_row(measure_id="short_walk", helpfulness="helped", path=log_file)
+    again = append_checkin_row(measure_id="short_walk", helpfulness="helped", path=log_file)
+    assert again["status"] == "skipped"
+    assert len(read_checkin_rows(log_file)) == 2
+
+
+def test_a_changed_verdict_is_written(log_file):
+    """"actually it did not help" is a correction, not a duplicate."""
+    append_checkin_row(
+        energy="wired", circumstances="Deadlines piled up.", measure_id="short_walk", path=log_file
+    )
+    append_checkin_row(measure_id="short_walk", helpfulness="helped", path=log_file)
+    changed = append_checkin_row(measure_id="short_walk", helpfulness="didnt_help", path=log_file)
+    assert changed["status"] == "ok"
+    assert read_checkin_rows(log_file)[-1]["helpfulness"] == "didnt_help"
 
 
 def test_a_checkin_without_a_measure_is_not_written(log_file):
@@ -127,6 +179,20 @@ def test_a_logged_checkin_signals_that_the_conversation_is_complete(log_file, me
     assert command.update["checkin_logged"] is True
     assert command.update["rejections"] == 0
     assert _receipt(command)["status"] == "ok"
+
+
+def test_a_verdict_that_wrote_the_situation_counts_as_a_check_in(log_file, measures_file):
+    """One call carrying both rows is still a logged check-in: the clients
+    start fresh on that signal, and the rating buttons need last_measure_id."""
+    command = _call(
+        make_log_checkin(log_file, measures_file),
+        energy="wired",
+        circumstances="Deadlines piled up.",
+        measure_id="short_walk",
+        helpfulness="helped",
+    )
+    assert command.update["checkin_logged"] is True
+    assert command.update["last_measure_id"] == "short_walk"
 
 
 def test_a_rating_does_not_end_the_conversation(log_file, measures_file):

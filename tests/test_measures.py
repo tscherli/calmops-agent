@@ -272,3 +272,24 @@ def test_every_energy_and_goal_combination_finds_something():
     for energy in ("exhausted", "calm", "wired"):
         for goal in ("calm down now", "plan recovery", "change the situation"):
             assert matching_measures(energy, goal, path=MEASURES_PATH), f"{energy} / {goal}"
+
+
+def test_web_punctuation_is_flattened_to_ascii(measures_file):
+    """A measure copied from a web page arrived as "5-15 minutes" with an en
+    dash, and the list is a plain ASCII file read in a terminal."""
+    _add(measures_file, measure_id="legs_up",
+         measure="Rest 5\u201315 minutes \u2014 it\u2019s \u201cpassive\u201d\u2026")
+    row = read_measures(measures_file)[-1]
+    assert row["measure"] == 'Rest 5-15 minutes - it\'s "passive"...'
+    assert all(ord(c) < 128 for c in row["measure"])
+
+
+def test_letters_with_accents_survive_as_plain_letters(measures_file):
+    _add(measures_file, measure_id="cafe_break", measure="Take a caf\u00e9 break.")
+    assert read_measures(measures_file)[-1]["measure"] == "Take a cafe break."
+
+
+def test_the_shipped_list_is_plain_ascii():
+    """add_measure now folds web punctuation; the file must stay readable
+    in a terminal and diffable by hand."""
+    assert MEASURES_PATH.read_bytes().decode("ascii")

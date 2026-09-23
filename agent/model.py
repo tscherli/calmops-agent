@@ -20,10 +20,15 @@ import os
 
 from langchain_core.language_models import BaseChatModel
 
-DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-nano")
+# Nano kept ignoring prompt rules in hand tests -- it invented a measure when
+# asked to pick one, claimed it had added measures it never wrote, and showed
+# four options where the prompt says two. Mini is the default while that is
+# being watched; OPENAI_MODEL=gpt-5-nano puts the cheap one back.
+DEFAULT_MODEL = os.environ.get("OPENAI_MODEL", "gpt-5-mini")
 
 # The debate station argues with the user's own idea instead of agreeing with
 # it, which is where small models are weakest (see DEVELOPMENT_LOG, stage 47).
+# It is its own setting so it can be raised above the default on its own.
 DEBATE_MODEL = os.environ.get("OPENAI_DEBATE_MODEL", "gpt-5-mini")
 
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "low")

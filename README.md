@@ -29,7 +29,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 | `agent/safety.py` | Deterministic crisis-keyword gate. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
 | `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
 | `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per station. |
-| `agent/model.py` | Model configuration. `gpt-5-nano` everywhere except the debate station, which uses `gpt-5-mini`. |
+| `agent/model.py` | Model configuration. `gpt-5-mini` everywhere, the debate station included; set `OPENAI_MODEL=gpt-5-nano` for the cheaper run. |
 | `agent/common.py` | Helpers every client shares: receipt formatting, message text, transcript compaction. |
 | `tools/measures.py` | The curated measure list plus `find_measures` (filtered in code, never by the model) and `add_measure` (validated before writing). |
 | `tools/checkin_log.py` | `log_checkin` and the local CSV append. Never raises; falls back to a JSONL file on write failure. |
@@ -46,13 +46,18 @@ START
  route_start(state)                    plain function, no model call
  |  |- rejected flag (button)       -> count_rejection
  |  |- short "not helpful" text     -> count_rejection
+ |  |- short verdict, measure waiting-> follow_up
  |  |- idea set                     -> debate
+ |  |- already in follow_up         -> follow_up
  |  |- energy or goal missing       -> ask
  |  |- nothing offered yet          -> suggest
  |  \- otherwise                    -> follow_up
  |
- ask | suggest | follow_up | debate --(tool calls)--> tools --> back to the station
- |                                  --(no tool calls)--> checkin_done | END
+ ask | suggest | follow_up | debate --(reads only)---> tools --> back to the station
+ |                                  --(any write)----> review -> tools
+ |                                  --(no tool calls)-> checkin_done | END
+ |
+ tools --(idea_decided)--> close_idea -> END   fixed text, built from the results
  |
  count_rejection --> 1st: web_search_ideas -> END
                      2nd: ask_goal_again   -> END
@@ -60,11 +65,12 @@ START
 
 | Station | Model | Tools it can reach |
 |---|---|---|
-| `ask` | nano | `record_choices`, `discuss_idea` |
-| `suggest` | nano | `find_measures` (forced until a fresh result exists), `record_choices`, `discuss_idea`, web search |
-| `follow_up` | nano | everything except `idea_decided`, plus web search |
-| `debate` | **mini** | `add_measure`, `record_choices`, `idea_decided` — capped at 6 turns |
-| `web_search_ideas`, `ask_goal_again`, `count_rejection`, `checkin_done` | none | canned text or code only |
+| `ask` | mini | `record_choices`, `discuss_idea`, `find_measures`, `search_measures` — reads only, and a tool call is forced on the turn after the goal question |
+| `suggest` | mini | `find_measures` (forced until a fresh result exists), `record_choices`, `discuss_idea`, web search |
+| `follow_up` | mini | everything except `idea_decided`, plus web search |
+| `debate` | mini | `add_measure`, `record_choices`, `idea_decided`, `find_measures`, `search_measures` — capped at 6 turns |
+| `web_search_ideas` | mini | the web search only: it reads untrusted pages, and its one edge is to `END`, so a call to any other tool would never be answered |
+| `review`, `close_idea`, `ask_goal_again`, `count_rejection`, `checkin_done` | none | the approval pause, canned text, or code only |
 
 **What a station is not given, it cannot do.** `ask` has no way to suggest a measure because the tool is not bound there. That is the difference between a rule the model may ignore and one it cannot reach.
 
@@ -79,8 +85,8 @@ START
 5. `follow_up` handles feedback, more ideas, adding a measure, and logging.
 6. Reject a suggestion and the first rejection buys a web search; the second steps back and asks about your goal again — both counted in code, not by the model.
 7. Bring an idea of your own and `debate` argues it honestly on the stronger model: one real strength, one honest limit.
-8. Once you settle on a measure, the agent writes one sentence describing your situation and asks you to confirm it. Only then is the row written.
-9. Later you say whether it helped, and that is a second row.
+8. Once you settle on a measure, the agent proposes one sentence describing your situation, and an approval card shows exactly what would be written. Only after you approve it is the row written.
+9. Later you say whether it helped, and that is a second row — typed or clicked. A typed verdict reaches the same card; a click writes the row straight away, because the click is the approval.
 
 ### Scheduled check-in & weekly digest
 

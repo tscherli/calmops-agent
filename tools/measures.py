@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import csv
 import re
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -169,14 +170,26 @@ def append_measure(row: dict[str, str], path: Path | str | None = None) -> None:
         writer.writerow(row)
 
 
+# What a web page's punctuation becomes. The list is a plain ASCII file that
+# is read in a terminal and edited by hand; a measure copied from a page
+# arrived as "rest your legs up the wall for 5-15 minutes" with an en dash.
+_PUNCTUATION = {
+    0x2010: "-", 0x2011: "-", 0x2012: "-", 0x2013: "-", 0x2014: "-", 0x2015: "-",
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
+    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"',
+    0x2026: "...", 0x00A0: " ", 0x2007: " ", 0x202F: " ", 0x2212: "-",
+}
+
+
 def _clean_measure_text(text: str) -> str:
-    """One line, no control characters, capped.
+    """One line of plain ASCII, no control characters, capped.
 
     Text reaching this function may come from a web page the model read, so it
     is treated as data to be sanitised, not as something to trust.
     """
-    flat = " ".join(str(text).split())
-    return flat[:MAX_MEASURE_CHARS]
+    flat = " ".join(str(text).translate(_PUNCTUATION).split())
+    ascii_only = unicodedata.normalize("NFKD", flat).encode("ascii", "ignore").decode("ascii")
+    return " ".join(ascii_only.split())[:MAX_MEASURE_CHARS]
 
 
 def make_find_measures(path: Path | str | None = None):

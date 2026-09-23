@@ -4,7 +4,9 @@ own tools.
     START
       route_start (plain function, no model call)
         |- the user rejected a suggestion            -> count_rejection
+        |- a short verdict, a measure awaiting one   -> follow_up
         |- an idea of theirs is open                 -> debate
+        |- the conversation already reached follow_up-> follow_up
         |- energy or goal missing                    -> ask
         |- nothing suggested yet                     -> suggest
         \- otherwise                                 -> follow_up
@@ -55,6 +57,7 @@ from langgraph.types import Command, interrupt
 from agent.common import (
     as_tool_content,
     compact_spent_tool_messages,
+    drop_unanswered_tool_calls,
     last_ai_tool_calls,
     merge_tool_events,
     message_text,
@@ -83,7 +86,7 @@ from agent.prompts import (
     debate_prompt,
     search_instruction,
 )
-from tools.checkin_log import make_log_checkin
+from tools.checkin_log import make_log_checkin, measure_awaiting_rating
 from tools.measures import (
     Energy,
     Goal,
@@ -149,6 +152,18 @@ NOT_HELPFUL_MAX_EXTRA_WORDS = 5
 CARRIES_MORE_WORDS = frozenset(
     "but if since because to add log save aber wenn weil da hinzu".split()
 )
+
+# How a measure that is waiting for a rating can be rated in words. A check-in
+# ends the conversation, so the next message starts a fresh one: "helped" then
+# reached `ask`, which cannot log, and the rating was lost. Matching here only
+# routes the turn -- the model still proposes the rating and the user approves
+# it on the card.
+RATING_PHRASES: dict[str, tuple[str, ...]] = {
+    "helped": ("helped", "it worked", "that worked", "worked well", "hat geholfen"),
+    "somewhat": ("somewhat", "a bit", "a little", "partly", "so-so", "teilweise"),
+    "didnt_help": ("didn't help", "did not help", "didnt help", "no change", "nothing changed"),
+}
+RATING_MAX_CHARS = 40
 
 Station = Literal["ask", "suggest", "follow_up", "debate"]
 
@@ -376,14 +391,39 @@ def says_not_helpful(text: str) -> bool:
     return len(extra) <= NOT_HELPFUL_MAX_EXTRA_WORDS and not CARRIES_MORE_WORDS & set(extra)
 
 
+def says_rating(text: str) -> str:
+    """The verdict a short message gives, or "" if it gives none.
+
+    Short on purpose, like the rejection shortcut: a longer message usually
+    carries something else that the model should read instead.
+    """
+    stripped = (text or "").strip()
+    if not stripped or len(stripped) > RATING_MAX_CHARS:
+        return ""
+    lowered = stripped.lower().replace("\u2019", "'")
+    for verdict, phrases in RATING_PHRASES.items():
+        if any(phrase in lowered for phrase in phrases):
+            return verdict
+    return ""
+
+
 def station_for(state: State) -> Station:
     """Which station fits the state.
 
     An open idea comes first: the user brought something of their own, and
     every other station would talk past it.
+
+    A conversation that already reached follow_up stays there even with no
+    goal recorded. Without that, every such turn went back to `ask`, which has
+    neither add_measure nor log_checkin: after a web search "add both of them"
+    only worked when the model took the detour through discuss_idea, and "it
+    worked" after a measure was answered with the goal question instead of an
+    offer to log the check-in.
     """
     if state.get("idea"):
         return "debate"
+    if state.get("step") == "follow_up":
+        return "follow_up"
     if not (state.get("energy") and state.get("goal")):
         return "ask"
     if not state.get("offered"):
@@ -453,7 +493,7 @@ def next_turn_state(result: dict[str, Any]) -> dict[str, Any]:
         }
     carried: dict[str, Any] = {
         "messages": compact_spent_tool_messages(
-            result.get("messages", []), tool_names=("find_measures",)
+            drop_unanswered_tool_calls(result.get("messages", [])), tool_names=("find_measures",)
         )
     }
     carried.update({key: result.get(key) for key in CARRIED_FIELDS})
@@ -567,7 +607,13 @@ def build_agent(
     # once untrusted text is in the context, it must not be able to trigger a
     # lasting effect. The approval card would stop it too; this is the layer
     # underneath.
-    search_tools = [t for t in all_tools if t.name not in WRITE_TOOLS]
+    #
+    # It gets no local tool either, because it has no way to run one: its only
+    # edge is to END, so a call made here is never answered. gpt-5-mini called
+    # suggestion_not_helpful in a hand test, and the unanswered call broke every
+    # later turn of that conversation with "No tool output found for function
+    # call" (400).
+    search_tools: list[BaseTool] = []
     search_model = bind(
         "web_search_ideas",
         search_tools + web,
@@ -604,7 +650,10 @@ def build_agent(
         that.
         """
         text = idea_closing(state["messages"], state.get("approvals"))
-        return {"messages": [AIMessage(content=text)], "step": None}
+        # follow_up, not None: what usually comes next is "it worked", and
+        # log_checkin lives there. `ask` would answer that with the goal
+        # question, which is what a hand test got.
+        return {"messages": [AIMessage(content=text)], "step": "follow_up"}
 
     def suggest(state: State) -> dict[str, Any]:
         """Look up measures, then present at most two.
@@ -620,7 +669,16 @@ def build_agent(
 
     def follow_up(state: State) -> dict[str, Any]:
         """Rejection, more ideas, adding a measure, and the log."""
-        response = _reply(follow_up_model, STATION_PROMPTS["follow_up"], state)
+        waiting = measure_awaiting_rating(log_path)
+        # Which measure a "helped" is about is a fact in the log, not something
+        # to infer from a transcript the reset conversation no longer has.
+        trailing = (
+            f'The check-in for measure_id "{waiting}" has no rating yet. If the user says how it '
+            "went, call log_checkin with that measure_id and the helpfulness only."
+            if waiting
+            else None
+        )
+        response = _reply(follow_up_model, STATION_PROMPTS["follow_up"], state, trailing=trailing)
         update: dict[str, Any] = {"messages": [response], "step": "follow_up"}
         if web_search_ran(response):
             update["tool_events"] = [tool_event("web_search", "ok", "provider-reported", verified=False)]
@@ -819,6 +877,12 @@ def build_agent(
         `after_tools` applies to record_choices. The buttons skip that tool,
         so without this a click after the goal question reached follow_up,
         where the lookup is optional, and the model invented options instead.
+
+        A verdict on a measure that is waiting for one goes to follow_up, the
+        only station with log_checkin. A logged check-in ends the conversation,
+        so "helped" arrives in a fresh one and reached `ask`, which cannot log:
+        the rating was lost. Rejections keep priority while suggestions are on
+        screen, where "didn't help" is about the suggestion, not a measure.
         """
         messages = state.get("messages") or []
         offered = state.get("offered")
@@ -826,6 +890,12 @@ def build_agent(
             return "count_rejection"
         if offered and not state.get("idea") and says_not_helpful(last_human_text(messages)):
             return "count_rejection"
+        if (
+            not state.get("idea")
+            and says_rating(last_human_text(messages))
+            and measure_awaiting_rating(log_path)
+        ):
+            return "follow_up"
         if (
             state.get("choices_clicked")
             and state.get("energy")
