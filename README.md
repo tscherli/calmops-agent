@@ -240,6 +240,36 @@ python try_graph_viz.py --png g.png
 
 Renders what `build_agent()` **actually compiled**, so it cannot drift from the code. Uses a stub model — no API key, no network (except `--png`).
 
+### Watching a turn while you use it
+
+```
+python try_inspect.py              # the app, with an inspector window beside it
+python try_inspect.py cli          # the terminal client instead
+```
+
+Opens a second window in which each box is a function in `agent/graph.py` — `route_start`, the four stations, `tools_node`, `review`, `close_idea` — and lights up while it runs, with a tool row and the last calls underneath as `file:line`. A good way to read the code while using the app: whatever lights up is where to put a breakpoint.
+
+Under the hood the client runs as a separate process under the tracer below, which writes one JSON line per call; the inspector tails that file. They are separate processes because the client owns its own Tk main loop and runs each turn in a worker thread.
+
+For the plain text version, without a second window:
+
+```
+python try_trace.py cli            # the terminal client
+python try_trace.py app            # the Tk window
+```
+
+### Working on the window itself
+
+```
+python try_ui.py
+```
+
+The real window with a scripted agent behind it: no API key, no cost, no waiting. It works on a copy of the measure list and a fresh log in the temp directory, so clicking Approve touches nothing real, and it prints which handler each button reaches. **F5 inside the window restarts it** with your edited code — Tkinter has no hot reload, so that is the loop: edit, F5, look.
+
+Prints every call into `agent/`, `tools/` and `observability/`, indented, so a turn reads as its station path and the tools it used. Worker-thread lines are labelled, because the window runs each turn in one.
+
+For values rather than names, use the debugger: `.vscode/launch.json` has a configuration per client, per test scope, and for the scheduler. The CLI is the one to step through — it is single-threaded, so a breakpoint stops the whole turn. Worth keeping breakpoints on `route_start` (which station, before any model call), the station functions, `tools_node` (which call is about to run, with its arguments), `review` (what the card will show) and `append_checkin_row` (what row is written).
+
 ## Results & limitations
 
 **Current state: pre-release. 393 passing tests, and no valid eval numbers.**

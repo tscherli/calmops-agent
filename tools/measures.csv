@@ -37,3 +37,13 @@ digital_reset,recover,Unplug from screens for a few minutes as a quick reset.,ex
 five_min_mental_reset,recover,Take a guided five-minute mental reset between tasks.,exhausted;calm;wired,minutes,web:https://ponoki.app/blog/5-minute-mental-reset-work
 after_work_decompression_ritual,recover,Keep a short after-work ritual that separates work from home.,exhausted;calm,minutes,web:https://www.healthline.com/health/stress/how-to-decompress-after-work
 plan_wellness_day,recover,"Block out a whole day for gentle self-care, with as little work as possible.",exhausted;calm,hours,agent
+legs_up_the_wall,recover,Lie on your back and rest your legs up the wall for 5-15 minutes to reduce leg fatigue and encourage rest.,exhausted;calm,minutes,web:https://health.clevelandclinic.org/benefits-of-legs-up-the-wall
+progressive_muscle_relaxation,recover,Spend about 5 minutes tensing then releasing major muscle groups to quickly release tension and feel more rested.,exhausted;calm,minutes,web:https://health.clevelandclinic.org/progressive-muscle-relaxation-pmr
+coffee_nap,recover,"Drink a coffee, then nap for 15-20 minutes.",exhausted,minutes,web:https://www.sleepfoundation.org/sleep-hygiene/coffee-nap
+instrumental_music_break,recover,Put on headphones and listen to quiet instrumental music for ten minutes.,exhausted,minutes,web:https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11045806/
+low_demand_task,act,"Switch to a very low-demand task for five minutes, e.g. sorting a few emails.",exhausted,minutes,web:https://blog.planner-apps.com/energy-based-planning-on-ipad-match-your-best-hours-to-the-work-that-matters/
+social_microbreak,recover,Take a five-minute low-stakes chat with a coworker or a friend.,exhausted,minutes,web:https://thoughttrace-project.github.io/examples.html
+chewing_gum_alert,recover,Chew a piece of sugarless gum for a few minutes.,exhausted;wired,minutes,web:https://www.ncbi.nlm.nih.gov/pmc/articles/PMC12190721/
+upbeat_music_break,recover,"Play two or three minutes of upbeat, familiar music.",exhausted;wired,minutes,web:https://drrajivdesaimd.com/2019/05/24/science-of-music/
+small_protein_snack,recover,"Eat a small protein-rich snack, e.g. yoghurt or a handful of nuts.",exhausted,minutes,web:https://www.health.harvard.edu/diet-and-nutrition/high-protein-snacks-to-build-muscle-and-keep-hunger-at-bay
+cold_face_splash,recover,Splash cold water on your face for half a minute.,exhausted,minutes,web:https://mcpress.mayoclinic.org/healthy-aging/the-science-behind-ice-baths-for-recovery/
