@@ -27,3 +27,13 @@ pre_meeting_cue_card,act,"Write a one-line reminder that the other person may be
 brief_cognitive_reframe_cue,recover,"Say a short sentence to yourself in the moment, such as: I only need to respond now, not fix this.",exhausted;calm;wired,minutes,agent
 pause_then_nudge,act,"Wait a few seconds before answering, then ask 'Any other ideas?' or 'Who wants to take a first stab?'.",calm;wired,minutes,user
 pause_then_nudge_with_recap,act,"Pause a few seconds before replying, then add a short recap like 'Great ideas so far, anything else to add?'.",calm;wired,minutes,agent
+handheld_massagers,recover,"Use a handheld massager on your shoulders, neck or arms.",exhausted;calm,minutes,user
+massage_balls,recover,Roll a small massage ball over tight spots like shoulders or calves.,exhausted;calm,minutes,user
+foam_rollers,recover,Roll your back and legs gently with a foam roller.,exhausted;calm,minutes,user
+self_massage_oils,recover,"Massage your hands, neck or shoulders with a gentle oil or balm.",exhausted;calm,minutes,user
+gua_sha_tools,recover,Rub a gua sha or scraping tool gently over tight muscles.,exhausted;calm,minutes,user
+box_breathing,recover,"Breathe in a box for a minute: in 4, hold 4, out 4, hold 4.",exhausted;wired;calm,minutes,user
+digital_reset,recover,Unplug from screens for a few minutes as a quick reset.,exhausted;wired,minutes,web:https://news.va.gov/147153/reclaim-your-focus-benefits-digital-reset/
+five_min_mental_reset,recover,Take a guided five-minute mental reset between tasks.,exhausted;calm;wired,minutes,web:https://ponoki.app/blog/5-minute-mental-reset-work
+after_work_decompression_ritual,recover,Keep a short after-work ritual that separates work from home.,exhausted;calm,minutes,web:https://www.healthline.com/health/stress/how-to-decompress-after-work
+plan_wellness_day,recover,"Block out a whole day for gentle self-care, with as little work as possible.",exhausted;calm,hours,agent
