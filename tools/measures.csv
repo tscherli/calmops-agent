@@ -47,3 +47,5 @@ chewing_gum_alert,recover,Chew a piece of sugarless gum for a few minutes.,exhau
 upbeat_music_break,recover,"Play two or three minutes of upbeat, familiar music.",exhausted;wired,minutes,web:https://drrajivdesaimd.com/2019/05/24/science-of-music/
 small_protein_snack,recover,"Eat a small protein-rich snack, e.g. yoghurt or a handful of nuts.",exhausted,minutes,web:https://www.health.harvard.edu/diet-and-nutrition/high-protein-snacks-to-build-muscle-and-keep-hunger-at-bay
 cold_face_splash,recover,Splash cold water on your face for half a minute.,exhausted,minutes,web:https://mcpress.mayoclinic.org/healthy-aging/the-science-behind-ice-baths-for-recovery/
+palming_eye_rest,recover,Warm your palms and cup them over your closed eyes for half a minute.,exhausted,minutes,web:https://nj.gov/education/safety/wellness/mindfulness/docs/EyePalming.pdf
+hand_warming_grounding,recover,"Rub your hands together, then rest them over your eyes and breathe for a minute.",exhausted,minutes,web:https://mindfulcenter.org/somatic-self-care-the-60-second-exercise-to-digest-your-day-video-post/
