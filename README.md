@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.8.0`) — not evaluated yet.** The station architecture is built and covered by 393 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> 🚧 **Pre-release (`v0.10.0`) — not evaluated yet.** The station architecture is built and covered by 534 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -84,9 +84,9 @@ START
 4. `suggest` is **forced** to call `find_measures` before it may present anything, so a suggestion can never bypass your own list. Code filters by energy and goal; the model only picks two from what it got back.
 5. `follow_up` handles feedback, more ideas, adding a measure, and logging.
 6. Reject a suggestion and the first rejection buys a web search; the second steps back and asks about your goal again — both counted in code, not by the model.
-7. Bring an idea of your own and `debate` argues it honestly on the stronger model: one real strength, one honest limit.
-8. Once you settle on a measure, the agent proposes one sentence describing your situation, and an approval card shows exactly what would be written. Only after you approve it is the row written.
-9. Later you say whether it helped, and that is a second row — typed or clicked. A typed verdict reaches the same card; a click writes the row straight away, because the click is the approval.
+7. Bring an idea of your own and `debate` argues it honestly: one real strength, one honest limit. It reads `OPENAI_DEBATE_MODEL`, its own setting, so this one station can be raised above the others without raising the bill everywhere; today both are `gpt-5-mini`.
+8. Once you settle on a measure, the agent asks whether to "check in the current situation into the circumstances log". If you have not said what is going on, it asks that too rather than writing a plausible-sounding sentence of its own. Then an approval card shows exactly what would be written, and only after you approve it is the row written.
+9. Later you say whether it helped, and that is a second row — typed or clicked. A typed verdict reaches the same card; a click writes the row straight away, because the click is the approval. If one turn logged two measures, each gets its own question, in the order they were logged.
 
 ### Scheduled check-in & weekly digest
 
@@ -108,6 +108,20 @@ Energy alone cannot tell apart "I need to sit down for five minutes" from "I nee
 `energy` is inspired by emotional exhaustion — one of three dimensions in burnout research — but **this app is not a validated burnout assessment and diagnoses nothing.** It borrows the concept that fatigue is worth tracking separately, purely as a self-reflection aid. The other two dimensions (cynicism/detachment, reduced accomplishment) are deliberately out of scope: they are not clean single-scale values, and tracking them would push this toward symptom screening.
 
 Logs written under the previous schema are archived as `data/mood_log.pre-stations.csv` rather than migrated.
+
+**The goal is a filter, not a column.** `calm down now` is recovery you can do in minutes, `plan recovery` is recovery that takes hours or days, and `change the situation` is every measure that acts on the cause — so the list stores `type` (recover or act) and `effort` (minutes, hours, days), and the goal is derived from the two. Storing the goal instead, as `recover_now` / `plan_recover`, was considered twice and rejected: duration would then be encoded in two columns at once, and a row could be written that contradicts itself.
+
+### How a measure is chosen
+
+Choosing happens in two stages, and only the second one belongs to the model.
+
+**Code narrows.** `find_measures` takes no arguments from the model at all: it reads the energy and goal already recorded in the graph's state and returns every row that matches both. In the current 60-row list that is 4 rows for *wired + plan recovery* and 29 for *exhausted + calm down now*. Nothing outside your list can come out of this step, which is what makes an invented suggestion structurally impossible rather than merely forbidden in a prompt.
+
+**The model picks.** From that set it presents at most two, each with one sentence on why it fits what you described. Because it sees the whole set, it can weigh a row at the bottom of the file against one at the top: in two recorded runs it chose rows 4 and 2 of 4, and rows 3 and 5 of 5 — never simply the first ones it was handed. Nothing is filtered out for having been mentioned already; the model can read the conversation, and is told to prefer something new unless an earlier measure genuinely fits better, in which case it says why it is bringing it back.
+
+**What "fits" can and cannot mean.** The model can only match against what you have actually said. If all it knows is "exhausted" and "plan recovery", its reasons fall back on the energy word — which is exactly what the code already filtered on — so within the matching set the choice is plausible but close to arbitrary. Say a sentence about what is going on and there is something real to match against. This is a live limitation rather than a bug: the agent asks what has been going on before it *logs*, but not before it *suggests*.
+
+**Why the whole set, and for how long.** Handing over every matching row costs about 1100 input tokens at the widest, once per lookup — a spent result is compacted to a one-line marker on later turns. That is affordable at 60 rows and will not be at several hundred, where the answer is ranking rather than a bigger hand-over; the "helped" verdicts already in the check-in log are the signal to rank by.
 
 ### Architectural decisions
 
@@ -192,11 +206,11 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 **Energy and goal are asked for, never guessed.** Tone, terseness and topic are explicitly *not* evidence: a short message is not low energy, and a busy day is not a goal. Answer with a button and it goes straight into the state; answer in words and the agent records it as soon as it has either one.
 
-**At most two suggestions**, each with one sentence on why it fits. Measure ids are never shown. A measure already offered in this conversation is never offered again — the graph tracks that, not the prompt.
+**At most two suggestions**, each with one sentence on why it fits, chosen from every measure in your list that matches the energy and goal you gave (see [How a measure is chosen](#how-a-measure-is-chosen)). Measure ids are kept out of the suggestions themselves. A measure the agent already suggested is not hidden from it, but it brings one back only when it really is the best fit, and says so.
 
 **Rejection is counted in code.** A short "not helpful" is recognised before any model call. The first rejection buys a web search with real links; the second steps back and re-asks about your goal.
 
-**Nothing is logged before you confirm it.** The agent asks first, in the chat, whether to note a check-in at all, and if you have not said what is going on it asks that too rather than inventing a plausible sentence. Only then does it propose one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you approve that card, where you can also correct the wording. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
+**Nothing is logged before you confirm it.** The agent asks first, in the chat — "Would you like to check in the current situation into the circumstances log?" — and never asks whether you have tried a measure or when you will, and if you have not said what is going on it asks that too rather than inventing a plausible sentence. Only then does it propose one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you approve that card, where you can also correct the wording. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
 
 **Honesty is structural.** Every tool call prints a receipt written by code, before the agent speaks. If a write failed, it says so. If a lookup came back empty, it says there is nothing yet rather than implying a pattern.
 
@@ -272,7 +286,7 @@ For values rather than names, use the debugger: `.vscode/launch.json` has a conf
 
 ## Results & limitations
 
-**Current state: pre-release. 393 passing tests, and no valid eval numbers.**
+**Current state: pre-release. 534 passing tests, and no valid eval numbers.**
 
 The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
@@ -284,6 +298,7 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 - Check-ins fire at configured times or a random interval, not adaptively.
 - Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
 - A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons. Measures picked from the list are rated one at a time: when a turn logs two, the strip asks about the first, then the second.
+- One goal question covers a wide range: "plan recovery" reaches from an hour-long massage to a weekend away, and there is no way to say which you meant. 8 of the 60 measures are plan-recovery ones, against 42 quick recoveries, so that end of the list is thin as well.
 - The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
 - The LLM judge in the eval suite is not calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be.

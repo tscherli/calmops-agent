@@ -136,17 +136,26 @@ def test_the_log_rule_no_longer_asks_for_a_yes_in_the_chat():
     assert "correct it there" in prompt
 
 
-def test_the_log_rule_names_the_question_to_ask_not_only_what_to_avoid():
-    """It used to say only "log nothing until the user has settled on a
-    measure" -- a prohibition with no instruction behind it. In the hand test
-    of 2026-09-24 the model filled the gap: after two approved add_measure
-    calls it asked "Would you like to plan when you will try one of them
-    first?", and never offered to note the situation at all."""
+def test_the_log_rule_gives_the_question_in_the_words_to_use():
+    """Two rounds of hand testing shaped this one sentence. First the rule was
+    only a prohibition ("log nothing until...") and the model filled the empty
+    turn with "would you like to plan when you will try one of them first?".
+    Then the question it did ask -- "shall I note this as a check-in?" -- used
+    a word that means a row in a CSV to this codebase and nothing at all to
+    the person reading it. The question now names what is written and where."""
     prompt = STATION_PROMPTS["follow_up"]
 
-    assert "ask in one short question whether you should note it as a check-in" in prompt
-    assert "not whether they want to try the measure" in prompt
-    assert "not when, where or in what order they will do it" in prompt
+    assert "Would you like to check in the current situation into the circumstances log?" in prompt
+    assert "It names what gets written and where it goes" in prompt
+
+
+def test_trying_a_measure_is_never_asked_about():
+    """Whether they tried it, want to try it, or when: none of it changes what
+    gets written, and each one cost a turn in a hand test."""
+    prompt = STATION_PROMPTS["follow_up"]
+
+    assert "Never ask whether they have tried a measure" in prompt
+    assert "when, where or in what order they will do it" in prompt
 
 
 def test_the_user_is_asked_before_a_write_and_confirms_it_on_the_card():
@@ -179,14 +188,13 @@ def test_several_settled_measures_are_all_logged():
     assert "log each of them -- don't make them pick one" in STATION_PROMPTS["follow_up"]
 
 
-def test_the_question_after_a_check_in_is_how_it_went():
-    """A logged check-in has one open field, the helpfulness. So the question
-    that follows is whether it helped -- not whether they want to try it."""
+def test_the_question_after_a_logged_situation_is_whether_it_helped():
+    """A logged row has one open field, the helpfulness. So that is the only
+    question left, and it carries no "have you tried it yet" with it."""
     prompt = STATION_PROMPTS["follow_up"]
 
-    assert "one short question about" in prompt
-    assert "whether it helped" in prompt
-    assert "Never ask whether they want to try it" in prompt
+    assert "the one thing left to ask is whether the measure helped" in prompt
+    assert "nothing in it about trying" in prompt
 
 
 def test_the_follow_up_station_keeps_the_duplicate_search_guard():

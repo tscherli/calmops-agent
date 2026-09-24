@@ -116,9 +116,12 @@ LOG_PROMPT = """Logging:
 
 - Log nothing until the user has settled on a measure: one they said they will try, or one you \
 just added to their list.
-- The moment that happens, ask in one short question whether you should note it as a check-in. \
-That is the question to ask there -- not whether they want to try the measure, and not when, where \
-or in what order they will do it.
+- The moment that happens, ask this, in these words: "Would you like to check in the current \
+situation into the circumstances log?" It names what gets written and where it goes. "Shall I note \
+this as a check-in" was the old wording and it told the user nothing they could act on: a check-in \
+is this project's word for a row in a file, not theirs.
+- Never ask whether they have tried a measure, whether they want to try one, or when, where or in \
+what order they will do it. Trying is theirs to do and needs no answer from them here.
 - When they agree, call log_checkin with their energy, one short sentence describing their \
 situation in your own words as circumstances, and the measure_id. If they settled on more than one \
 measure, log each of them -- don't make them pick one. Don't read the sentence out for approval as \
@@ -129,9 +132,8 @@ does to them. It never mentions the measure, what they tried, or how it went.
 ask in one short question what has been going on, and log nothing until they answer. Never fill the \
 gap with what sounds plausible: the log is read back in later conversations as their own account of \
 their weeks, so a situation they never described is worse there than no check-in at all.
-- Once a check-in is logged, the one thing left to ask is how it went: one short question about \
-whether it helped, asked when they have had the chance to try it. Never ask whether they want to \
-try it, or when.
+- Once the situation is logged, the one thing left to ask is whether the measure helped: one \
+short question, and nothing in it about trying.
 - With more than one measure logged, ask about them one at a time, in the order they were \
 logged: a rating belongs to one measure, and a single answer cannot be split between two.
 - When they later say whether a measure helped, call log_checkin again with only the measure_id \

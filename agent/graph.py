@@ -673,7 +673,7 @@ def build_agent(
         # Which measure a "helped" is about is a fact in the log, not something
         # to infer from a transcript the reset conversation no longer has.
         trailing = (
-            f'The check-in for measure_id "{waiting}" has no rating yet. If the user says how it '
+            f'The situation logged for measure_id "{waiting}" has no rating yet. If the user says how it '
             "went, call log_checkin with that measure_id and the helpfulness only. If they have "
             "not said yet, ask them in one short sentence whether it helped."
             if waiting
