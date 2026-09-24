@@ -179,7 +179,7 @@ class State(TypedDict, total=False):
     step: Station | None        # the active station
     idea: str | None            # an idea of the user's, while it is discussed
     debate_turns: int
-    rejected: bool              # set by the UI's "not helpful" button
+    rejected: bool              # a rejection stated as a fact, not inferred (eval harness)
     choices_clicked: bool       # set by the UI's energy/goal buttons
     checkin_logged: bool        # a check-in row was written this turn
     last_measure_id: str        # the measure that check-in row named, for a later rating
@@ -674,7 +674,8 @@ def build_agent(
         # to infer from a transcript the reset conversation no longer has.
         trailing = (
             f'The check-in for measure_id "{waiting}" has no rating yet. If the user says how it '
-            "went, call log_checkin with that measure_id and the helpfulness only."
+            "went, call log_checkin with that measure_id and the helpfulness only. If they have "
+            "not said yet, ask them in one short sentence whether it helped."
             if waiting
             else None
         )

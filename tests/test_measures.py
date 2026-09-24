@@ -4,7 +4,7 @@ import csv
 import pytest
 
 from tools.measures import (
-    FIND_MEASURES_BATCH,
+    LOOKUP_ROW_LIMIT,
     GOALS,
     MEASURE_COLUMNS,
     MEASURES_PATH,
@@ -77,20 +77,48 @@ def test_energy_is_matched_against_the_semicolon_list(measures_file):
     assert "short_walk" not in ids  # exhausted;wired only
 
 
-def test_measures_already_shown_are_left_out(measures_file):
+def test_a_lookup_returns_every_measure_for_the_energy_and_goal(tmp_path):
+    """The model picks by fit, so it has to see the candidates. A window over
+    rows in file order made the selection rule "added most recently", not
+    "fits best", and a second lookup could only walk further down the file.
+
+    The list here is deliberately wider than the four-row window that used to
+    cut it off: a slice smaller than the window cannot show that it is gone.
+    """
+    path = tmp_path / "wide.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerows(
+            (f"calm_{n}", "recover", f"Measure number {n}.", "wired", "minutes", "user")
+            for n in range(7)
+        )
+
+    found = [m["measure_id"] for m in matching_measures("wired", "calm down now", path=path)]
+
+    assert found == [f"calm_{n}" for n in range(7)]
+
+
+def test_the_same_lookup_twice_returns_the_same_measures(measures_file):
+    """Nothing is consumed by being returned: a measure the model saw but did
+    not pass on is still there next time, and one that fits best can come back."""
     first = matching_measures("wired", "calm down now", path=measures_file)
-    seen = {m["measure_id"] for m in first}
-    again = matching_measures("wired", "calm down now", exclude=seen, path=measures_file)
-    assert not seen & {m["measure_id"] for m in again}
+    again = matching_measures("wired", "calm down now", path=measures_file)
+
+    assert [m["measure_id"] for m in first] == [m["measure_id"] for m in again]
 
 
-def test_a_lookup_returns_a_batch_not_the_whole_list(measures_file):
-    assert len(matching_measures("wired", "calm down now", path=measures_file)) <= FIND_MEASURES_BATCH
+def test_the_row_limit_is_a_safety_valve_not_a_selection_rule(measures_file):
+    """It sits far above any real slice; if a list ever hits it, the answer is
+    ranking, not a window."""
+    assert LOOKUP_ROW_LIMIT > len(read_measures(measures_file))
+    assert len(matching_measures("wired", "calm down now", path=measures_file)) <= LOOKUP_ROW_LIMIT
 
 
-def test_nothing_left_returns_an_empty_list(measures_file):
-    seen = measure_ids(measures_file)
-    assert matching_measures("wired", "calm down now", exclude=seen, path=measures_file) == []
+def test_an_energy_and_goal_with_no_rows_returns_an_empty_list(measures_file):
+    """The only empty result left: the list itself holds nothing for this.
+    The prompt turns that into an offer to search the web."""
+    assert matching_measures("calm", "plan recovery", path=measures_file) == []
 
 
 # -- find_measures as the model sees it --------------------------------------

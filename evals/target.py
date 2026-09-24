@@ -157,9 +157,10 @@ def run_case(
                 "tool_events": tool_events,
             }
         messages_before = list(state.get("messages") or []) + [HumanMessage(content=turn_text)]
-        # `extra` carries what the UI's buttons would put in the payload
-        # (`rejected`, `idea`, `energy`, `goal`), so a case can exercise a
-        # click without the harness pretending to be Tkinter.
+        # `extra` carries what a client would put in the payload beside the
+        # message (`energy`, `goal` from the buttons; `rejected` and `idea`,
+        # which no client sets any more, so a case can still state either as
+        # a fact rather than hoping the model infers it).
         result = graph.invoke({**state, **extra, "messages": messages_before})
 
         # Accumulate only what this turn newly produced. The transcript must

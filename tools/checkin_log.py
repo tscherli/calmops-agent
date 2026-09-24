@@ -156,8 +156,38 @@ def append_checkin_row(
         return {"status": "error", "row_id": row["row_id"], "error": str(exc)}
 
 
+def measures_awaiting_rating(path: Path | str | None = None) -> list[str]:
+    """Every measure from the last run of check-ins that has no rating yet.
+
+    One turn can log more than one: the user settles on two measures and both
+    get a row. Each of them is worth its own rating, so rating one leaves the
+    other waiting instead of closing the whole batch.
+
+    A rating row written after the run began is what takes a measure out of
+    the list. Measures logged in the user's own words carry no measure_id and
+    never appear, because a rating has nothing to attach to.
+    """
+    rows = read_checkin_rows(path)
+    last = None
+    for index, row in enumerate(rows):
+        if not is_rating_row(row):
+            last = index
+    if last is None:
+        return []
+    start = last
+    while start > 0 and not is_rating_row(rows[start - 1]):
+        start -= 1
+    rated = {row.get("measure_id") for row in rows[start:] if is_rating_row(row)}
+    pending: list[str] = []
+    for row in rows[start : last + 1]:
+        measure_id = row.get("measure_id") or ""
+        if measure_id and measure_id not in rated and measure_id not in pending:
+            pending.append(measure_id)
+    return pending
+
+
 def measure_awaiting_rating(path: Path | str | None = None) -> str:
-    """The measure from the last check-in, if nothing has rated it yet.
+    """The next measure waiting for a rating, or "" when none is.
 
     Lets the rating buttons still mean something after the window is closed
     and reopened -- "come back later and say how it went" is the whole point
@@ -168,16 +198,8 @@ def measure_awaiting_rating(path: Path | str | None = None) -> str:
     in their own words, and the schema has nothing to attach a rating to) or
     when a rating has already been written since.
     """
-    rows = read_checkin_rows(path)
-    last_checkin = None
-    for index, row in enumerate(rows):
-        if not is_rating_row(row):
-            last_checkin = index
-    if last_checkin is None:
-        return ""
-    if any(is_rating_row(row) for row in rows[last_checkin + 1 :]):
-        return ""
-    return rows[last_checkin].get("measure_id") or ""
+    pending = measures_awaiting_rating(path)
+    return pending[0] if pending else ""
 
 
 def read_checkin_rows(path: Path | str | None = None) -> list[dict[str, str]]:

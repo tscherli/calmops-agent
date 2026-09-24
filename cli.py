@@ -38,7 +38,7 @@ from agent.model import DEFAULT_MODEL
 from agent.prompts import choice_sentence
 from agent.safety import CRISIS_RESOURCES, screen_for_crisis
 from observability.tracing import RunRecorder
-from tools.checkin_log import Helpfulness, append_checkin_row, measure_awaiting_rating
+from tools.checkin_log import Helpfulness, append_checkin_row, measures_awaiting_rating
 from tools.measures import Energy, Goal
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -59,8 +59,6 @@ HELP = """Commands (everything else is sent to the agent as a message):
   /goal <calm|plan|change>           record goal, no model call
                                      either one alone is fine - the agent asks
                                      for whatever is still missing
-  /idea <text>                       discuss an idea of your own -> debate
-  /no                                "not helpful" -> counts a rejection
   /rate <helped|somewhat|not>        rate the logged measure, writes directly
   /state                             what the graph is carrying right now
   /help                              this
@@ -105,7 +103,8 @@ class Session:
         self.out = out
         self.ask = ask
         self.state: dict[str, Any] = {"messages": []}
-        self.last_measure_id: str = measure_awaiting_rating(log_path)
+        self.pending_ratings: list[str] = measures_awaiting_rating(log_path)
+        self.last_measure_id: str = self.pending_ratings[0] if self.pending_ratings else ""
 
     # -- what is currently possible -----------------------------------------
 
@@ -120,10 +119,6 @@ class Session:
             parts.append("/energy /goal")
         if self.last_measure_id:
             parts.append("/rate")
-        elif self.state.get("offered"):
-            parts.append("/no")
-        if self.state.get("offered"):
-            parts.append("/idea")
         return "  available: " + " ".join(parts) if parts else ""
 
     # -- a turn --------------------------------------------------------------
@@ -226,8 +221,10 @@ class Session:
             f" | {latency:.1f}s]"
         )
 
-        if result.get("last_measure_id"):
-            self.last_measure_id = result["last_measure_id"]
+        pending = measures_awaiting_rating(self.log_path)
+        if not pending and result.get("last_measure_id"):
+            pending = [result["last_measure_id"]]
+        self._set_pending_ratings(pending)
         self.state = next_turn_state(result)
 
     # -- the commands --------------------------------------------------------
@@ -253,10 +250,6 @@ class Session:
             self.out(self._render_state())
         elif command in {"energy", "goal"}:
             self._choice(command, argument)
-        elif command == "idea":
-            self._idea(argument)
-        elif command == "no":
-            self._reject()
         elif command == "rate":
             self._rate(argument)
         else:
@@ -271,7 +264,7 @@ class Session:
         return (
             f"  {carried}\n"
             f"  messages carried: {len(self.state.get('messages') or [])}"
-            f" | measure awaiting a rating: {self.last_measure_id or '-'}"
+            f" | measures awaiting a rating: {', '.join(self.pending_ratings) or '-'}"
         )
 
     def _choice(self, field: str, argument: str) -> None:
@@ -293,17 +286,10 @@ class Session:
             choice_sentence(self.state.get("energy"), self.state.get("goal")), choices_clicked=True
         )
 
-    def _idea(self, argument: str) -> None:
-        if not argument:
-            self.out("  /idea needs the idea itself, e.g. /idea I could drop the Friday meeting")
-            return
-        self.run_turn(argument, idea=argument)
-
-    def _reject(self) -> None:
-        if not self.state.get("offered"):
-            self.out("  nothing has been suggested yet, so there is nothing to reject")
-            return
-        self.run_turn("Not helpful.", rejected=True)
+    def _set_pending_ratings(self, measure_ids: list[str]) -> None:
+        """The measures still waiting, and the one /rate means right now."""
+        self.pending_ratings = list(measure_ids)
+        self.last_measure_id = self.pending_ratings[0] if self.pending_ratings else ""
 
     def _rate(self, argument: str) -> None:
         """Writes its row directly. No graph, no model call -- the same
@@ -325,7 +311,7 @@ class Session:
                 {"tool": "log_checkin", "exit_code": 0,
                  "detail": f"rating row {result['row_id'][:8]}"}
             ))
-            self.last_measure_id = ""
+            self._set_pending_ratings(measures_awaiting_rating(self.log_path))
         else:
             self.out(format_tool_event(
                 {"tool": "log_checkin", "exit_code": 1,

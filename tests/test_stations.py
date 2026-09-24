@@ -297,6 +297,35 @@ def test_the_web_search_is_told_what_the_list_already_holds(agent, measures_file
         assert row[2] in trailing
 
 
+def test_an_unrated_check_in_makes_the_station_ask_how_it_went(tmp_path, measures_file):
+    """The trailing note used to cover only the answer ("if the user says how
+    it went, call log_checkin"). Nothing asked the question, so after a
+    check-in the model asked about trying the measure instead."""
+    from agent.graph import build_agent
+    from tools.checkin_log import append_checkin_row
+
+    log_path = tmp_path / "log.csv"
+    append_checkin_row(
+        energy="wired", circumstances="A loud day.", measure_id="short_walk", path=log_path
+    )
+    model = StubChatModel(responses=[AIMessage(content="ok")] * 4)
+    graph = build_agent(model=model, log_path=log_path, measures_path=measures_file)
+
+    graph.invoke(
+        {
+            "messages": [user("thanks")],
+            "energy": "wired",
+            "goal": "calm down now",
+            "offered": ["short_walk"],
+            "step": "follow_up",
+        }
+    )
+
+    trailing = model.received_messages[-1][-1].content
+    assert "short_walk" in trailing
+    assert "ask them in one short sentence whether it helped" in trailing
+
+
 def test_a_button_click_is_taken_as_a_fact(agent):
     """The UI's 'not helpful' button sets a flag; no phrase matching needed."""
     result = agent.invoke(

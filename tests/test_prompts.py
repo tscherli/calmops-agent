@@ -136,6 +136,59 @@ def test_the_log_rule_no_longer_asks_for_a_yes_in_the_chat():
     assert "correct it there" in prompt
 
 
+def test_the_log_rule_names_the_question_to_ask_not_only_what_to_avoid():
+    """It used to say only "log nothing until the user has settled on a
+    measure" -- a prohibition with no instruction behind it. In the hand test
+    of 2026-09-24 the model filled the gap: after two approved add_measure
+    calls it asked "Would you like to plan when you will try one of them
+    first?", and never offered to note the situation at all."""
+    prompt = STATION_PROMPTS["follow_up"]
+
+    assert "ask in one short question whether you should note it as a check-in" in prompt
+    assert "not whether they want to try the measure" in prompt
+    assert "not when, where or in what order they will do it" in prompt
+
+
+def test_the_user_is_asked_before_a_write_and_confirms_it_on_the_card():
+    """Two steps on purpose (user's decision, 2026-09-24): a short question in
+    the chat about whether to write at all, then the card carrying the exact
+    wording. The wording is corrected on the card, never read out for a second
+    yes in the chat."""
+    assert "Ask them first, in one short question, whether you should write" in CARD_RULES
+    assert "let the card carry the wording" in CARD_RULES
+    assert "Don't read the sentence out for approval as well" in STATION_PROMPTS["follow_up"]
+
+
+def test_the_situation_may_only_hold_what_the_user_said():
+    """Hand test of 2026-09-24: the user had said "I'm feeling wired", "not
+    helpful", "add both", "yes", "both" -- nothing more. Both check-in rows
+    went into the log as "After back-to-back meetings my mind is racing and I
+    feel physically aroused", a case history nobody had described. The log is
+    read back later as the user's own account, so an invented situation is
+    worse there than an empty one."""
+    prompt = STATION_PROMPTS["follow_up"]
+
+    assert "only out of what the user actually told you" in prompt
+    assert "ask in one short question what has been going on" in prompt
+    assert "Never fill the gap with what sounds plausible" in prompt
+
+
+def test_several_settled_measures_are_all_logged():
+    """After two approved adds the model asked which of the two to log,
+    costing a turn for a choice the user had already made by saying "both"."""
+    assert "log each of them -- don't make them pick one" in STATION_PROMPTS["follow_up"]
+
+
+def test_the_question_after_a_check_in_is_how_it_went():
+    """A logged check-in has one open field, the helpfulness. So the question
+    that follows is whether it helped -- not whether they want to try it."""
+    prompt = STATION_PROMPTS["follow_up"]
+
+    assert "one short question about" in prompt
+    assert "whether it helped" in prompt
+    assert "Never ask whether they want to try it" in prompt
+
+
 def test_the_follow_up_station_keeps_the_duplicate_search_guard():
     assert "silently repeat a search" in STATION_PROMPTS["follow_up"]
 

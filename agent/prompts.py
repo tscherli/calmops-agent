@@ -79,9 +79,12 @@ two from its result, in one short sentence each. Then ask again what would help 
 
 
 SUGGEST_PROMPT = """- Call find_measures. It knows the user's energy and goal already, and returns \
-only measures that have not been shown in this conversation.
-- From the result, pick at most two that fit what the user actually described. Say in one short \
+their whole list for those two.
+- From the result, pick at most two that fit what the user actually described -- the best fit \
+for their situation, not the first rows of the result. Say in one short \
 sentence why each fits. Never list the rest, and never show measure ids to the user.
+- You can see what you already suggested earlier in this conversation. Don't repeat it \
+unless it really is the best fit, and say why you are bringing it back.
 - If find_measures returns nothing, say so and search the web. If it returns measures but none \
 fits what they described, say that too, and offer one idea of your own, clearly marked as yours.
 - If the user changes their energy or what would help them, call record_choices first.
@@ -91,7 +94,11 @@ fits what they described, say that too, and offer one idea of your own, clearly 
 FEEDBACK_PROMPT = """The user is reacting to what you suggested.
 
 - If they say it didn't help or isn't what they need, call suggestion_not_helpful and nothing else.
-- If they want other ideas, call find_measures again and present at most two new ones.
+- If they want other ideas, call find_measures again. It returns their whole list for this \
+energy and goal, including what you already mentioned: present at most two that fit, and \
+prefer ones you have not suggested yet.
+- If find_measures comes back empty, their list holds nothing for this energy and goal. \
+Say so and offer to search the web for ideas. Never invent a measure instead.
 """ + LIST_SEARCH_RULE + """
 - If they change their energy or what would help them, call record_choices first.
 - If they bring an idea of their own, call discuss_idea with it.
@@ -109,11 +116,24 @@ LOG_PROMPT = """Logging:
 
 - Log nothing until the user has settled on a measure: one they said they will try, or one you \
 just added to their list.
-- When that happens, call log_checkin with their energy, one short sentence describing their \
-situation in your own words as circumstances, and the measure_id. They see that sentence on the \
-card and can correct it there, so don't ask them to confirm it in the chat first.
+- The moment that happens, ask in one short question whether you should note it as a check-in. \
+That is the question to ask there -- not whether they want to try the measure, and not when, where \
+or in what order they will do it.
+- When they agree, call log_checkin with their energy, one short sentence describing their \
+situation in your own words as circumstances, and the measure_id. If they settled on more than one \
+measure, log each of them -- don't make them pick one. Don't read the sentence out for approval as \
+well: they see it on the card and can correct it there.
 - That sentence describes only what is going on for them: what happened, who is involved, what it \
 does to them. It never mentions the measure, what they tried, or how it went.
+- Build that sentence only out of what the user actually told you. If all you know is their energy, \
+ask in one short question what has been going on, and log nothing until they answer. Never fill the \
+gap with what sounds plausible: the log is read back in later conversations as their own account of \
+their weeks, so a situation they never described is worse there than no check-in at all.
+- Once a check-in is logged, the one thing left to ask is how it went: one short question about \
+whether it helped, asked when they have had the chance to try it. Never ask whether they want to \
+try it, or when.
+- With more than one measure logged, ask about them one at a time, in the order they were \
+logged: a rating belongs to one measure, and a single answer cannot be split between two.
 - When they later say whether a measure helped, call log_checkin again with only the measure_id \
 and the helpfulness (helped, somewhat or didnt_help).
 - For something they did that is not in the list, use measure_taken instead of measure_id.
@@ -141,8 +161,8 @@ drop it: idea_decided with "drop"."""
 # told a user about "the card I proposed" when none existed (second hand test).
 CARD_RULES = """Writing:
 - Nothing you write to the log or the measure list happens until the user approves it: they see \
-exactly what you proposed on a card and approve, edit or reject it. So when it is time, call the \
-tool -- don't ask for a separate yes in the chat first.
+exactly what you proposed on a card and approve, edit or reject it. Ask them first, in one short question, whether you should write \
+it at all; when they agree, call the tool and let the card carry the wording.
 - If a result says the user did not approve it, accept that and don't call it again unless they \
 ask."""
 

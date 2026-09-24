@@ -9,6 +9,8 @@ from tools.checkin_log import (
     append_checkin_row,
     is_rating_row,
     make_log_checkin,
+    measure_awaiting_rating,
+    measures_awaiting_rating,
     read_checkin_rows,
 )
 from tools.measures import MEASURE_COLUMNS
@@ -67,6 +69,40 @@ def test_a_rating_row_carries_only_the_verdict(log_file):
     row = read_checkin_rows(log_file)[-1]
     assert row["helpfulness"] == "helped"
     assert row["energy"] == "" and row["circumstances"] == ""
+
+
+def test_every_measure_of_one_check_in_waits_for_its_own_rating(log_file):
+    """A turn can settle on two measures and log both. Rating one used to
+    close the batch, so the other could never be rated at all -- while the
+    agent's closing message asked about each of them."""
+    append_checkin_row(energy="wired", circumstances="Bad sleep.",
+                       measure_id="first_one", path=log_file)
+    append_checkin_row(energy="wired", circumstances="Bad sleep.",
+                       measure_id="second_one", path=log_file)
+
+    assert measures_awaiting_rating(log_file) == ["first_one", "second_one"]
+
+    append_checkin_row(measure_id="second_one", helpfulness="helped", path=log_file)
+
+    assert measures_awaiting_rating(log_file) == ["first_one"]
+    assert measure_awaiting_rating(log_file) == "first_one"
+
+    append_checkin_row(measure_id="first_one", helpfulness="didnt_help", path=log_file)
+
+    assert measures_awaiting_rating(log_file) == []
+    assert measure_awaiting_rating(log_file) == ""
+
+
+def test_an_older_batch_is_not_reopened_by_a_newer_check_in(log_file):
+    """Only the latest run of check-ins is offered: a measure from last week
+    that was never rated is history, not a question waiting on screen."""
+    append_checkin_row(energy="calm", circumstances="Last week.",
+                       measure_id="old_one", path=log_file)
+    append_checkin_row(measure_id="old_one", helpfulness="helped", path=log_file)
+    append_checkin_row(energy="wired", circumstances="Today.",
+                       measure_id="new_one", path=log_file)
+
+    assert measures_awaiting_rating(log_file) == ["new_one"]
 
 
 def test_a_verdict_that_arrives_with_the_situation_writes_both_rows(log_file):

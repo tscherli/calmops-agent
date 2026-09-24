@@ -41,10 +41,21 @@ MeasureType = Literal["recover", "act"]
 Effort = Literal["minutes", "hours", "days"]
 GOALS: tuple[str, ...] = ("calm down now", "plan recovery", "change the situation")
 
-# One lookup returns a handful, not the whole list: the model picks two from
-# what it sees, and a later lookup in the same conversation returns the next
-# few rather than repeating them.
-FIND_MEASURES_BATCH = 4
+# A lookup hands over every measure for the energy and goal, so the model can
+# pick the one that fits what the user described.
+#
+# It used to return the first four rows that had not been shown yet. That made
+# recency the selection rule: rows come out of the file in the order they were
+# added, so each lookup walked further down the list, and after two turns the
+# only measures left were the newest ones -- the ones a web search had just
+# appended -- whatever the user had said. It also spent rows unseen, because
+# the prompt shows at most two of the four.
+#
+# The whole slice is affordable while the list is small: the widest one
+# (exhausted, calm down now) is about 1100 tokens. The limit below is a safety
+# valve, not a selection rule -- a list long enough to hit it needs ranking,
+# not a window.
+LOOKUP_ROW_LIMIT = 40
 
 MEASURE_ID_PATTERN = re.compile(r"^[a-z0-9_]{3,40}$")
 MAX_MEASURE_CHARS = 200
@@ -81,15 +92,17 @@ def matching_measures(
     energy: str,
     goal: str | None,
     *,
-    exclude: set[str] | None = None,
     path: Path | str | None = None,
 ) -> list[dict[str, str]]:
-    """Measures for this energy and goal that have not been shown yet.
+    """Every measure in the list for this energy and goal.
+
+    Nothing is held back for being shown already: the model has the
+    conversation in front of it and knows what it suggested, and a measure that
+    fits the situation best should not be hidden because it came up earlier.
 
     Without a goal, every goal is allowed: someone who does not know yet what
     would help still gets something from their own list, not an invented idea.
     """
-    seen = exclude or set()
     rows = [
         {
             "measure_id": row["measure_id"],
@@ -100,11 +113,10 @@ def matching_measures(
         for row in read_measures(path)
         if energy in row["fits_energy"].split(";")
         and (goal is None or fits_goal(row, goal))
-        and row["measure_id"] not in seen
     ]
     if goal is None:
         rows = _one_goal_at_a_time(rows)
-    return rows[:FIND_MEASURES_BATCH]
+    return rows[:LOOKUP_ROW_LIMIT]
 
 
 def _one_goal_at_a_time(rows: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -202,10 +214,11 @@ def make_find_measures(path: Path | str | None = None):
     ) -> Command:
         """Look up measures from the user's own list for their recorded energy and goal.
 
-        Returns up to four measures that have not been shown in this
-        conversation yet. If no goal is recorded yet, it returns measures for
-        their energy across every goal. An empty list means the list has
-        nothing left for this; say so instead of inventing one.
+        Returns every measure in their list for the energy and goal that are
+        recorded, so pick the ones that fit what they described rather than the
+        first rows of the result. If no goal is recorded yet, it returns
+        measures for their energy across every goal. An empty list means their
+        list holds nothing at all for this; say so instead of inventing one.
         """
         energy, goal = state.get("energy"), state.get("goal")
         offered = list(state.get("offered") or [])
@@ -216,8 +229,8 @@ def make_find_measures(path: Path | str | None = None):
                 "find_measures",
                 status="skipped",
             )
-        found = matching_measures(energy, goal or None, exclude=set(offered), path=path)
-        detail = f"{len(found)} measures" if found else "no measures left for this"
+        found = matching_measures(energy, goal or None, path=path)
+        detail = f"{len(found)} measures" if found else "nothing in the list for this"
         if not goal:
             detail += " (any goal)"
         return _reply(

@@ -266,7 +266,11 @@ def test_no_rating_is_offered_before_anything_has_been_logged(tk_root):
     assert not _visible(app.rating_frame)
 
 
-def test_while_suggestions_are_on_screen_the_strip_is_only_a_rejection(tk_root):
+def test_suggestions_on_screen_show_no_buttons_of_their_own(tk_root):
+    """The rejection strip and the "discuss my idea" button were removed: the
+    agent asks about both at the point where they make sense, and the user
+    answers in words. A button that is always there invites a click that the
+    conversation has not arrived at yet."""
     stub = _StubGraph(final_state={"offered": ["short_walk"], "energy": "wired",
                                    "goal": "calm down now"})
     app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
@@ -275,24 +279,16 @@ def test_while_suggestions_are_on_screen_the_strip_is_only_a_rejection(tk_root):
     app._on_send()
     settle(tk_root, app)
 
-    assert _visible(app.rating_frame)
-    assert app._rating_mode == "reject"
-    assert not app._rating_buttons["helped"].winfo_manager()
+    assert not _visible(app.rating_frame)
+    assert not hasattr(app, "idea_frame")
 
 
-def test_not_helpful_during_suggestions_sets_the_rejected_flag(tk_root):
-    """It goes through the graph, but to count_rejection, which is code --
-    so the rejection still costs no model call."""
-    stub = _StubGraph(final_state={"offered": ["short_walk"]})
-    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
+def test_a_rejection_in_words_still_costs_no_model_call(tk_root):
+    """The button is gone, not the shortcut: route_start recognises a short
+    "not helpful" itself and sends the turn to count_rejection, which is code."""
+    from agent.graph import says_not_helpful
 
-    app.entry.insert(0, "what should I do")
-    app._on_send()
-    settle(tk_root, app)
-    app._on_rating_click("didnt_help")
-    settle(tk_root, app)
-
-    assert stub.invoked_with["rejected"] is True
+    assert says_not_helpful("not helpful") is True
 
 
 def test_a_logged_check_in_turns_the_strip_into_a_rating(tk_root):
@@ -304,8 +300,35 @@ def test_a_logged_check_in_turns_the_strip_into_a_rating(tk_root):
     settle(tk_root, app)
 
     assert app.last_measure_id == "short_walk"
-    assert app._rating_mode == "rate"
-    assert app._rating_buttons["helped"].winfo_manager()
+    assert _visible(app.rating_frame)
+    assert all(app._rating_buttons[value].winfo_manager() for value in ("helped", "somewhat", "didnt_help"))
+
+
+def test_the_strip_asks_about_each_logged_measure_in_turn(tk_root, isolated_log_path):
+    """Two measures logged in one turn are two questions, not one. The strip
+    names which measure it is about, because the buttons alone cannot say."""
+    append_checkin_row(energy="wired", circumstances="Bad sleep.",
+                       measure_id="first_one", path=isolated_log_path)
+    append_checkin_row(energy="wired", circumstances="Bad sleep.",
+                       measure_id="second_one", path=isolated_log_path)
+
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=_PoisonGraph(),
+                  log_path=isolated_log_path)
+
+    assert app.pending_ratings == ["first_one", "second_one"]
+    assert "first_one" in app.rating_label.cget("text")
+
+    app._on_rating_click("helped")
+    settle(tk_root, app)
+
+    assert app.last_measure_id == "second_one"
+    assert _visible(app.rating_frame)
+    assert "second_one" in app.rating_label.cget("text")
+
+    app._on_rating_click("didnt_help")
+    settle(tk_root, app)
+
+    assert not _visible(app.rating_frame)
 
 
 def test_a_rating_writes_its_row_without_running_the_graph_at_all(tk_root, isolated_log_path):
@@ -380,7 +403,7 @@ def test_a_rating_still_works_after_the_window_is_reopened(tk_root, isolated_log
                   log_path=isolated_log_path)
 
     assert app.last_measure_id == "short_walk"
-    assert app._rating_mode == "rate"
+    assert _visible(app.rating_frame)
 
 
 def test_an_already_rated_check_in_is_not_offered_again_on_reopen(tk_root, isolated_log_path):
@@ -409,61 +432,23 @@ def test_a_measure_in_the_users_own_words_offers_no_rating(tk_root, isolated_log
 # -- discussing an idea of the user's own ------------------------------------
 
 
-def test_the_idea_button_appears_only_once_something_was_suggested(tk_root):
+def test_an_idea_typed_in_words_still_reaches_the_agent(tk_root):
+    """The button used to put the idea into the payload. Now the message is
+    sent like any other, and the model calls discuss_idea itself."""
     stub = _StubGraph(final_state={"offered": ["short_walk"]})
     app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
 
-    assert not _visible(app.idea_frame)
-
-    app.entry.insert(0, "what should I do")
+    app.entry.insert(0, "I could just drop the Friday meeting")
     app._on_send()
     settle(tk_root, app)
 
-    assert _visible(app.idea_frame)
+    assert "idea" not in stub.invoked_with
+    assert stub.invoked_with["messages"][-1].content == "I could just drop the Friday meeting"
 
 
-def test_the_next_message_travels_as_the_idea(tk_root):
-    """`debate` gets the idea as a fact in the payload rather than having to
-    spot it in the prose."""
-    stub = _StubGraph(final_state={"offered": ["short_walk"]})
-    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
-    app.entry.insert(0, "what should I do")
-    app._on_send()
-    settle(tk_root, app)
-
-    app._on_idea_click()
-    app.entry.insert(0, "I could just quit the project")
-    app._on_send()
-    settle(tk_root, app)
-
-    assert stub.invoked_with["idea"] == "I could just quit the project"
-
-
-def test_the_button_arms_one_message_not_every_later_one(tk_root):
-    """The idea itself is meant to persist -- the debate runs until the user
-    decides, and the graph carries `idea` until idea_decided clears it. What
-    must not persist is the *button*: if it stayed armed, every following
-    sentence would overwrite the idea under discussion with itself."""
-    stub = _StubGraph(final_state={"offered": ["short_walk"]})
-    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub)
-    app._on_idea_click()
-
-    app.entry.insert(0, "I could just quit the project")
-    app._on_send()
-    settle(tk_root, app)
-    app.entry.insert(0, "what do you think")
-    app._on_send()
-    settle(tk_root, app)
-
-    assert app._idea_pending is False
-    assert stub.invoked_with["idea"] == "I could just quit the project"
-
-
-def test_an_idea_in_crisis_language_never_reaches_the_agent(tk_root):
-    """The gate runs on the idea text like any other message. Routing it
-    through a different door must not open a way around it."""
+def test_a_message_in_crisis_language_never_reaches_the_agent(tk_root):
+    """The gate runs on every message; there is no longer a second door."""
     app = ChatApp(tk_root, skip_consent=True, agent_graph=_PoisonGraph())
-    app._on_idea_click()
 
     app.entry.insert(0, "I want to kill myself")
     app._on_send()   # would raise via _PoisonGraph if the gate let it through

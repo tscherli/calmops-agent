@@ -151,45 +151,31 @@ def test_an_ambiguous_prefix_is_refused():
 # -- rejection ---------------------------------------------------------------
 
 
-def test_a_rejection_sets_the_flag_the_router_reads():
-    s = session(StubGraph(final_state={"offered": ["short_walk"]}))
-    s.handle("what should I do")
-
-    s.handle("/no")
-
-    assert s.graph.payloads[-1]["rejected"] is True
-
-
-def test_a_rejection_before_anything_was_offered_is_refused():
+def test_the_rejection_command_is_gone_and_the_words_still_work():
+    """/no and /idea were removed with the buttons they mirrored: the agent
+    asks at the point where each makes sense, and the user answers in words.
+    An unknown command must not be sent to the agent as a message either."""
     graph = PoisonGraph()
     s = session(graph)
 
     s.handle("/no")
 
     assert graph.attempts == 0
-    assert "nothing has been suggested" in output(s)
+    assert "unknown command" in output(s).lower()
 
 
 # -- an idea of the user's own -----------------------------------------------
 
 
-def test_an_idea_travels_in_the_payload():
+def test_an_idea_typed_in_words_reaches_the_graph_as_a_message():
+    """It used to travel in the payload from /idea. Now the model hears it and
+    calls discuss_idea itself."""
     s = session()
 
-    s.handle("/idea I could drop the Friday meeting")
+    s.handle("I could drop the Friday meeting")
 
-    assert s.graph.payloads[-1]["idea"] == "I could drop the Friday meeting"
-
-
-def test_an_idea_in_crisis_language_never_reaches_the_graph():
-    """The gate runs on every path into the graph, including this one."""
-    graph = PoisonGraph()
-    s = session(graph)
-
-    s.handle("/idea I want to kill myself")
-
-    assert graph.attempts == 0
-    assert "Telefonseelsorge" in output(s)
+    assert "idea" not in s.graph.payloads[-1]
+    assert s.graph.payloads[-1]["messages"][-1].content == "I could drop the Friday meeting"
 
 
 def test_a_typed_message_is_screened_too():
@@ -323,15 +309,12 @@ def test_choices_are_offered_until_both_are_in():
     assert "/energy" in s.hints()
 
 
-def test_a_rejection_is_offered_only_once_something_was_suggested():
+def test_the_hints_no_longer_offer_the_removed_commands():
     s = session(StubGraph(final_state={"offered": ["short_walk"]}))
-
-    assert "/no" not in s.hints()
-
     s.handle("what should I do")
 
-    assert "/no" in s.hints()
-    assert "/idea" in s.hints()
+    assert "/no" not in s.hints()
+    assert "/idea" not in s.hints()
 
 
 def test_the_state_command_reports_what_is_carried():

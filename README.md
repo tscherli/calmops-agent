@@ -24,7 +24,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 
 | Component | Role |
 |---|---|
-| `app.py` | Tkinter chat window: consent screen, three groups of buttons, free-text chat. |
+| `app.py` | Tkinter chat window: consent screen, energy/goal and rating buttons, the approval card, free-text chat. |
 | `cli.py` | Terminal client for the same graph, with the buttons as typed commands. |
 | `agent/safety.py` | Deterministic crisis-keyword gate. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
 | `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
@@ -44,7 +44,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 START
  |
  route_start(state)                    plain function, no model call
- |  |- rejected flag (button)       -> count_rejection
+ |  |- rejected flag (eval harness) -> count_rejection
  |  |- short "not helpful" text     -> count_rejection
  |  |- short verdict, measure waiting-> follow_up
  |  |- idea set                     -> debate
@@ -113,9 +113,11 @@ Logs written under the previous schema are archived as `data/mood_log.pre-statio
 
 **Stations, not one big prompt.** The previous design had one ~20-rule system prompt governing everything, and the model followed it inconsistently — one measured decision came out right 0 times out of 10 with the long prompt, and 5 out of 7 with a single-purpose one. Each station now gets a short prompt and only its own tools, so a rule becomes a missing tool rather than a sentence that can be overlooked. **Real cost, accepted knowingly:** more nodes, more edges, and a larger test suite.
 
-**Code filters the measure list; the model only chooses.** `find_measures` takes no model-chosen arguments — it reads energy and goal from the state, excludes what was already shown, and returns up to four rows. A suggestion therefore cannot be a measure you do not have.
+**Code filters the measure list; the model only chooses.** `find_measures` takes no model-chosen arguments — it reads energy and goal from the state and returns every measure that fits them. A suggestion therefore cannot be a measure you do not have. It used to return the first four rows that had not been shown yet, which quietly made "added most recently" the selection rule: rows leave the file in the order they were added, so each lookup walked further down it until only the newest entries were left. The model now sees the candidates and picks the one that fits.
 
-**Buttons are facts, not messages to interpret.** Energy, goal, "not helpful" and the ratings write straight into the graph's state. A click is unambiguous self-report, so it is better data than a sentence the model has to read — and it costs nothing. A rating does not even run the graph: it appends its row and reports it.
+**Buttons are facts, not messages to interpret.** Energy, goal and the ratings write straight into the graph's state. A click is unambiguous self-report, so it is better data than a sentence the model has to read — and it costs nothing. A rating does not even run the graph: it appends its row and reports it.
+
+**A button only where the answer is a fixed value.** Rejecting a suggestion and bringing up an idea of your own had buttons too, and both were removed: they sat on screen whenever something had been suggested, inviting a click the conversation had not arrived at. The agent asks about each at the point where it makes sense and you answer in words. Nothing was lost by it — a short "not helpful" is still recognised before any model call, and an idea you type still reaches the debate station, because the model calls `discuss_idea` itself.
 
 **Receipts come from the node, not the tool.** Every tool call produces one machine-set receipt derived from what the tool actually returned. The model can neither emit one nor suppress one, which is what makes a claim in its prose checkable. The app prints them *before* the reply, so the evidence never trails the claim.
 
@@ -167,8 +169,6 @@ Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real
 ```
 /energy <exhausted|calm|wired>     record energy
 /goal <calm|plan|change>           record goal
-/idea <text>                       discuss an idea of your own
-/no                                "not helpful"
 /rate <helped|somewhat|not>        rate the logged measure
 /state                             what the graph is carrying
 ```
@@ -196,7 +196,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 **Rejection is counted in code.** A short "not helpful" is recognised before any model call. The first rejection buys a web search with real links; the second steps back and re-asks about your goal.
 
-**Nothing is logged before you confirm it.** The agent proposes one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you agree. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
+**Nothing is logged before you confirm it.** The agent asks first, in the chat, whether to note a check-in at all, and if you have not said what is going on it asks that too rather than inventing a plausible sentence. Only then does it propose one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you approve that card, where you can also correct the wording. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
 
 **Honesty is structural.** Every tool call prints a receipt written by code, before the agent speaks. If a write failed, it says so. If a lookup came back empty, it says there is nothing yet rather than implying a pattern.
 
@@ -283,7 +283,7 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 - Energy, goal and helpfulness are entirely self-report, not sensed.
 - Check-ins fire at configured times or a random interval, not adaptively.
 - Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
-- A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons.
+- A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons. Measures picked from the list are rated one at a time: when a turn logs two, the strip asks about the first, then the second.
 - The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
 - The LLM judge in the eval suite is not calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be.
