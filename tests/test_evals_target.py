@@ -14,7 +14,8 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from evals.target import run_case, serialize_messages
+from evals.target import build_eval_graph, run_case, serialize_messages
+from tests.conftest import StubChatModel
 from tools.measures import MEASURE_COLUMNS
 
 
@@ -27,7 +28,7 @@ class _StubGraph:
         self.final_state = final_state or {}
         self.calls: list[dict] = []
 
-    def invoke(self, payload):
+    def invoke(self, payload, config=None):   # a compiled graph takes a config
         self.calls.append(payload)
         messages = list(payload["messages"])
         if self.tool_call:
@@ -244,3 +245,138 @@ def test_serialize_messages_role_vocabulary():
     assert [m["role"] for m in result] == ["human", "ai", "tool", "ai"]
     assert result[1]["tool_calls"] == [{"name": "log_checkin", "args": {}}]
     assert result[2]["name"] == "log_checkin"
+
+# -- writes, which a case could not reach at all before -----------------------
+
+
+class _PausingGraph:
+    """A graph that asks for approval once, the way a real write does."""
+
+    def __init__(self):
+        self.resumed_with = None
+        self.paused = False
+
+    def invoke(self, payload, config=None):
+        if not self.paused:
+            self.paused = True
+            return {
+                "__interrupt__": [
+                    type("I", (), {"value": {"action_requests": [{
+                        "id": "call-1",
+                        "tool": "log_checkin",
+                        "description": 'Log: "a loud day" (measure: short_walk)',
+                        "args": {"circumstances": "a loud day", "measure_id": "short_walk"},
+                    }]}})()
+                ]
+            }
+        self.resumed_with = payload
+        return {"messages": [AIMessage(content="done")], "tool_events": []}
+
+
+def test_an_approval_card_is_answered_so_the_turn_can_finish():
+    """Without a checkpointer the graph refuses every write, so no case could
+    reach add_measure or log_checkin: the suite graded an agent that was not
+    allowed to do half its job. The harness now answers the card itself."""
+    graph = _PausingGraph()
+
+    result = run_case({"turns": ["I'll try the walk"]}, agent_graph=graph)
+
+    assert graph.resumed_with.resume["decisions"] == [{"id": "call-1", "type": "approve"}]
+    assert result["approvals"] == [{
+        "tool": "log_checkin",
+        "description": 'Log: "a loud day" (measure: short_walk)',
+        "decision": "approve",
+    }]
+
+
+def test_a_case_can_reject_the_card():
+    """"Reject" is a behaviour worth grading: the agent must accept it and not
+    retry. A case says so per turn, and the default stays approve."""
+    graph = _PausingGraph()
+
+    run_case({"turns": [{"text": "I'll try the walk", "approval": "reject"}]}, agent_graph=graph)
+
+    assert graph.resumed_with.resume["decisions"] == [{"id": "call-1", "type": "reject"}]
+
+
+def test_an_edit_lands_in_the_argument_the_tool_says_is_editable():
+    """The case gives the wording; which field it belongs to is the tool's
+    business (EDITABLE_ARG), so a case never has to know the schema."""
+    graph = _PausingGraph()
+
+    run_case(
+        {"turns": [{"text": "I'll try the walk", "approval": "edit",
+                    "edit_text": "back-to-back calls all morning"}]},
+        agent_graph=graph,
+    )
+
+    decision = graph.resumed_with.resume["decisions"][0]
+    assert decision["type"] == "edit"
+    assert decision["args"]["circumstances"] == "back-to-back calls all morning"
+    assert decision["args"]["measure_id"] == "short_walk"
+
+
+def test_an_edit_with_nothing_typed_is_an_approval():
+    """What the clients do when the edit box is left alone."""
+    graph = _PausingGraph()
+
+    run_case({"turns": [{"text": "ok", "approval": "edit"}]}, agent_graph=graph)
+
+    assert graph.resumed_with.resume["decisions"][0]["type"] == "approve"
+
+
+def test_the_decision_keys_never_reach_the_graph_as_state():
+    """`approval` and `edit_text` steer the harness; they are not agent state,
+    and a stray key in the payload would be a field the app never sets."""
+    graph = _StubGraph()
+
+    run_case({"turns": [{"text": "hello", "approval": "reject", "edit_text": "x"}]},
+             agent_graph=graph)
+
+    assert "approval" not in graph.calls[0]
+    assert "edit_text" not in graph.calls[0]
+
+def test_the_harness_builds_a_graph_that_can_pause(tmp_path):
+    """Directly: no checkpointer, no pause, and tools_node refuses every write
+    for lack of a decision. Every other test here uses a stand-in graph, so
+    this is the one that notices if the real one loses its checkpointer."""
+    graph = build_eval_graph(
+        tmp_path / "log.csv", tmp_path / "measures.csv",
+        model=StubChatModel(responses=[AIMessage(content="ok")]),
+    )
+
+    assert graph.checkpointer is not None
+
+
+def test_a_case_reaches_a_real_write_through_the_real_graph(tmp_path):
+    """End to end on the graph the app runs: the model asks to log, the graph
+    pauses, the harness approves, and the row exists. Before the checkpointer
+    this case ended with "Not done: the user did not approve this"."""
+    log_path = tmp_path / "log.csv"
+    measures_path = tmp_path / "measures.csv"
+    with measures_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerow(("short_walk", "recover", "Walk for five minutes.",
+                         "wired", "minutes", "user"))
+    model = StubChatModel(responses=[
+        AIMessage(content="", tool_calls=[{
+            "name": "log_checkin",
+            "args": {"energy": "wired", "circumstances": "a loud day", "measure_id": "short_walk"},
+            "id": "call-1",
+        }]),
+        AIMessage(content="Noted."),
+    ])
+    graph = build_eval_graph(log_path, measures_path, model=model)
+
+    result = run_case(
+        {"turns": [{"text": "I'll try the walk", "energy": "wired",
+                    "goal": "calm down now", "step": "follow_up",
+                    "offered": ["short_walk"]}]},
+        agent_graph=graph,
+    )
+
+    rows = list(csv.DictReader(log_path.open(encoding="utf-8", newline="")))
+    assert [r["measure_id"] for r in rows] == ["short_walk"]
+    assert rows[0]["circumstances"] == "a loud day"
+    assert [a["decision"] for a in result["approvals"]] == ["approve"]

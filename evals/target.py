@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 
 from agent.common import message_text
-from agent.graph import build_agent, next_turn_state
+from agent.graph import EDITABLE_ARG, build_agent, next_turn_state
 from agent.safety import screen_for_crisis
 from tools.measures import MEASURES_PATH
 
@@ -100,6 +103,40 @@ def _unwritable_log_path() -> Path:
     return blocker / "checkin_log.csv"
 
 
+def build_eval_graph(log_path: Path, measures_path: Path, *, model: Any = None):
+    """The agent as the harness runs it.
+
+    The checkpointer is the whole point: without one the graph cannot pause on
+    an approval card, and `tools_node` refuses every write for lack of a
+    decision. The suite would then grade an agent forbidden to add a measure
+    or log a check-in -- half of what it exists to do.
+    """
+    return build_agent(
+        model=model,
+        log_path=log_path,
+        measures_path=measures_path,
+        checkpointer=InMemorySaver(),
+    )
+
+
+def _decision_for(request: dict, approval: str, edit_text: str) -> dict:
+    """What the user does with one approval card, as the case asked.
+
+    An edit needs the argument the card lets you change, and which one that is
+    belongs to the tool (`EDITABLE_ARG`), not to the case: a case says the new
+    wording, never which field it lands in. An edit with nothing to put there
+    is an approval of what was proposed, because that is what the clients do
+    when the edit box is left alone.
+    """
+    if approval == "reject":
+        return {"type": "reject"}
+    if approval == "edit":
+        editable = EDITABLE_ARG.get(request.get("tool") or request.get("name") or "")
+        if editable and edit_text:
+            return {"type": "edit", "args": {**(request.get("args") or {}), editable: edit_text}}
+    return {"type": "approve"}
+
+
 def run_case(
     inputs: dict,
     *,
@@ -114,9 +151,16 @@ def run_case(
     exactly like app.py's _on_send -- if it fires, stops immediately and
     returns crisis_intercepted=True with zero agent messages for that turn,
     never invoking the LLM. Otherwise runs the real agent, accumulating the
-    full message list across turns (the agent has no checkpointer -- see
-    agent/graph.py -- so this accumulation has to happen here, not
-    implicitly via agent memory).
+    full message list across turns (a fresh thread per turn, as the clients
+    do, so this accumulation has to happen here rather than implicitly via
+    agent memory).
+
+    Writes pause on an approval card, and a case says what the user does with
+    it: `"approval": "approve"` (the default), `"reject"`, or `"edit"` with
+    `"edit_text"`. Without a checkpointer the graph cannot pause at all and
+    refuses every write, so a case could never reach `add_measure` or
+    `log_checkin` -- the eval suite graded an agent that was not allowed to
+    do half of its job.
     """
     if agent_graph is not None:
         graph = agent_graph
@@ -129,7 +173,7 @@ def run_case(
             )
         if measures_path is None:
             measures_path = _isolated_measures_path()
-        graph = build_agent(log_path=log_path, measures_path=measures_path)
+        graph = build_eval_graph(log_path, measures_path)
 
     # Conversation state must be carried here exactly as app.py does, and
     # through the same function: passing only `messages` would reset the
@@ -143,10 +187,17 @@ def run_case(
     # the case's turns. The evaluators grade against these rather than
     # against what the reply claims -- see evals/evaluators.py.
     tool_events: list[dict] = []
+    # What the user was asked to approve, and what they did about it. The
+    # evaluators grade this rather than the reply: "it said it saved the
+    # measure" and "the user was shown what would be written" are different
+    # claims, and only the second one is a guarantee.
+    approvals: list[dict] = []
 
     for turn in inputs["turns"]:
         turn_text, extra = (turn, {}) if isinstance(turn, str) else (turn["text"], dict(turn))
         extra.pop("text", None)
+        approval = str(extra.pop("approval", "approve"))
+        edit_text = extra.pop("edit_text", "")
 
         crisis = screen_for_crisis(turn_text)
         if crisis.triggered:
@@ -161,7 +212,24 @@ def run_case(
         # message (`energy`, `goal` from the buttons; `rejected` and `idea`,
         # which no client sets any more, so a case can still state either as
         # a fact rather than hoping the model infers it).
-        result = graph.invoke({**state, **extra, "messages": messages_before})
+        # One thread per turn, exactly as the clients do: the checkpointer
+        # only ever has to hold the turn that is paused.
+        config = {"configurable": {"thread_id": uuid.uuid4().hex}}
+        result = graph.invoke({**state, **extra, "messages": messages_before}, config)
+        while result.get("__interrupt__"):
+            requests = result["__interrupt__"][0].value["action_requests"]
+            decisions = []
+            for request in requests:
+                decision = _decision_for(request, approval, edit_text)
+                approvals.append(
+                    {
+                        "tool": request.get("tool") or request.get("name") or "",
+                        "description": request.get("description", ""),
+                        "decision": decision["type"],
+                    }
+                )
+                decisions.append({"id": request["id"], **decision})
+            result = graph.invoke(Command(resume={"decisions": decisions}), config)
 
         # Accumulate only what this turn newly produced. The transcript must
         # keep growing across a context reset, or everything said before the
@@ -178,4 +246,5 @@ def run_case(
         "messages": serialize_messages(transcript),
         "crisis_intercepted": False,
         "tool_events": tool_events,
+        "approvals": approvals,
     }
