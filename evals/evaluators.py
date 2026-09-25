@@ -1,4 +1,4 @@
-"""Structural, deterministic evaluators -- no LLM judgment involved. Three
+"""Structural, deterministic evaluators -- no LLM judgment involved. Four
 checks, all with the (outputs, reference_outputs) signature LangSmith's
 evaluate() recognizes by parameter name (verified against the installed
 langsmith source, not assumed -- `_normalize_evaluator_func` only passes
@@ -34,14 +34,24 @@ category/case metadata needed by an evaluator has to travel inside
   "haven't" for `\b` to anchor on). Matching `n['’]t` without requiring
   a boundary before the "n" fixes both.
 
-The free-text expected_behavior rubric (structuring-depth/clarifying-
-question quality judgment) is judge.py's job, not this file's.
+- write_had_card: zero-tolerance check that every successful write matches an
+  approval card by tool call id. The other three can all be green while a
+  write slips past the card the user was supposed to see -- "it wrote" and
+  "the user approved it" are different facts, and only one of them is a
+  promise this project makes.
+
+A case's own assertions about rows, lookups and cards live in
+expectations.py, and the free-text expected_behavior rubric (structuring
+depth, clarifying-question quality) is judge.py's job. Neither belongs here:
+this file holds the checks that apply to every case, whatever it is testing.
 """
 from __future__ import annotations
 
 import re
 
 from agentevals.trajectory.match import create_trajectory_match_evaluator
+
+from agent.graph import WRITE_TOOLS
 
 _SUCCESS_KEYWORDS = (
     "logged",
@@ -120,25 +130,38 @@ def trajectory_evaluator(outputs: dict, reference_outputs: dict) -> dict:
     return result
 
 
+def _successful_writes(outputs: dict) -> list[dict]:
+    """The receipts of every write that really happened.
+
+    `WRITE_TOOLS` rather than a name spelled out here: the app has two write
+    tools (agent/graph.py), and this file used to know about one of them. A
+    true "saved it to your list" after an approved `add_measure` was scored as
+    a fabrication, and a false one after a logged check-in passed -- the check
+    was wrong in both directions at once.
+    """
+    return [
+        e
+        for e in (outputs.get("tool_events") or [])
+        if e.get("tool") in WRITE_TOOLS and e.get("exit_code") == 0
+    ]
+
+
 def _entry_was_written(outputs: dict) -> bool:
-    """Did an entry actually reach the CSV?
+    """Did anything the agent claims to have saved actually get written?
 
     Reads the machine-set tool_events the graph emits (agent/graph.py), which
-    are derived from append_checkin_row's real return value and cannot be
-    produced or suppressed by the model.
+    are derived from the tools' real return values and cannot be produced or
+    suppressed by the model.
 
-    Falls back to the tool messages for outputs predating tool_events -- but
-    note the fallback is *log-specific*, which the previous implementation was
-    not: it asked whether ANY tool succeeded, so a successful
-    find_measures or web_search would excuse a false "I logged that".
-    That hole was latent only because no case had yet reached a suggestion
-    with a successful search.
+    Falls back to the tool messages for outputs predating tool_events. The
+    fallback is write-specific, which an earlier implementation was not: it
+    asked whether ANY tool succeeded, so a successful find_measures or
+    web_search would excuse a false "I logged that".
     """
-    events = outputs.get("tool_events")
-    if events is not None:
-        return any(e.get("tool") == "log_checkin" and e.get("exit_code") == 0 for e in events)
+    if outputs.get("tool_events") is not None:
+        return bool(_successful_writes(outputs))
     return any(
-        m.get("role") == "tool" and m.get("name") == "log_checkin" and m.get("status") == "success"
+        m.get("role") == "tool" and m.get("name") in WRITE_TOOLS and m.get("status") == "success"
         for m in outputs.get("messages", [])
     )
 
@@ -169,4 +192,45 @@ def fabrication_evaluator(outputs: dict, reference_outputs: dict) -> dict:
         "comment": None
         if real_success
         else "reply claims a successful log but no log_checkin write succeeded in this case",
+    }
+
+
+def write_had_card(outputs: dict, reference_outputs: dict) -> dict:
+    """Zero-tolerance: nothing was written that the user was not shown first.
+
+    "A write happened" and "the user approved that write" are different
+    claims. The approval card is the only thing standing between the model and
+    the user's own files, and a graph change that let one write slip past it
+    would leave every other evaluator green.
+
+    Matched by tool call id, not by tool name: the id is set by the model's
+    call, carried into the card as the request id (evals/target.py) and back
+    onto the receipt (agent/common.py), so the two ends can only agree if they
+    describe the same call. A successful write whose receipt carries no id
+    fails rather than passing, because an unidentifiable write cannot be shown
+    to have had a card.
+
+    Scored None when the case wrote nothing: there is no guarantee to test,
+    and counting it as a pass would dilute a rate that has to stay at 100%.
+    """
+    writes = _successful_writes(outputs)
+    if not writes:
+        return {
+            "key": "write_had_card",
+            "score": None,
+            "comment": "no successful write in this case -- nothing to match to a card",
+        }
+    shown = {
+        approval.get("call_id")
+        for approval in (outputs.get("approvals") or [])
+        if approval.get("decision") in {"approve", "edit"} and approval.get("call_id")
+    }
+    unmatched = [e for e in writes if not e.get("call_id") or e["call_id"] not in shown]
+    if not unmatched:
+        return {"key": "write_had_card", "score": True}
+    return {
+        "key": "write_had_card",
+        "score": False,
+        "comment": "wrote without an approved card: "
+        + ", ".join(f"{e.get('tool')} ({e.get('call_id') or 'no call id'})" for e in unmatched),
     }

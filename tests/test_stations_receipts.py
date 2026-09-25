@@ -291,3 +291,60 @@ def test_a_call_with_neither_value_records_nothing_and_says_so(measures_file, lo
 
     assert not result.get("energy") and not result.get("goal")
     assert "Nothing recorded" in str(result["messages"][-2].content)
+
+
+# -- a receipt names the call it answers -------------------------------------
+
+
+def test_each_receipt_carries_the_id_of_its_own_call(measures_file, log_file):
+    """Without the id, a receipt says only that some tool of that name ran.
+
+    Two writes in one turn are two separate things the user may be asked to
+    approve, and matching them to their cards by name alone would let a second
+    write ride in on the first one's approval.
+    """
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "record_choices", "args": {"energy": "calm", "goal": "plan recovery"}, "id": "a"},
+            {"name": "discuss_idea", "args": {"idea": "pause"}, "id": "b"},
+        ],
+    )
+    graph = agent_that_calls(measures_file, log_file, both)
+    result = run(graph, {"messages": [HumanMessage(content="hi")], **BASE})
+
+    assert {e["tool"]: e["call_id"] for e in receipts(result)} == {
+        "record_choices": "a",
+        "discuss_idea": "b",
+    }
+
+
+def test_a_written_row_names_the_call_that_wrote_it(measures_file, log_file):
+    """This is the id the eval suite matches against the approval card."""
+    graph = agent_that_calls(
+        measures_file,
+        log_file,
+        call("log_checkin", {"measure_id": "breathe", "helpfulness": "helped"}, call_id="write_1"),
+    )
+    result = run(graph, {"messages": [HumanMessage(content="hi")], **BASE})
+
+    assert receipts(result, "log_checkin")[0]["call_id"] == "write_1"
+
+
+def test_an_unknown_tool_receipt_still_names_the_call(measures_file, log_file):
+    graph = agent_that_calls(measures_file, log_file, call("no_such_tool", {}, call_id="ghost"))
+    result = run(graph, {"messages": [HumanMessage(content="hi")], **BASE})
+
+    assert receipts(result, "no_such_tool")[0]["call_id"] == "ghost"
+
+
+def test_a_plain_returning_tool_receipt_also_names_its_call(measures_file, log_file):
+    """The node writes receipts on two branches -- Command-returning tools and
+    plain-returning ones -- and a test that only covers one leaves the other
+    free to drop the id."""
+    graph = agent_that_calls(
+        measures_file, log_file, call("search_measures", {"words": "walk"}, call_id="s1")
+    )
+    result = run(graph, {"messages": [HumanMessage(content="hi")], **BASE})
+
+    assert receipts(result, "search_measures")[0]["call_id"] == "s1"

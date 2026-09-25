@@ -26,7 +26,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from evals.create_dataset import load_cases
-from evals.evaluators import crisis_gate_evaluator, fabrication_evaluator, trajectory_evaluator
+from evals.evaluators import (
+    crisis_gate_evaluator,
+    fabrication_evaluator,
+    trajectory_evaluator,
+    write_had_card,
+)
+from evals.expectations import expectation_evaluator
 from evals.judge import judge_evaluator
 from evals.run_experiment import _build_report, _write_report
 from evals.target import EVAL_RUNS_LOG, run_case
@@ -35,6 +41,8 @@ EVALUATORS = (
     crisis_gate_evaluator,
     trajectory_evaluator,
     fabrication_evaluator,
+    write_had_card,
+    expectation_evaluator,
     judge_evaluator,
 )
 
@@ -49,7 +57,21 @@ def case_inputs(case: dict) -> dict:
         inputs["simulate_write_failure"] = True
     if case.get("seed_entries"):
         inputs["seed_entries"] = case["seed_entries"]
+    if case.get("seed_measures"):
+        inputs["seed_measures"] = case["seed_measures"]
     return inputs
+
+
+def _feedback_items(result: dict) -> list[dict]:
+    """One evaluator, one or many feedback entries.
+
+    `expectation_evaluator` answers with `{"results": [...]}` -- the shape
+    LangSmith accepts from an evaluator that scores several keys at once --
+    and this runner has to unwrap it the same way, or an expect block would
+    land in the report as a single score named "results".
+    """
+    inner = result.get("results") if isinstance(result, dict) else None
+    return list(inner) if isinstance(inner, list) else [result]
 
 
 def evaluate_case(case: dict) -> dict:
@@ -62,6 +84,8 @@ def evaluate_case(case: dict) -> dict:
         "expected_behavior": case["expected_behavior"],
         "category": case["category"],
     }
+    if case.get("expect"):
+        reference["expect"] = case["expect"]
     try:
         # Cost and latency per case, into the suite's own file: the app's
         # observability/runs.jsonl is its real per-turn record, and a suite run
@@ -79,8 +103,8 @@ def evaluate_case(case: dict) -> dict:
     scores: dict = {}
     for evaluator in EVALUATORS:
         try:
-            result = evaluator(outputs=outputs, reference_outputs=reference)
-            scores[result["key"]] = result.get("score")
+            for item in _feedback_items(evaluator(outputs=outputs, reference_outputs=reference)):
+                scores[item["key"]] = item.get("score")
         except Exception as exc:  # a broken evaluator must not lose the run
             scores[getattr(evaluator, "__name__", "evaluator")] = None
             print(f"  ! {case['id']}: {getattr(evaluator, '__name__', '?')} raised {exc}")

@@ -844,7 +844,7 @@ def build_agent(
                     outputs.append(
                         ToolMessage(content=REJECTED_TEXT, name=name, tool_call_id=call_id, status="error")
                     )
-                    events.append(tool_event(name, "rejected", "not approved"))
+                    events.append(tool_event(name, "rejected", "not approved", call_id=call_id))
                     continue
                 if decision.get("type") == "edit" and isinstance(decision.get("args"), dict):
                     call = {**call, "args": decision["args"]}
@@ -855,7 +855,7 @@ def build_agent(
                         content=f"Unknown tool: {name}", name=name, tool_call_id=call_id, status="error"
                     )
                 )
-                events.append(tool_event(name or "unknown", "error", "unknown tool"))
+                events.append(tool_event(name or "unknown", "error", "unknown tool", call_id=call_id))
                 continue
             try:
                 result = _invoke_tool(target, call, state)
@@ -865,7 +865,7 @@ def build_agent(
                         content=f"Tool error: {exc}", name=name, tool_call_id=call_id, status="error"
                     )
                 )
-                events.append(tool_event(name, "error", str(exc)))
+                events.append(tool_event(name, "error", str(exc), call_id=call_id))
                 continue
 
             if isinstance(result, Command):
@@ -881,6 +881,7 @@ def build_agent(
                         name,
                         receipt.get("status", "ok"),
                         receipt.get("detail", result_detail(messages[0].content if messages else "")),
+                        call_id=call_id,
                     )
                 )
             else:
@@ -895,7 +896,7 @@ def build_agent(
                 outputs.append(
                     ToolMessage(content=content, name=name, tool_call_id=call_id, status="success")
                 )
-                events.append(tool_event(name, "ok", result_detail(value)))
+                events.append(tool_event(name, "ok", result_detail(value), call_id=call_id))
 
         update["messages"] = outputs
         update["tool_events"] = events

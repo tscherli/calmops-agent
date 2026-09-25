@@ -112,3 +112,66 @@ def test_run_local_writes_a_report_and_preserves_dataset_order(monkeypatch, tmp_
     result = run_local(cases, workers=2)
 
     assert [r["case_id"] for r in result["rows"]] == [c["id"] for c in cases]
+
+
+def test_seeded_measures_reach_the_target_the_same_way_in_both_runners():
+    """A planted measure row only does anything if it travels in `inputs`:
+    evaluate() hands the target function inputs and nothing else."""
+    from evals.create_dataset import case_to_example
+
+    case = {**_CASE, "seed_measures": [{"measure_id": "planted", "measure": "Do the thing."}]}
+
+    assert case_inputs(case) == case_to_example(case)["inputs"]
+    assert case_inputs(case)["seed_measures"] == case["seed_measures"]
+
+
+def test_an_evaluator_that_scores_several_keys_lands_as_several_scores(monkeypatch):
+    """The expect block is one evaluator answering for every field the case
+    asserted. Unwrapped wrongly it arrives in the report as a single score
+    called "results", and every assertion inside it stops being visible."""
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (
+            lambda outputs, reference_outputs: {
+                "results": [
+                    {"key": "expect_log_rows", "score": True},
+                    {"key": "expect_reached_write", "score": False},
+                ]
+            },
+        ),
+    )
+
+    row = evaluate_case(_CASE)
+
+    assert row["scores"] == {"expect_log_rows": True, "expect_reached_write": False}
+
+
+def test_a_single_key_evaluator_still_lands_as_one_score(monkeypatch):
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (lambda outputs, reference_outputs: {"key": "no_fabrication", "score": True},),
+    )
+
+    assert evaluate_case(_CASE)["scores"] == {"no_fabrication": True}
+
+
+def test_the_case_expect_block_reaches_the_evaluators(monkeypatch):
+    """The assertions travel with the reference, not the inputs: the target
+    must not be able to read what it is about to be graded on."""
+    seen = {}
+
+    def spy(outputs, reference_outputs):
+        seen.update(reference_outputs)
+        return {"key": "alpha", "score": True}
+
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(run_local_module, "EVALUATORS", (spy,))
+
+    evaluate_case({**_CASE, "expect": {"reached_write": True}})
+
+    assert seen["expect"] == {"reached_write": True}
+    assert "expect" not in case_inputs({**_CASE, "expect": {"reached_write": True}})

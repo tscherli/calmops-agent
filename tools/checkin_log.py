@@ -167,7 +167,16 @@ def measures_awaiting_rating(path: Path | str | None = None) -> list[str]:
     the list. Measures logged in the user's own words carry no measure_id and
     never appear, because a rating has nothing to attach to.
     """
-    rows = read_checkin_rows(path)
+    return measures_awaiting_rating_in(read_checkin_rows(path))
+
+
+def measures_awaiting_rating_in(rows: list[dict[str, str]]) -> list[str]:
+    """The same answer, from rows already in hand.
+
+    The eval harness hands its expectations a case's rows rather than the
+    temporary file they came from, so an assertion about what is still waiting
+    has no path to open.
+    """
     last = None
     for index, row in enumerate(rows):
         if not is_rating_row(row):

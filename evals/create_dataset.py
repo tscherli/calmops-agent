@@ -25,6 +25,27 @@ from langsmith import Client
 
 DATASET_NAME = "job-load-agent-evals"
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
+CASE_IDS_PATH = Path(__file__).resolve().parent / "case_ids.txt"
+
+
+def load_case_ids(path: Path = CASE_IDS_PATH) -> tuple[set[str], set[str]]:
+    """The registered ids, and the ones that were retired.
+
+    Case ids key every run-to-run comparison, so an id has to mean the same
+    case forever. The registry is what makes reusing one a visible edit rather
+    than a silent change of meaning -- see the file's own header.
+    """
+    live: set[str] = set()
+    retired: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("retired "):
+            retired.add(line[len("retired ") :].strip())
+        else:
+            live.add(line)
+    return live, retired
 
 
 def load_cases(path: Path = DATASET_PATH) -> list[dict]:
@@ -49,13 +70,21 @@ def case_to_example(case: dict) -> dict:
         case_inputs["simulate_write_failure"] = True
     if case.get("seed_entries"):
         case_inputs["seed_entries"] = case["seed_entries"]
+    if case.get("seed_measures"):
+        case_inputs["seed_measures"] = case["seed_measures"]
+    case_outputs: dict = {
+        "messages": case.get("reference_trajectory", []),
+        "expected_behavior": case["expected_behavior"],
+        "category": case["category"],
+    }
+    # The case's own assertions travel with the reference, not the inputs:
+    # evaluators are handed `reference_outputs`, and the target must not be
+    # able to read what it is about to be graded on.
+    if case.get("expect"):
+        case_outputs["expect"] = case["expect"]
     return {
         "inputs": case_inputs,
-        "outputs": {
-            "messages": case.get("reference_trajectory", []),
-            "expected_behavior": case["expected_behavior"],
-            "category": case["category"],
-        },
+        "outputs": case_outputs,
         "metadata": {
             "case_id": case["id"],
             "difficulty": case["difficulty"],

@@ -201,6 +201,17 @@ def test_a_rejection_leaves_a_receipt_and_tells_the_model():
     assert refusal.status == "error"
 
 
+def test_a_refused_write_still_names_the_call_it_refused():
+    """A refusal is a record of a call, so it names one like every other
+    receipt. Without the id, "this card was rejected" and "that write went
+    ahead" cannot be put side by side at all."""
+    counting = Counting()
+    graph = graph_with(counting.tools, calls(("log_checkin", {"circumstances": "x"}, "w1")))
+    result = turn(graph, reject)
+    event = [e for e in result["tool_events"] if e["tool"] == "log_checkin"][0]
+    assert event["call_id"] == "w1"
+
+
 # -- edit ----------------------------------------------------------------------
 
 

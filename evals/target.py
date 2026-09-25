@@ -309,6 +309,10 @@ def run_case(
         "approvals": approvals,
         "log_rows": read_checkin_rows(log_path),
         "measures_added": sorted(measure_ids(measures_path) - measures_before),
+        # The case's own list, seeds included. An expectation about the lookup
+        # has to recompute the full slice from the list the case actually ran
+        # against, and no other output says which list that was.
+        "measures_path": str(measures_path),
         # Its own key, so "never got there" stays separate from "wrote the
         # wrong thing": about half the model-driven cases assert a write, and
         # one prompt quirk would otherwise fail them all as wrong content.

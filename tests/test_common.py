@@ -120,3 +120,15 @@ def test_the_next_turn_carries_no_unanswered_call():
     )
     assert carried["messages"] == carried["messages"][:1]
     assert not any(getattr(m, "tool_calls", None) for m in carried["messages"])
+
+
+def test_a_receipt_carries_the_call_it_answers():
+    """The id is what ties a write to the card the user was shown; a receipt
+    without one can only say that some tool of that name ran."""
+    assert tool_event("log_checkin", "ok", call_id="c1")["call_id"] == "c1"
+
+
+def test_a_receipt_with_no_call_behind_it_says_so():
+    """The provider-run web search is not a call this code made, so there is
+    no id to report and inventing one would be a small lie."""
+    assert tool_event("web_search", "ok", verified=False)["call_id"] == ""

@@ -28,7 +28,14 @@ def merge_tool_events(
     return (left or []) + (right or [])
 
 
-def tool_event(tool: str, status: str, detail: str = "", *, verified: bool = True) -> dict[str, Any]:
+def tool_event(
+    tool: str,
+    status: str,
+    detail: str = "",
+    *,
+    verified: bool = True,
+    call_id: str = "",
+) -> dict[str, Any]:
     """One machine-set record of what a tool actually did.
 
     Set by the graph from the tool's real return value, never by the model.
@@ -41,6 +48,12 @@ def tool_event(tool: str, status: str, detail: str = "", *, verified: bool = Tru
     `verified=False` marks an event we did NOT observe in our own code --
     currently only OpenAI's server-side web_search, whose execution is
     reported by the provider rather than witnessed here.
+
+    `call_id` is the id of the tool call this receipt answers, empty when the
+    event has no call behind it (the provider-run web search). It is what lets
+    a write be matched to the approval card the user was shown: "a write
+    happened" and "that write was approved" are different claims, and only
+    an id ties one to the other.
     """
     return {
         "tool": tool,
@@ -48,6 +61,7 @@ def tool_event(tool: str, status: str, detail: str = "", *, verified: bool = Tru
         "exit_code": {"ok": 0, "error": 1}.get(status),
         "detail": detail,
         "verified": verified,
+        "call_id": call_id,
     }
 
 

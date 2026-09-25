@@ -20,6 +20,8 @@ venv/
 
 # Eval outputs
 evals/results/*.md
+# Per-case cost and latency, written by every suite run
+evals/results/*.jsonl
 
 # Local-only dev notes (never intended for the repo)
 notes/
