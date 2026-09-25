@@ -9,6 +9,7 @@ real smoke test) slip past testing originally.
 """
 from langsmith.evaluation.evaluator import EvaluationResult
 
+from evals.judge import OFFERED_KEY, SITUATION_KEY
 from evals.run_experiment import _build_report, _extract_row, case_passed, expect_verdict
 
 
@@ -89,7 +90,7 @@ def test_the_overall_line_ignores_the_judge_and_the_strict_trajectory():
     changed at all.
     """
     rows = [
-        _row(no_fabrication=True, crisis_gate_correctness=True, expected_behavior_match=False),
+        _row(no_fabrication=True, crisis_gate_correctness=True, **{OFFERED_KEY: False}),
         _row("case_02", no_fabrication=True, crisis_gate_correctness=True, trajectory_match=False),
     ]
 
@@ -97,12 +98,12 @@ def test_the_overall_line_ignores_the_judge_and_the_strict_trajectory():
 
 
 def test_a_deterministic_failure_still_fails_the_case():
-    assert not case_passed({"no_fabrication": False, "expected_behavior_match": True})
+    assert not case_passed({"no_fabrication": False, OFFERED_KEY: True})
 
 
 def test_a_case_graded_only_by_the_judge_does_not_count_as_a_pass():
     """Nothing deterministic was checked, so there is nothing to have passed."""
-    assert not case_passed({"expected_behavior_match": True, "trajectory_match": None})
+    assert not case_passed({OFFERED_KEY: True, "trajectory_match": None})
 
 
 def test_the_expect_verdict_needs_every_assertion_the_case_made():
@@ -125,7 +126,7 @@ def test_the_report_states_the_expect_rate_and_the_advisory_rates():
             crisis_gate_correctness=True,
             write_had_card=True,
             expect_log_rows=True,
-            expected_behavior_match=False,
+            **{OFFERED_KEY: False},
         ),
         _row(
             "case_02",
@@ -133,7 +134,7 @@ def test_the_report_states_the_expect_rate_and_the_advisory_rates():
             crisis_gate_correctness=True,
             write_had_card=None,
             expect_log_rows=False,
-            expected_behavior_match=True,
+            **{OFFERED_KEY: True},
         ),
     ]
 
@@ -142,6 +143,18 @@ def test_the_report_states_the_expect_rate_and_the_advisory_rates():
     assert "Expect blocks: 1/2 cases (50%)" in report
     assert "`write_had_card`: 1/1 (100%) -- **PASS**" in report
     assert "## Advisory (not counted in Overall)" in report
-    assert "`expected_behavior_match`: 1/2 (50%)" in report
+    assert f"`{OFFERED_KEY}`: 1/2 (50%)" in report
     # The advisory failure above must not have cost case_01 the headline.
     assert "Pass rate: 1/2" in report
+
+
+def test_every_judge_question_stays_out_of_the_headline():
+    """A judge number may not be quoted until it clears the calibration gate
+    (evals/calibrate_judge.py). A new question added to the judge and left out
+    of ADVISORY_KEYS would start deciding the headline on its first run,
+    uncalibrated, and nothing else would notice."""
+    from evals.judge import JUDGE_KEYS
+    from evals.run_experiment import ADVISORY_KEYS
+
+    assert set(JUDGE_KEYS) <= set(ADVISORY_KEYS)
+    assert {OFFERED_KEY, SITUATION_KEY} == set(JUDGE_KEYS)

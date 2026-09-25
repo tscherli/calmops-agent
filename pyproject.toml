@@ -1,3 +1,15 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    # langsmith 0.10.17 builds its (ast.Str, ast.Constant) tuple behind a
+    # `hasattr(ast, "Str")` check -- already correct for Python 3.14, where
+    # ast.Str is gone. On 3.13 the check itself is what touches ast.Str and
+    # emits the warning, so there is nothing to fix here or upstream, and
+    # upgrading would not remove it while the guard exists.
+    #
+    # Ignored by exact message rather than by category: one warning that is
+    # always present is how a new one goes unnoticed, and the point of
+    # silencing this is to keep the rest of the output meaningful.
+    "ignore:ast.Str is deprecated:DeprecationWarning",
+]

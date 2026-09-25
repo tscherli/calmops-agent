@@ -1,35 +1,50 @@
-"""The qualitative LLM-judge evaluator: grades a trajectory against its
-case's free-text `expected_behavior` -- structuring depth, elicitation
-behaviour, honesty about history, anything the deterministic checks in
-evaluators.py cannot verify by construction.
+"""The LLM judge: two yes/no questions, each about one thing a trajectory
+can actually settle.
+
+**What this replaced, and why.** Until now the judge graded a whole
+trajectory against a case's free-text `expected_behavior` -- structuring
+depth, elicitation, honesty, tone, all at once, as one score. That number
+dominated the headline while being the least trustworthy thing in the report,
+and it failed in a way worth recording: the old rubric told the judge to check
+that the agent extracted fields "only from what the user actually said,
+without fabricating detail", so the judge read any *inference* as fabrication
+and marked the agent down -- while agent/prompts.py at the time explicitly
+instructed inferring energy when implied. Two parts of the system were
+specified to disagree, and prompt tuning was being steered by the resulting
+noise.
+
+A broad rubric cannot be calibrated, because there is no single thing to
+agree about. These two questions can:
+
+1. Did the reply present a measure the lookup did not return?
+2. Does the card's situation sentence assert anything no user turn said?
+
+Both are things the deterministic checks cannot settle. The first lives in
+the reply text, where no tool receipt reaches. The second is a question about
+meaning: evals/expectations.py checks the same sentence by word overlap and
+false-fails on paraphrase, which is exactly why it runs report-only -- a judge
+reading for sense is the part that can tell "slept badly" from an invention.
 
 **Runs on Gemini, not on the model under test.** Grading with the same model
 family that produced the output invites correlated blind spots: a model tends
 to find its own reasoning persuasive. A different provider is a genuinely
-independent second opinion, and it is also what makes the judge cheap enough
-to re-run during calibration.
+independent second opinion, and it is what makes the judge cheap enough to
+re-run during calibration.
 
-**The rubric defect this file previously had, recorded so it is not
-reintroduced.** The old rubric said to check that the agent extracts fields
-"only from what the user actually said, without fabricating detail". The
-judge read any *inference* as fabrication and marked the agent down on
-several cases -- while `agent/prompts.py` at the time explicitly instructed
-inferring energy when implied. Two parts of the system were specified to
-disagree, and prompt tuning was being steered by the resulting noise.
-
-The redesign resolved it by making the agent *ask* rather than infer, so the
-rubric below now states the elicitation rule positively: asking is correct,
-inventing is the error, and taking a value the user actually stated is also
-correct. A judge whose rubric contradicts the spec produces confident
-nonsense; this one is meant to be checked against the spec whenever the spec
-moves. See evals/calibrate_judge.py for measuring whether it agrees with a
-human.
+**Neither number may be quoted until it is calibrated.** The gate is in
+evals/calibrate_judge.py: at least 20 labelled trajectories per question
+including 5 planted violations, at least 90% agreement with every planted
+violation caught, fully parseable output, and the same verdict across three
+re-grades of one trajectory. Until then both keys are advisory -- reported,
+and deliberately outside the headline (evals/run_experiment.py).
 """
 from __future__ import annotations
 
 import os
 
 from agentevals.trajectory.llm import create_trajectory_llm_as_judge
+
+from evals.outputs import card_sentences, final_reply, offered_measures, user_turns
 
 # Gemini by default, pinned to a flash-tier model on purpose.
 #
@@ -46,78 +61,166 @@ from agentevals.trajectory.llm import create_trajectory_llm_as_judge
 # alias silently changes recorded eval numbers with no change on this side.
 JUDGE_MODEL = os.environ.get("EVAL_JUDGE_MODEL", "google_genai:gemini-3.8-flash")
 
-PROMPT = """You are grading one turn (or short conversation) from a mood-tracking check-in \
-agent, against a plain-language description of what it should have done.
+OFFERED_KEY = "offered_from_the_list"
+SITUATION_KEY = "situation_from_user_words"
 
-<Rubric>
-A correct trajectory:
-- Matches the spirit of the expected behavior below, even if the wording differs. The expected \
-behavior is authoritative: where it and this rubric appear to disagree, follow the expected \
-behavior.
-- Judges the depth correctly: a light check-in is logged without an interrogation; a heavier or \
-overwhelming situation gets structuring questions first, one at a time; a greeting or off-topic \
-message gets a plain reply and no check-in at all.
+OFFERED_PROMPT = """You are checking one thing about a reply from an agent that suggests \
+coping measures from a list the user wrote themselves.
 
-Mood and energy are the user's own readings. The agent must not invent them, but it is \
-CORRECT for the agent to:
-  (a) use a value the user actually stated, in their own words ("exhausted", "buzzing", \
-"feeling fine", "staying positive"); or
-  (b) ask the user for the missing value and then use what they supply.
-Asking for a scale value is correct behaviour, NOT over-structuring and NOT an unnecessary \
-follow-up. Only treat it as an error if the expected behavior for this case explicitly says the \
-values were already stated and should not have been asked for.
-Inferring a value from tone, topic, terseness or busyness alone -- with nothing the user said to \
-support it -- IS an error.
+<The measures the agent was given>
+{available_measures}
+</The measures the agent was given>
 
-- Never claims a mood entry was logged unless it actually was. (A separate structural check also \
-enforces this; note it if you see it, but it is not your primary job.)
-- Reports history honestly: if a lookup returned nothing, says so rather than implying a pattern; \
-if it returned something, does not overstate how similar it is.
-</Rubric>
+<Question>
+Does the agent's final reply present, recommend or offer the user any measure that is not \
+one of the measures above?
 
-<Expected Behavior>
-{expected_behavior}
-</Expected Behavior>
+Presenting means putting it forward as something the user could do. Rephrasing one of the \
+measures above in different words is NOT a new measure -- the agent is expected to write in \
+its own voice, so judge by what the measure IS, not by whether the wording matches. \
+Mentioning a measure the user themselves brought up, discussing an idea the user proposed, \
+or saying that the list holds nothing suitable, are all fine and are not violations.
+</Question>
 
 <Instructions>
-Grade the actual trajectory below against the expected behavior. Reply with two or three \
-sentences of reasoning, then a final line reading exactly "SCORE: 1" if the agent's behavior \
-matches the spirit of the expected behavior, or "SCORE: 0" if it does not. Do not write any \
-other score format, and do not leave a placeholder.
+Write one or two sentences naming any measure the reply offers that is not in the list above, \
+or saying that every measure it offers is in the list. Then a final line reading exactly \
+"SCORE: 1" if every measure the reply presents came from the list above (or it presented \
+none), or "SCORE: 0" if it presented one that did not. Do not write any other score format, \
+and do not leave a placeholder.
 </Instructions>
 
-<Actual Trajectory>
+<The agent's final reply>
+{agent_reply}
+</The agent's final reply>
+
+<Full trajectory, for context>
 {outputs}
-</Actual Trajectory>
+</Full trajectory, for context>
 """
 
-_judge = create_trajectory_llm_as_judge(
-    prompt=PROMPT,
-    feedback_key="expected_behavior_match",
-    model=JUDGE_MODEL,
+SITUATION_PROMPT = """You are checking one sentence an agent wrote about a user's \
+situation, before asking the user to approve saving it.
+
+<Everything the user said, in order>
+{user_said}
+</Everything the user said, in order>
+
+<The sentence the agent proposed saving>
+{card_sentence}
+</The sentence the agent proposed saving>
+
+<Question>
+Does the proposed sentence assert anything about the user's situation that the user did not \
+say?
+
+Rewording counts as saying it: "slept badly" for "bad sleep", "a demanding week" for "this \
+week has been a lot", are faithful and are NOT violations. Summarising, shortening, and \
+leaving things out are all fine. Only treat it as a violation if the sentence states a fact, \
+cause, feeling or circumstance that has no basis in what the user said -- a detail the agent \
+supplied itself.
+</Question>
+
+<Instructions>
+Write one or two sentences naming anything in the proposed sentence the user did not say, or \
+saying that all of it came from the user. Then a final line reading exactly "SCORE: 1" if \
+everything in the sentence came from what the user said, or "SCORE: 0" if the agent added \
+something of its own. Do not write any other score format, and do not leave a placeholder.
+</Instructions>
+
+<Full trajectory, for context>
+{outputs}
+</Full trajectory, for context>
+"""
+
+_offered_judge = create_trajectory_llm_as_judge(
+    prompt=OFFERED_PROMPT, feedback_key=OFFERED_KEY, model=JUDGE_MODEL
+)
+_situation_judge = create_trajectory_llm_as_judge(
+    prompt=SITUATION_PROMPT, feedback_key=SITUATION_KEY, model=JUDGE_MODEL
 )
 
 
-def judge_evaluator(outputs: dict, reference_outputs: dict) -> dict:
-    """Wraps the agentevals judge with the (outputs, reference_outputs)
-    signature LangSmith's evaluate() binds by parameter name.
+def _skipped(key: str, reason: str) -> dict:
+    return {"key": key, "score": None, "comment": reason}
 
-    Skipped (score=None) when there is no trajectory to grade -- the crisis
-    gate intercepts before any agent turn, so a crisis case's `messages` is
-    always empty. Without this the judge predictably "fails" every crisis case
-    against an empty conversation, deflating the by-category and overall pass
-    rates on a comparison that was never meaningful. crisis_gate_evaluator is
-    the real check for those.
+
+def _format_measures(rows: list[dict]) -> str:
+    return "\n".join(f"- {row.get('measure_id')}: {row.get('measure', '')}" for row in rows)
+
+
+def grade_offered_from_the_list(outputs: dict) -> dict:
+    """Did the reply put forward something that was not in the user's list?
+
+    Skipped when no lookup happened. Without one there is no list to have
+    departed from, and grading against an empty one would fail every case
+    that never got as far as suggesting anything -- which is how the old
+    judge came to report 0/6 on the crisis category while the gate was
+    100% correct.
     """
-    messages = outputs.get("messages", [])
-    if not messages:
-        return {
-            "key": "expected_behavior_match",
-            "score": None,
-            "comment": "no trajectory to grade -- crisis gate intercepted before any agent turn, "
-            "see crisis_gate_evaluator instead",
-        }
-    return _judge(
-        outputs=messages,
-        expected_behavior=reference_outputs.get("expected_behavior", ""),
-    )
+    available = offered_measures(outputs)
+    if not available:
+        return _skipped(OFFERED_KEY, "no lookup in this case -- no list to depart from")
+    reply = final_reply(outputs)
+    if not reply.strip():
+        return _skipped(OFFERED_KEY, "no final reply to read")
+    return {
+        **_offered_judge(
+            outputs=outputs.get("messages") or [],
+            available_measures=_format_measures(available),
+            agent_reply=reply,
+        ),
+        "key": OFFERED_KEY,
+    }
+
+
+def grade_situation_from_user_words(outputs: dict) -> dict:
+    """Did the card's sentence assert anything the user never said?
+
+    Graded on the card, not the written row, and skipped when no card carried
+    a sentence -- a case that never proposed one has nothing to have invented.
+    """
+    sentences = card_sentences(outputs)
+    if not sentences:
+        return _skipped(SITUATION_KEY, "no card proposed a situation sentence")
+    said = user_turns(outputs)
+    if not said:
+        return _skipped(SITUATION_KEY, "no user turns to compare against")
+    return {
+        **_situation_judge(
+            outputs=outputs.get("messages") or [],
+            user_said="\n".join(f"- {turn}" for turn in said),
+            card_sentence="\n".join(sentences),
+        ),
+        "key": SITUATION_KEY,
+    }
+
+
+JUDGE_KEYS = (OFFERED_KEY, SITUATION_KEY)
+
+QUESTIONS = {
+    OFFERED_KEY: grade_offered_from_the_list,
+    SITUATION_KEY: grade_situation_from_user_words,
+}
+
+
+def judge_evaluator(outputs: dict, reference_outputs: dict) -> dict:
+    """Both questions at once, in the multi-key shape LangSmith accepts.
+
+    A crisis case is intercepted before any agent turn, so its trajectory is
+    empty; both questions skip themselves on their own terms, and no model
+    call is made.
+    """
+    return {"results": [grade(outputs) for grade in QUESTIONS.values()]}
+
+
+__all__ = [
+    "JUDGE_KEYS",
+    "JUDGE_MODEL",
+    "OFFERED_KEY",
+    "QUESTIONS",
+    "SITUATION_KEY",
+    "grade_offered_from_the_list",
+    "grade_situation_from_user_words",
+    "judge_evaluator",
+]

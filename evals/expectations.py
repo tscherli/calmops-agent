@@ -18,9 +18,9 @@ fixes, and collapsing them hides which one happened.
 """
 from __future__ import annotations
 
-import json
 import re
 
+from evals.outputs import card_sentences, lookup_results, user_turns
 from tools.checkin_log import measures_awaiting_rating_in
 from tools.measures import matching_measures
 
@@ -73,31 +73,7 @@ def _tools_used(outputs: dict) -> list[str]:
 
 
 def _user_text(outputs: dict) -> str:
-    return " ".join(
-        (m.get("content") or "").lower()
-        for m in (outputs.get("messages") or [])
-        if m.get("role") == "human"
-    )
-
-
-def _lookup_results(outputs: dict) -> list[list[dict]]:
-    """The rows every find_measures call returned, as the tool returned them.
-
-    The tool answers with a JSON list (tools/measures.py builds it through
-    as_tool_content), so this reads the real result rather than the model's
-    account of it. A result that does not parse is reported as an empty
-    lookup, which fails a full-slice assertion -- correctly: whatever the
-    model was handed, it was not the list.
-    """
-    results = []
-    for message in outputs.get("messages") or []:
-        if message.get("role") == "tool" and message.get("name") == "find_measures":
-            try:
-                parsed = json.loads(message.get("content") or "")
-            except (TypeError, ValueError):
-                parsed = []
-            results.append(parsed if isinstance(parsed, list) else [])
-    return results
+    return " ".join(turn.lower() for turn in user_turns(outputs))
 
 
 def _row_matches(expected: dict, actual: dict) -> bool:
@@ -151,7 +127,7 @@ def _check_lookup_rows(outputs: dict, spec: dict) -> dict:
         return _feedback(
             "lookup_rows", False, "the case must state the energy its slice was looked up for"
         )
-    results = _lookup_results(outputs)
+    results = lookup_results(outputs)
     if not results:
         return _feedback("lookup_rows", None, "the case never looked a measure up")
     # Never fall back to the shipped list. matching_measures(path=None) reads
@@ -217,8 +193,7 @@ def _check_circumstances(outputs: dict, mode: str) -> dict:
         return _feedback("circumstances", False, f"unknown circumstances mode: {mode!r}")
     said = _user_text(outputs)
     invented: list[str] = []
-    for approval in outputs.get("approvals") or []:
-        sentence = str((approval.get("args") or {}).get("circumstances") or "")
+    for sentence in card_sentences(outputs):
         for word in _WORD.findall(sentence.lower()):
             if len(word) >= 4 and word not in _FUNCTION_WORDS and word not in said:
                 invented.append(word)

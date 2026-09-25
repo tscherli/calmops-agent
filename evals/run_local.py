@@ -19,7 +19,9 @@ service being up, or when whoever is running it has no LangSmith account
 from __future__ import annotations
 
 import argparse
+import json
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -36,6 +38,12 @@ from evals.expectations import expectation_evaluator
 from evals.judge import judge_evaluator
 from evals.run_experiment import _build_report, _write_report
 from evals.target import EVAL_RUNS_LOG, run_case
+
+# Where a run leaves its trajectories. Calibrating the judge means reading
+# real ones by hand, and a run that has already been paid for should not
+# have to be paid for again to get them back. Gitignored with the rest of
+# evals/results.
+TRAJECTORIES_LOG = EVAL_RUNS_LOG.parent / "trajectories.jsonl"
 
 EVALUATORS = (
     crisis_gate_evaluator,
@@ -114,10 +122,40 @@ def evaluate_case(case: dict) -> dict:
         "difficulty": case["difficulty"],
         "category": case["category"],
         "scores": scores,
+        # Carried on the row so the runner can save it. The report never
+        # reads it; evals/calibrate_judge.py does.
+        "outputs": outputs,
     }
 
 
-def run_local(cases: list[dict] | None = None, workers: int = DEFAULT_WORKERS) -> dict:
+def _save_trajectories(rows: list[dict], path: Path) -> int:
+    """Write one line per case: the case id and everything the run produced.
+
+    Replaces the file rather than appending. Two runs interleaved in one file
+    would be labelled as though they came from one agent, and the judge's
+    agreement number would be measured against a mixture.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            if not row.get("outputs"):
+                continue
+            record = {
+                "case_id": row["case_id"],
+                "category": row["category"],
+                "outputs": row["outputs"],
+            }
+            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            written += 1
+    return written
+
+
+def run_local(
+    cases: list[dict] | None = None,
+    workers: int = DEFAULT_WORKERS,
+    trajectories_log: Path | None = None,
+) -> dict:
     cases = cases if cases is not None else load_cases()
     print(f"Running {len(cases)} cases locally ({workers} workers, no LangSmith)...")
 
@@ -133,6 +171,9 @@ def run_local(cases: list[dict] | None = None, workers: int = DEFAULT_WORKERS) -
     report_path = _write_report(report)
     print(report)
     print(f"\nFull report written to {report_path}")
+    if trajectories_log is not None:
+        written = _save_trajectories(rows, trajectories_log)
+        print(f"{written} trajectories saved to {trajectories_log}")
     return {"rows": rows, "report_path": report_path}
 
 
@@ -150,4 +191,4 @@ if __name__ == "__main__":
         if missing:
             parser.error(f"unknown case ids: {sorted(missing)}")
 
-    run_local(selected, workers=args.workers)
+    run_local(selected, workers=args.workers, trajectories_log=TRAJECTORIES_LOG)

@@ -175,3 +175,67 @@ def test_the_case_expect_block_reaches_the_evaluators(monkeypatch):
 
     assert seen["expect"] == {"reached_write": True}
     assert "expect" not in case_inputs({**_CASE, "expect": {"reached_write": True}})
+
+
+# -- what a paid run leaves behind -------------------------------------------
+
+
+def test_a_run_saves_its_trajectories_for_labelling(tmp_path):
+    """Calibrating the judge means reading real trajectories by hand, and a
+    run that has already been paid for should not have to be paid for again
+    to get them back."""
+    import json
+
+    path = tmp_path / "trajectories.jsonl"
+    rows = [
+        {"case_id": "case_01", "category": "light_checkin", "scores": {}, "outputs": {"messages": [1]}},
+        {"case_id": "case_02", "category": "crisis", "scores": {}, "outputs": {"messages": [2]}},
+    ]
+
+    assert run_local_module._save_trajectories(rows, path) == 2
+
+    saved = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [r["case_id"] for r in saved] == ["case_01", "case_02"]
+    assert saved[0]["outputs"] == {"messages": [1]}
+
+
+def test_a_case_that_never_ran_saves_no_trajectory(tmp_path):
+    """A target error leaves the row with no outputs at all, and a blank line
+    in the labelling source would be labelled as a real one."""
+    path = tmp_path / "trajectories.jsonl"
+    rows = [{"case_id": "case_01", "category": "crisis", "scores": {"target_error": False}}]
+
+    assert run_local_module._save_trajectories(rows, path) == 0
+    assert path.read_text(encoding="utf-8") == ""
+
+
+def test_a_second_run_replaces_the_first_rather_than_joining_it(tmp_path):
+    """Two runs in one file would be labelled as though they came from one
+    agent, and the judge's agreement would be measured against a mixture."""
+    path = tmp_path / "trajectories.jsonl"
+    run_local_module._save_trajectories(
+        [{"case_id": "old", "category": "c", "outputs": {"messages": []}}], path
+    )
+    run_local_module._save_trajectories(
+        [{"case_id": "new", "category": "c", "outputs": {"messages": []}}], path
+    )
+
+    assert path.read_text(encoding="utf-8").count("case_id") == 1
+    assert "old" not in path.read_text(encoding="utf-8")
+
+
+def test_the_report_never_reads_the_trajectory_off_the_row(monkeypatch, tmp_path):
+    """The outputs ride on the row so the runner can save them. If the report
+    started reading them the two would be coupled, and a row without outputs
+    (a target error) would break the report."""
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},),
+    )
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
+
+    result = run_local_module.run_local([_CASE], workers=1)
+
+    assert result["rows"][0]["outputs"]["crisis_intercepted"] is False

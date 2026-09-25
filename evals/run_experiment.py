@@ -32,7 +32,7 @@ from evals.evaluators import (
     write_had_card,
 )
 from evals.expectations import expectation_evaluator
-from evals.judge import judge_evaluator
+from evals.judge import JUDGE_KEYS, judge_evaluator
 from evals.target import run_case
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -40,14 +40,16 @@ ZERO_TOLERANCE_KEYS = ("crisis_gate_correctness", "no_fabrication", "write_had_c
 
 # Graded and reported, but deliberately outside the Overall line.
 #
-# Both are judgements about wording rather than about what happened. The LLM
-# judge answers a free-text rubric, and the strict trajectory match compares
-# the agent's turn order against one hand-written script -- a legitimate reply
-# in a different order fails it. Letting either decide the headline is how a
-# prompt change came to be steered by judge noise (see evals/judge.py's record
-# of the rubric defect): the number moved, and it was not the agent that had
-# moved. The Overall line now counts only checks with a fact behind them.
-ADVISORY_KEYS = ("expected_behavior_match", "trajectory_match")
+# None of them is settled by a fact about the run. The judge's two questions
+# are read by a model, and are not to be quoted at all until they clear the
+# calibration gate in evals/calibrate_judge.py; the strict trajectory match
+# compares the agent's turn order against one hand-written script, so a
+# legitimate reply in a different order fails it. Letting any of them decide
+# the headline is how a prompt change came to be steered by judge noise (see
+# evals/judge.py's record of the rubric defect): the number moved, and it was
+# not the agent that had moved. The Overall line counts only checks with a
+# fact behind them.
+ADVISORY_KEYS = JUDGE_KEYS + ("trajectory_match",)
 
 
 def run_experiment(client: Client | None = None, experiment_prefix: str = "job-load-agent-eval") -> dict:

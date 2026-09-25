@@ -34,15 +34,11 @@ load_dotenv()
 from langsmith import Client
 
 from evals.create_dataset import DATASET_NAME
+from evals.judge import JUDGE_KEYS
 from evals.run_experiment import RESULTS_DIR, ZERO_TOLERANCE_KEYS
 
 # Feedback keys that are graded verdicts, in the order they read best.
-SCORE_ORDER = (
-    "crisis_gate_correctness",
-    "no_fabrication",
-    "trajectory_match",
-    "expected_behavior_match",
-)
+SCORE_ORDER = ZERO_TOLERANCE_KEYS + ("trajectory_match",) + JUDGE_KEYS
 
 
 def list_experiments(client: Client, dataset_name: str = DATASET_NAME, limit: int = 20) -> list:
@@ -96,6 +92,42 @@ def fetch_rows(client: Client, experiment_name: str, dataset_name: str = DATASET
         )
     rows.sort(key=lambda r: r["case_id"])
     return rows
+
+
+def fetch_trajectories(
+    client: Client, experiment_name: str, dataset_name: str = DATASET_NAME
+) -> list[dict]:
+    """One record per case: what run_case actually returned, as saved by the
+    hosted run.
+
+    The same shape evals/run_local.py writes to trajectories.jsonl, so the
+    judge calibration reads a hosted experiment and a local run through one
+    code path. A run whose outputs never made it back (a crash mid-collection,
+    which this project has seen) is skipped rather than exported as an empty
+    trajectory -- there is nothing in it to label.
+
+    `run_id` comes along so a human label can be written back onto the run it
+    belongs to.
+    """
+    runs = [r for r in client.list_runs(project_name=experiment_name, is_root=True)]
+    example_meta = _case_id_by_example(client, dataset_name)
+
+    records = []
+    for run in runs:
+        outputs = getattr(run, "outputs", None)
+        if not outputs:
+            continue
+        meta = example_meta.get(str(run.reference_example_id), {})
+        records.append(
+            {
+                "case_id": meta.get("case_id", "?"),
+                "category": meta.get("category", "?"),
+                "run_id": str(run.id),
+                "outputs": dict(outputs),
+            }
+        )
+    records.sort(key=lambda r: r["case_id"])
+    return records
 
 
 def _status(score) -> str:
