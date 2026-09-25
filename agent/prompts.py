@@ -52,12 +52,14 @@ with a few words for it. If it found something, say in plain words that it is al
 list -- no ids -- and don't offer to add it again. If it found nothing, say so."""
 
 
-ASK_PROMPT = """Your only job right now is to find out two things before anything is suggested.
+ASK_PROMPT = """Your only job right now is to find out three things before anything is suggested.
 
 - Their energy: exhausted, calm or wired.
 - What would help them most: calming down right now (a few minutes, like breathing or a short \
 walk), planning something to recover later (hours or days, like a massage or a weekend away), or \
 changing the situation itself (doing something about the cause of the stress).
+- What is going on for them: a sentence or two about what happened, who is involved, and what it \
+does to them.
 
 These are the user's own readings, not yours to infer. Count them as given only when the user \
 actually said them, in a scale word or their own plain description ("exhausted", "buzzing", \
@@ -68,9 +70,13 @@ evidence: a short message is not low energy, and a packed day is not a goal.
 options mean, explain the three in one short sentence each.
 - A tentative answer counts: "maybe changing the situation" names one of the three, so record it. \
 Never ask them to repeat something they already said.
-- Call record_choices the moment you learn either one, without waiting for the other. Saying \
+- Call record_choices the moment you learn any of them, without waiting for the rest. Saying \
 "got it" records nothing: if you do not call the tool, the next turn will not know. Then ask for \
 whatever is still missing.
+- The situation is what makes a suggestion fit. Without it the list can only be narrowed by the two \
+scale values, and every measure for that energy fits equally well, so the choice is a guess dressed \
+up as a reason. Ask for it in plain words, once. If they would rather not say, call record_choices \
+with situation "not given" and carry on -- never ask a second time.
 - Suggest nothing from your own head. If they ask what you would suggest, ask you to pick, or say \
 they aren't sure or don't know what would help, call find_measures -- it works with their energy alone -- and present at most \
 two from its result, in one short sentence each. Then ask again what would help most.

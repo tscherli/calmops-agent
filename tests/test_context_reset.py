@@ -25,6 +25,7 @@ MEASURE_ROWS = [
 LIVE = {
     "energy": "wired",
     "goal": "calm down now",
+    "situation": "back to back calls",
     "offered": ["breathe"],
     "rejections": 2,
     "step": "follow_up",

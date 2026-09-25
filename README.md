@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.10.0`) — not evaluated yet.** The station architecture is built and covered by 534 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> 🚧 **Pre-release (`v0.11.0`) — not evaluated yet.** The station architecture is built and covered by 549 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -80,12 +80,12 @@ START
 
 1. You say something, or click energy / goal. The crisis gate screens it first.
 2. `route_start` picks a station from the state — no model call.
-3. `ask` collects energy and goal, recording each as soon as you give it.
+3. `ask` collects three things before anything is suggested: energy, what would help most, and what is going on, recording each as soon as you give it. "Rather not say" is an answer to the last one, not a gap. Until all three are in, the graph keeps routing back here — a suggestion chosen against the energy word alone can only be justified by the energy word.
 4. `suggest` is **forced** to call `find_measures` before it may present anything, so a suggestion can never bypass your own list. Code filters by energy and goal; the model only picks two from what it got back.
 5. `follow_up` handles feedback, more ideas, adding a measure, and logging.
 6. Reject a suggestion and the first rejection buys a web search; the second steps back and asks about your goal again — both counted in code, not by the model.
 7. Bring an idea of your own and `debate` argues it honestly: one real strength, one honest limit. It reads `OPENAI_DEBATE_MODEL`, its own setting, so this one station can be raised above the others without raising the bill everywhere; today both are `gpt-5-mini`.
-8. Once you settle on a measure, the agent asks whether to "check in the current situation into the circumstances log". If you have not said what is going on, it asks that too rather than writing a plausible-sounding sentence of its own. Then an approval card shows exactly what would be written, and only after you approve it is the row written.
+8. Once you settle on a measure, the agent asks whether to "check in the current situation into the circumstances log". The situation is already known by then, because `ask` collected it before suggesting. Then an approval card shows exactly what would be written, and only after you approve it is the row written.
 9. Later you say whether it helped, and that is a second row — typed or clicked. A typed verdict reaches the same card; a click writes the row straight away, because the click is the approval. If one turn logged two measures, each gets its own question, in the order they were logged.
 
 ### Scheduled check-in & weekly digest
@@ -119,7 +119,7 @@ Choosing happens in two stages, and only the second one belongs to the model.
 
 **The model picks.** From that set it presents at most two, each with one sentence on why it fits what you described. Because it sees the whole set, it can weigh a row at the bottom of the file against one at the top: in two recorded runs it chose rows 4 and 2 of 4, and rows 3 and 5 of 5 — never simply the first ones it was handed. Nothing is filtered out for having been mentioned already; the model can read the conversation, and is told to prefer something new unless an earlier measure genuinely fits better, in which case it says why it is bringing it back.
 
-**What "fits" can and cannot mean.** The model can only match against what you have actually said. If all it knows is "exhausted" and "plan recovery", its reasons fall back on the energy word — which is exactly what the code already filtered on — so within the matching set the choice is plausible but close to arbitrary. Say a sentence about what is going on and there is something real to match against. This is a live limitation rather than a bug: the agent asks what has been going on before it *logs*, but not before it *suggests*.
+**What "fits" can and cannot mean.** The model can only match against what you have actually said. Four hand tests in September 2026 showed why that matters: knowing only "exhausted" and "plan recovery", its stated reasons fell back on the energy word — exactly what the code had already filtered on — so the choice inside the matching set was plausible but close to arbitrary. The situation question moved into `ask` for that reason, ahead of the first lookup. If you decline to answer it, the limitation is back, by your choice.
 
 **Why the whole set, and for how long.** Handing over every matching row costs about 1100 input tokens at the widest, once per lookup — a spent result is compacted to a one-line marker on later turns. That is affordable at 60 rows and will not be at several hundred, where the answer is ranking rather than a bigger hand-over; the "helped" verdicts already in the check-in log are the signal to rank by.
 
@@ -210,7 +210,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 **Rejection is counted in code.** A short "not helpful" is recognised before any model call. The first rejection buys a web search with real links; the second steps back and re-asks about your goal.
 
-**Nothing is logged before you confirm it.** The agent asks first, in the chat — "Would you like to check in the current situation into the circumstances log?" — and never asks whether you have tried a measure or when you will, and if you have not said what is going on it asks that too rather than inventing a plausible sentence. Only then does it propose one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you approve that card, where you can also correct the wording. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
+**Nothing is logged before you confirm it.** The agent asks first, in the chat — "Would you like to check in the current situation into the circumstances log?" — and never asks whether you have tried a measure or when you will. What goes in the situation field is what you said when `ask` collected it, not a sentence invented at logging time. Only then does it propose one sentence describing your situation — never the measure, never how it went — and waits. The check-in row is written only after you approve that card, where you can also correct the wording. A rating you give later is a separate row: a verdict arrives after the fact, so it cannot be an edit without giving up append-only.
 
 **Honesty is structural.** Every tool call prints a receipt written by code, before the agent speaks. If a write failed, it says so. If a lookup came back empty, it says there is nothing yet rather than implying a pattern.
 
@@ -306,7 +306,3 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 - This is a wellness aid, not a clinical tool; the crisis gate is a basic keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
 
 **Data handling:** this tool records genuinely personal reflections. That content goes to OpenAI's API and, with tracing on, to LangSmith — both third parties, with no redaction. That is a deliberate choice for debugging signal, not an oversight; leave `LANGSMITH_TRACING=false` if you are not comfortable with it. The logs themselves stay local. `data/*.csv`, `state/*.jsonl` and `observability/runs.jsonl` must never be committed to a public repo.
-
-## Not implemented in this version
-
-A break-companion feature (agent-suggested, human-confirmed real break via Stretchly) was designed alongside this MVP and deliberately deferred — see the project plan for the design, including its human-in-the-loop model for the one subprocess call it would make.

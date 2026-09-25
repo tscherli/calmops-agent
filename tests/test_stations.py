@@ -59,14 +59,93 @@ def user(text):
     [
         ({}, "ask"),
         ({"energy": "wired"}, "ask"),
-        ({"energy": "wired", "goal": "calm down now"}, "suggest"),
-        ({"energy": "wired", "goal": "calm down now", "offered": ["breathe"]}, "follow_up"),
-        ({"energy": "wired", "goal": "calm down now", "offered": ["breathe"], "idea": "pause"}, "debate"),
+        # Both scale values but nothing about what is going on: still `ask`.
+        # Without the situation the lookup can only filter by the two values,
+        # and every measure for that energy fits equally.
+        ({"energy": "wired", "goal": "calm down now"}, "ask"),
+        ({"energy": "wired", "goal": "calm down now", "situation": "back to back calls"}, "suggest"),
+        ({"energy": "wired", "goal": "calm down now", "situation": "not given"}, "suggest"),
+        ({"energy": "wired", "goal": "calm down now", "situation": "loud day",
+          "offered": ["breathe"]}, "follow_up"),
+        ({"energy": "wired", "goal": "calm down now", "situation": "loud day",
+          "offered": ["breathe"], "idea": "pause"}, "debate"),
         ({"idea": "pause"}, "debate"),
     ],
 )
 def test_the_station_follows_from_the_state(state, expected):
     assert station_for(state) == expected
+
+
+def test_the_situation_is_a_gate_not_a_request(agent):
+    """A suggestion is only as good as what it was chosen against. With energy
+    and goal alone the lookup filters on the two scale values and every measure
+    for that energy fits equally, so the model's stated reason can only repeat
+    the energy word back -- which is what the hand tests of 2026-09-24 showed it
+    doing. Code routes to `ask` until the situation is in."""
+    assert station_for({"energy": "wired", "goal": "calm down now"}) == "ask"
+    assert station_for(
+        {"energy": "wired", "goal": "calm down now", "situation": "back to back calls"}
+    ) == "suggest"
+
+
+def test_declining_to_say_is_an_answer_not_a_gap():
+    """Otherwise "rather not say" routes to `ask` forever. The recorded value
+    is what distinguishes declined from unasked."""
+    from agent.graph import SITUATION_DECLINED
+
+    assert station_for(
+        {"energy": "wired", "goal": "calm down now", "situation": SITUATION_DECLINED}
+    ) == "suggest"
+
+
+def test_two_button_clicks_do_not_jump_the_gate(agent):
+    """The click path writes energy and goal straight into the payload without
+    passing through `ask`, so it is the one route that could skip the question.
+
+    It has to be asserted through a real turn: `station_for` never reads
+    `choices_clicked` -- that branch lives in `route_start` -- so a test built
+    on `station_for` passes whether the guard is there or not. The first
+    version of this test did exactly that, and a break test caught it."""
+    clicked = {
+        "messages": [user("I'm feeling wired and I want to calm down now.")],
+        "energy": "wired",
+        "goal": "calm down now",
+        "choices_clicked": True,
+    }
+
+    assert agent.invoke(clicked)["step"] == "ask"
+    assert agent.invoke({**clicked, "situation": "a loud morning"})["step"] == "suggest"
+
+
+def test_the_reply_to_the_situation_question_must_use_a_tool():
+    """The gate would otherwise loop: the station asks, the user answers, the
+    model says "got it" without recording it, and the next turn asks again."""
+    from agent.graph import situation_question_unanswered
+
+    asked = {
+        "messages": [user("back to back calls since nine")],
+        "energy": "wired",
+        "goal": "calm down now",
+        "step": "ask",
+    }
+
+    assert situation_question_unanswered(asked) is True
+    assert situation_question_unanswered({**asked, "situation": "calls"}) is False
+    # A tool result, not the user's reply: forcing again here would loop.
+    assert situation_question_unanswered({**asked, "messages": []}) is False
+
+
+def test_record_choices_carries_the_situation(agent):
+    """It travels with energy and goal rather than in a tool of its own: one
+    call, whatever the user happened to give."""
+    from agent.graph import record_choices
+
+    result = record_choices.invoke(
+        {"type": "tool_call", "name": "record_choices", "id": "c1",
+         "args": {"tool_call_id": "c1", "situation": "deadlines all week"}}
+    )
+
+    assert result.update["situation"] == "deadlines all week"
 
 
 def test_an_open_idea_comes_before_everything_else():
@@ -347,6 +426,7 @@ CLICKED_AFTER_THE_STEP_BACK = {
     "messages": [user("I'm feeling exhausted and I want to plan recovery.")],
     "energy": "exhausted",
     "goal": "plan recovery",
+    "situation": "a week of deadlines",
     "offered": ["breathe"],
 }
 

@@ -281,9 +281,20 @@ def test_an_energy_click_before_any_question_still_gets_the_goal_question(measur
     assert ask_turn(measures_file, tmp_path, energy="exhausted") == [None]
 
 
-def test_with_both_readings_known_ask_is_not_involved(measures_file, tmp_path):
-    assert "required" not in ask_turn(
+def test_with_both_readings_known_the_station_still_has_to_act(measures_file, tmp_path):
+    """Energy and goal are in, the situation is not, and `ask` now owns that
+    question -- so the turn is forced, for the same reason the goal turn is: a
+    model that answers "got it" without calling record_choices sends the next
+    turn back to `ask` to ask again."""
+    assert "required" in ask_turn(
         measures_file, tmp_path, energy="exhausted", goal="calm down now", step="ask"
+    )
+
+
+def test_with_all_three_known_ask_is_not_involved(measures_file, tmp_path):
+    assert "required" not in ask_turn(
+        measures_file, tmp_path, energy="exhausted", goal="calm down now",
+        situation="a week of deadlines", step="ask",
     )
 
 

@@ -174,6 +174,7 @@ class State(TypedDict, total=False):
     messages: Annotated[list[BaseMessage], add_messages]
     energy: Energy | None
     goal: Goal | None
+    situation: str | None       # what is going on, in the user's words, or DECLINED
     offered: list[str]          # measure ids already shown in this conversation
     rejections: int             # suggestions rejected in a row
     step: Station | None        # the active station
@@ -215,22 +216,30 @@ def record_choices(
     tool_call_id: Annotated[str, InjectedToolCallId],
     energy: Energy | None = None,
     goal: Goal | None = None,
+    situation: str | None = None,
 ) -> Command:
-    """Record the user's energy, their goal, or either one on its own.
+    """Record the user's energy, their goal, their situation, or any one alone.
 
     Call this the moment the user gives you one of them. Do not wait for the
-    other: telling them you noted it records nothing, and the next turn will
+    others: telling them you noted it records nothing, and the next turn will
     have forgotten it.
 
     energy: how they feel right now - exhausted, calm or wired.
     goal: what would help them most - "calm down now" (a few minutes),
     "plan recovery" (something for later, hours or days), or
     "change the situation" (act on the cause of the stress).
+    situation: what is going on for them, in one short sentence in their own
+    words. Pass "not given" when they would rather not say, so they are not
+    asked again.
     Only pass what the user actually said; ask for whatever is still missing.
     """
     # Only the values actually given: passing None would blank a value
     # recorded on an earlier turn.
-    update = {name: value for name, value in (("energy", energy), ("goal", goal)) if value}
+    update = {
+        name: value
+        for name, value in (("energy", energy), ("goal", goal), ("situation", situation))
+        if value
+    }
     if not update:
         return state_tool_reply(
             "Nothing recorded: pass the energy or the goal the user gave.",
@@ -276,6 +285,31 @@ def idea_decided(
 
 
 # -- plain functions ---------------------------------------------------------
+
+
+# What `situation` holds when the user would rather not say. A value, not an
+# empty string: the routing gate reads "is it set", and an empty one would ask
+# again every turn.
+SITUATION_DECLINED = "not given"
+
+
+def situation_question_unanswered(state: State) -> bool:
+    """Is this turn the user's reply to the situation question?
+
+    Energy and goal are known, the situation is not, and the last turn ended in
+    `ask`. Forcing a tool call here is what keeps the routing gate from
+    becoming a loop: the station asks, the user answers, and if the model only
+    says "got it" the next turn routes back to `ask` and asks again.
+    """
+    messages = state.get("messages") or []
+    return bool(
+        messages
+        and isinstance(messages[-1], HumanMessage)
+        and state.get("energy")
+        and state.get("goal")
+        and not state.get("situation")
+        and state.get("step") == "ask"
+    )
 
 
 def goal_question_unanswered(state: State) -> bool:
@@ -424,7 +458,7 @@ def station_for(state: State) -> Station:
         return "debate"
     if state.get("step") == "follow_up":
         return "follow_up"
-    if not (state.get("energy") and state.get("goal")):
+    if not (state.get("energy") and state.get("goal") and state.get("situation")):
         return "ask"
     if not state.get("offered"):
         return "suggest"
@@ -468,7 +502,9 @@ def action_request(call: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-CARRIED_FIELDS = ("energy", "goal", "offered", "rejections", "step", "idea", "debate_turns")
+CARRIED_FIELDS = (
+    "energy", "goal", "situation", "offered", "rejections", "step", "idea", "debate_turns"
+)
 
 
 def next_turn_state(result: dict[str, Any]) -> dict[str, Any]:
@@ -485,6 +521,7 @@ def next_turn_state(result: dict[str, Any]) -> dict[str, Any]:
             "messages": [],
             "energy": None,
             "goal": None,
+            "situation": None,
             "offered": [],
             "rejections": 0,
             "step": None,
@@ -638,7 +675,8 @@ def build_agent(
         a tool: their goal recorded, or their own list looked up. A reply from
         the model's own head is then impossible, not just discouraged.
         """
-        chosen = ask_must_act if goal_question_unanswered(state) else ask_model
+        must_act = goal_question_unanswered(state) or situation_question_unanswered(state)
+        chosen = ask_must_act if must_act else ask_model
         return {"messages": [_reply(chosen, STATION_PROMPTS["ask"], state)], "step": "ask"}
 
     def close_idea(state: State) -> dict[str, Any]:
@@ -901,6 +939,7 @@ def build_agent(
             state.get("choices_clicked")
             and state.get("energy")
             and state.get("goal")
+            and state.get("situation")
             and not state.get("idea")
         ):
             return "suggest"
