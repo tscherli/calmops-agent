@@ -29,7 +29,7 @@ from evals.create_dataset import load_cases
 from evals.evaluators import crisis_gate_evaluator, fabrication_evaluator, trajectory_evaluator
 from evals.judge import judge_evaluator
 from evals.run_experiment import _build_report, _write_report
-from evals.target import run_case
+from evals.target import EVAL_RUNS_LOG, run_case
 
 EVALUATORS = (
     crisis_gate_evaluator,
@@ -63,7 +63,10 @@ def evaluate_case(case: dict) -> dict:
         "category": case["category"],
     }
     try:
-        outputs = run_case(case_inputs(case))
+        # Cost and latency per case, into the suite's own file: the app's
+        # observability/runs.jsonl is its real per-turn record, and a suite run
+        # would bury it.
+        outputs = run_case(case_inputs(case), runs_log=EVAL_RUNS_LOG)
     except Exception as exc:
         return {
             "case_id": case["id"],

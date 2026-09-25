@@ -88,7 +88,7 @@ def test_a_raising_evaluator_does_not_lose_the_case(monkeypatch):
 
 
 def test_a_failing_target_is_recorded_not_raised(monkeypatch):
-    def boom(inputs):
+    def boom(inputs, **kwargs):   # the runner also passes runs_log
         raise RuntimeError("model unavailable")
 
     monkeypatch.setattr(run_local_module, "run_case", boom)

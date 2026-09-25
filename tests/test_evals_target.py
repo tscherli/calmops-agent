@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from evals.target import build_eval_graph, run_case, serialize_messages
 from tests.conftest import StubChatModel
+from tools.checkin_log import append_checkin_row
 from tools.measures import MEASURE_COLUMNS
 
 
@@ -139,7 +140,7 @@ def test_a_turn_can_carry_what_a_button_click_would_put_in_the_payload():
 # -- data safety -------------------------------------------------------------
 
 
-def test_eval_runs_never_write_to_the_real_check_in_log(monkeypatch):
+def test_eval_runs_never_write_to_the_real_check_in_log(monkeypatch, tmp_path):
     """A run would otherwise inject dozens of fabricated rows into the user's
     own log -- which the weekly digest then reads."""
     captured = {}
@@ -149,7 +150,7 @@ def test_eval_runs_never_write_to_the_real_check_in_log(monkeypatch):
         return _StubGraph()
 
     monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
-    run_case({"turns": ["quiet morning"]})
+    run_case({"turns": ["quiet morning"]}, runs_log=tmp_path / "runs.jsonl")
 
     log_path = Path(captured["log_path"])
     assert log_path.name == "checkin_log.csv"
@@ -157,7 +158,7 @@ def test_eval_runs_never_write_to_the_real_check_in_log(monkeypatch):
     assert not log_path.exists()
 
 
-def test_eval_runs_get_their_own_copy_of_the_measure_list(monkeypatch):
+def test_eval_runs_get_their_own_copy_of_the_measure_list(monkeypatch, tmp_path):
     """add_measure writes to this file and find_measures reads it back in
     every later conversation. A shared one would let an eval run grow the
     user's real list, permanently and silently."""
@@ -178,7 +179,7 @@ def test_eval_runs_get_their_own_copy_of_the_measure_list(monkeypatch):
     assert rows and list(rows[0]) == MEASURE_COLUMNS
 
 
-def test_each_case_gets_a_fresh_measure_copy(monkeypatch):
+def test_each_case_gets_a_fresh_measure_copy(monkeypatch, tmp_path):
     """Cases must not see each other's added measures, or results depend on
     execution order."""
     seen = []
@@ -188,8 +189,8 @@ def test_each_case_gets_a_fresh_measure_copy(monkeypatch):
         return _StubGraph()
 
     monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
-    run_case({"turns": ["a"]})
-    run_case({"turns": ["b"]})
+    run_case({"turns": ["a"]}, runs_log=tmp_path / "runs.jsonl")
+    run_case({"turns": ["b"]}, runs_log=tmp_path / "runs.jsonl")
 
     assert seen[0] != seen[1]
 
@@ -283,8 +284,13 @@ def test_an_approval_card_is_answered_so_the_turn_can_finish():
 
     assert graph.resumed_with.resume["decisions"] == [{"id": "call-1", "type": "approve"}]
     assert result["approvals"] == [{
+        "call_id": "call-1",
         "tool": "log_checkin",
         "description": 'Log: "a loud day" (measure: short_walk)',
+        # The args are what makes the card gradeable: an edit turn overwrites
+        # the row, so a rule about the sentence the user was shown can only be
+        # checked against this.
+        "args": {"circumstances": "a loud day", "measure_id": "short_walk"},
         "decision": "approve",
     }]
 
@@ -371,12 +377,107 @@ def test_a_case_reaches_a_real_write_through_the_real_graph(tmp_path):
 
     result = run_case(
         {"turns": [{"text": "I'll try the walk", "energy": "wired",
-                    "goal": "calm down now", "step": "follow_up",
-                    "offered": ["short_walk"]}]},
-        agent_graph=graph,
+                    "goal": "calm down now", "situation": "a loud day",
+                    "step": "follow_up", "offered": ["short_walk"]}]},
+        # The same paths the graph was built on: run_case reads the rows back
+        # from what it was given, so an injected graph on different files would
+        # report an empty log while the write really happened.
+        agent_graph=graph, log_path=log_path, measures_path=measures_path,
     )
 
     rows = list(csv.DictReader(log_path.open(encoding="utf-8", newline="")))
     assert [r["measure_id"] for r in rows] == ["short_walk"]
     assert rows[0]["circumstances"] == "a loud day"
     assert [a["decision"] for a in result["approvals"]] == ["approve"]
+    # The other half of reached_write: a case that did get there says so, or a
+    # hardcoded False would satisfy every test that only checks the negative.
+    assert result["reached_write"] is True
+    assert [r["measure_id"] for r in result["log_rows"]] == ["short_walk"]
+
+
+def test_a_case_starts_with_the_rows_it_seeds(tmp_path):
+    """A rating case needs a check-in to rate, and an injection case needs a
+    row already in the list. `seed_entries` was accepted by the dataset loader
+    and silently ignored by the harness until now."""
+    log_path = tmp_path / "log.csv"
+    measures_path = tmp_path / "measures.csv"
+    with measures_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle, lineterminator="\n").writerow(MEASURE_COLUMNS)
+
+    run_case(
+        {
+            "turns": ["hello"],
+            "seed_entries": [{"energy": "wired", "circumstances": "a loud day",
+                              "measure_id": "planted_one"}],
+            "seed_measures": [{"measure_id": "planted_one", "type": "recover",
+                               "measure": "Walk for five minutes.", "fits_energy": "wired",
+                               "effort": "minutes", "source": "user"}],
+        },
+        agent_graph=_StubGraph(), log_path=log_path, measures_path=measures_path,
+    )
+
+    rows = list(csv.DictReader(log_path.open(encoding="utf-8", newline="")))
+    assert [r["measure_id"] for r in rows] == ["planted_one"]
+    assert "planted_one" in {
+        r["measure_id"] for r in csv.DictReader(measures_path.open(encoding="utf-8", newline=""))
+    }
+
+
+def test_a_planted_measure_is_cleaned_like_one_the_app_wrote(tmp_path):
+    """Planting text the app would have rewritten tests a row that cannot
+    exist. add_measure folds punctuation; so does seeding."""
+    from evals.target import seed_measures
+
+    measures_path = tmp_path / "measures.csv"
+    with measures_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle, lineterminator="\n").writerow(MEASURE_COLUMNS)
+
+    seed_measures(
+        [{"measure_id": "dashed", "type": "recover", "fits_energy": "wired",
+          "effort": "minutes", "source": "user",
+          "measure": "Rest for 5" + chr(8211) + "15 minutes."}],
+        measures_path,
+    )
+
+    row = list(csv.DictReader(measures_path.open(encoding="utf-8", newline="")))[0]
+    assert row["measure"] == "Rest for 5-15 minutes."
+
+
+def test_the_result_carries_the_rows_and_whether_a_write_happened(tmp_path):
+    """Three of the four bugs the hand tests found were visible only in what
+    got written, so the rows themselves have to reach the evaluators."""
+    log_path = tmp_path / "log.csv"
+    append_checkin_row(energy="wired", circumstances="seeded", measure_id="m1", path=log_path)
+
+    result = run_case({"turns": ["hello"]}, agent_graph=_StubGraph(), log_path=log_path,
+                      measures_path=tmp_path / "measures.csv")
+
+    assert [r["measure_id"] for r in result["log_rows"]] == ["m1"]
+    assert result["measures_added"] == []
+    assert result["reached_write"] is False
+
+
+def test_a_case_records_no_cost_unless_the_runner_asks(tmp_path):
+    """Writing was the default once, and every test that drove a case left a
+    record in evals/results/. The runner decides; run_case does not."""
+    run_case({"turns": ["hello"]}, agent_graph=_StubGraph(),
+             log_path=tmp_path / "log.csv", measures_path=tmp_path / "m.csv")
+
+    assert not (Path("evals") / "results" / "eval-runs.jsonl").exists()
+
+
+def test_the_eval_cost_record_is_not_the_apps(tmp_path):
+    """observability/runs.jsonl is the application's per-turn record, and the
+    figures quoted in the dev log come from averaging it. A suite run appending
+    dozens of rows would bury them."""
+    from evals.target import EVAL_RUNS_LOG
+    from observability.tracing import RUNS_LOG_PATH
+
+    assert EVAL_RUNS_LOG != RUNS_LOG_PATH
+    assert EVAL_RUNS_LOG.parent.name == "results"
+
+    runs_log = tmp_path / "runs.jsonl"
+    run_case({"turns": ["hello"]}, agent_graph=_StubGraph(), runs_log=runs_log,
+             log_path=tmp_path / "log.csv", measures_path=tmp_path / "m.csv")
+
+    assert runs_log.exists()

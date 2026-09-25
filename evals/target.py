@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -21,9 +22,13 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from agent.common import message_text
-from agent.graph import EDITABLE_ARG, build_agent, next_turn_state
+from agent.graph import EDITABLE_ARG, WRITE_TOOLS, build_agent, next_turn_state
+from agent.model import DEFAULT_MODEL
 from agent.safety import screen_for_crisis
-from tools.measures import MEASURES_PATH
+from observability.tracing import RunRecorder
+from tools.checkin_log import append_checkin_row, read_checkin_rows
+from tools.measures import MEASURE_COLUMNS, MEASURES_PATH, append_measure, measure_ids
+from tools.measures import _clean_measure_text
 
 # Role vocabulary must match dataset.jsonl's hand-authored reference_trajectory
 # entries exactly ("human"/"ai"/"tool") -- agentevals' structural comparison
@@ -103,6 +108,32 @@ def _unwritable_log_path() -> Path:
     return blocker / "checkin_log.csv"
 
 
+# Eval runs keep their own cost record. observability/runs.jsonl is the app's,
+# and a suite run would bury the real per-turn figures the dev log quotes.
+EVAL_RUNS_LOG = Path(__file__).resolve().parent / "results" / "eval-runs.jsonl"
+
+
+def seed_log(entries: list[dict], log_path: Path) -> None:
+    """Rows the case starts with. A rating case needs a check-in to rate, and
+    an injection case needs a row already in the log."""
+    for entry in entries:
+        append_checkin_row(**{**entry, "path": log_path})
+
+
+def seed_measures(rows: list[dict], measures_path: Path) -> None:
+    """Rows planted in the case's measure list.
+
+    Through the same cleaning `add_measure` applies, so a planted row is one
+    the app could have produced: a case that plants text the app would have
+    rewritten tests a situation that cannot occur.
+    """
+    for row in rows:
+        full = {column: "" for column in MEASURE_COLUMNS}
+        full.update(row)
+        full["measure"] = _clean_measure_text(full.get("measure", ""))
+        append_measure(full, measures_path)
+
+
 def build_eval_graph(log_path: Path, measures_path: Path, *, model: Any = None):
     """The agent as the harness runs it.
 
@@ -143,6 +174,7 @@ def run_case(
     agent_graph: Any = None,
     log_path: Path | None = None,
     measures_path: Path | None = None,
+    runs_log: Path | None = None,
 ) -> dict:
     """The function LangSmith's evaluate() calls once per Example (and the
     same logic run_baseline.py's no-tools comparison is built against).
@@ -155,6 +187,11 @@ def run_case(
     do, so this accumulation has to happen here rather than implicitly via
     agent memory).
 
+    `log_path` and `measures_path` are where the rows are read back from at the
+    end, so a caller injecting its own `agent_graph` has to pass the same paths
+    that graph was built on, or the result reports an empty log for a write that
+    really happened.
+
     Writes pause on an approval card, and a case says what the user does with
     it: `"approval": "approve"` (the default), `"reject"`, or `"edit"` with
     `"edit_text"`. Without a checkpointer the graph cannot pause at all and
@@ -162,18 +199,23 @@ def run_case(
     `log_checkin` -- the eval suite graded an agent that was not allowed to
     do half of its job.
     """
-    if agent_graph is not None:
-        graph = agent_graph
-    else:
-        if log_path is None:
-            log_path = (
-                _unwritable_log_path()
-                if inputs.get("simulate_write_failure")
-                else _isolated_log_path()
-            )
-        if measures_path is None:
-            measures_path = _isolated_measures_path()
-        graph = build_eval_graph(log_path, measures_path)
+    # Paths are resolved even when a graph is injected: the case's rows are
+    # read back from them at the end, and seeding needs somewhere to write.
+    if log_path is None:
+        log_path = (
+            _unwritable_log_path()
+            if inputs.get("simulate_write_failure")
+            else _isolated_log_path()
+        )
+    if measures_path is None:
+        measures_path = _isolated_measures_path()
+    graph = agent_graph if agent_graph is not None else build_eval_graph(log_path, measures_path)
+
+    if inputs.get("seed_entries"):
+        seed_log(inputs["seed_entries"], log_path)
+    if inputs.get("seed_measures"):
+        seed_measures(inputs["seed_measures"], measures_path)
+    measures_before = measure_ids(measures_path)
 
     # Conversation state must be carried here exactly as app.py does, and
     # through the same function: passing only `messages` would reset the
@@ -192,6 +234,10 @@ def run_case(
     # measure" and "the user was shown what would be written" are different
     # claims, and only the second one is a guarantee.
     approvals: list[dict] = []
+    # Opt-in: the runner says where cost goes. A default would have every test
+    # that drives a case append a record to the repo, which is how this was
+    # first written and what the untracked file it left behind showed.
+    recorder = RunRecorder(log_path=runs_log) if runs_log else None
 
     for turn in inputs["turns"]:
         turn_text, extra = (turn, {}) if isinstance(turn, str) else (turn["text"], dict(turn))
@@ -215,6 +261,7 @@ def run_case(
         # One thread per turn, exactly as the clients do: the checkpointer
         # only ever has to hold the turn that is paused.
         config = {"configurable": {"thread_id": uuid.uuid4().hex}}
+        started = time.monotonic()
         result = graph.invoke({**state, **extra, "messages": messages_before}, config)
         while result.get("__interrupt__"):
             requests = result["__interrupt__"][0].value["action_requests"]
@@ -223,8 +270,13 @@ def run_case(
                 decision = _decision_for(request, approval, edit_text)
                 approvals.append(
                     {
+                        "call_id": request.get("id", ""),
                         "tool": request.get("tool") or request.get("name") or "",
                         "description": request.get("description", ""),
+                        # What the card actually proposed. An edit turn
+                        # overwrites the row, so a rule about the sentence the
+                        # user was shown can only be checked here.
+                        "args": dict(decision.get("args") or request.get("args") or {}),
                         "decision": decision["type"],
                     }
                 )
@@ -240,6 +292,14 @@ def run_case(
         transcript.extend(produced)
 
         tool_events.extend(result.get("tool_events") or [])
+        if recorder is not None:
+            try:
+                recorder.record_turn(
+                    messages_before, result.get("messages") or [],
+                    model=DEFAULT_MODEL, latency_seconds=time.monotonic() - started,
+                )
+            except Exception:  # a cost record must never fail a case
+                pass
         state = next_turn_state(result)
 
     return {
@@ -247,4 +307,12 @@ def run_case(
         "crisis_intercepted": False,
         "tool_events": tool_events,
         "approvals": approvals,
+        "log_rows": read_checkin_rows(log_path),
+        "measures_added": sorted(measure_ids(measures_path) - measures_before),
+        # Its own key, so "never got there" stays separate from "wrote the
+        # wrong thing": about half the model-driven cases assert a write, and
+        # one prompt quirk would otherwise fail them all as wrong content.
+        "reached_write": any(
+            e.get("tool") in WRITE_TOOLS and e.get("exit_code") == 0 for e in tool_events
+        ),
     }
