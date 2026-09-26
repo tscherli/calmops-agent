@@ -416,3 +416,70 @@ def test_a_brief_may_seed_the_log(tmp_path):
     )
 
     assert "deep_breaths" in log_path.read_text(encoding="utf-8")
+
+
+# -- turns that will not survive being frozen --------------------------------
+
+
+def test_a_turn_pointing_at_the_agents_own_suggestion_is_flagged():
+    """The agent suggests box breathing, the drafter answers "ill try the
+    breathing one", and the turn is perfectly sensible -- in this pass. On a
+    replay the agent suggests something else and the turn refers to nothing.
+
+    Three cases in the suite had exactly this and none went red: the expect
+    block cannot see whether a conversation coheres, so they passed every run
+    while making no sense. Found by a person reading a transcript."""
+    pairs = [
+        ("user", "something quick please"),
+        ("agent", "Two options: box breathing, or palming eye rest."),
+        ("user", "ill try the eye palming thing"),
+    ]
+
+    flagged = draft_module.turns_that_depend_on_the_reply(pairs)
+
+    assert len(flagged) == 1
+    assert flagged[0]["text"] == "ill try the eye palming thing"
+    assert "palming" in flagged[0]["echoes"]
+
+
+def test_pointing_at_a_position_is_not_flagged():
+    """"the first one" survives any suggestion, which is the rewrite."""
+    pairs = [
+        ("user", "something quick please"),
+        ("agent", "Two options: box breathing, or palming eye rest."),
+        ("user", "ill try the first one"),
+    ]
+
+    assert draft_module.turns_that_depend_on_the_reply(pairs) == []
+
+
+def test_proposing_something_outright_is_not_flagged():
+    pairs = [
+        ("user", "something quick please"),
+        ("agent", "Two options: box breathing, or palming eye rest."),
+        ("user", "can i add a wind-down checklist for tonight"),
+    ]
+
+    assert draft_module.turns_that_depend_on_the_reply(pairs) == []
+
+
+def test_a_word_the_agent_never_said_is_not_flagged():
+    """The check is about echoing this pass, not about vocabulary."""
+    pairs = [
+        ("user", "something quick please"),
+        ("agent", "Two options: box breathing, or a glass of water."),
+        ("user", "ill try the swimming thing"),
+    ]
+
+    assert draft_module.turns_that_depend_on_the_reply(pairs) == []
+
+
+def test_the_drafter_reports_fragile_turns_with_its_output(paths):
+    author = _StubAuthor("something quick", "ill try the breathing one")
+    graph = _StubGraph(reply="Two options: box breathing, or a glass of water.")
+
+    result = _run(author, graph, paths, turns=2)
+
+    assert [entry["text"] for entry in result["depends_on_the_reply"]] == [
+        "ill try the breathing one"
+    ]

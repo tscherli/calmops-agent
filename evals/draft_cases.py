@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -176,6 +177,57 @@ def _reject_assertions(text: str) -> str:
 
 def _format_measures(rows: list[dict]) -> str:
     return "\n".join(f"- {r['measure_id']}: {r['measure']}" for r in rows) or "- (nothing yet)"
+
+
+# A turn that points at something by name: "the eye palming thing", "ill do
+# the eye rest", "let's try the checklist".
+_REFERENCE = re.compile(
+    r"\b(?:try|do|take|use|pick|want|lets|let's)\s+(?:the\s+)?([a-z][a-z ]{2,30}?)"
+    r"(?:\s+(?:thing|one|please)\b|[.,!?]|$)"
+    r"|\bthe\s+([a-z][a-z ]{2,30}?)\s+(?:thing|one)\b",
+    re.I,
+)
+_FILLER = frozenset(
+    {
+        "it", "that", "this", "one", "thing", "them", "those", "both", "some", "any",
+        "the", "my", "your", "first", "second", "other", "another", "next", "same", "me",
+        "you", "again", "now", "then", "here", "there",
+    }
+)
+
+
+def turns_that_depend_on_the_reply(pairs: list[tuple[str, str]]) -> list[dict]:
+    """User turns that point by name at something the agent just said.
+
+    These are the turns that do not survive being frozen. The agent suggests
+    box breathing, the drafter answers "ill try the breathing one", and the
+    turn is perfectly sensible -- in this pass. On a replay the agent suggests
+    something else and the turn refers to nothing, so the case reads as a
+    non-sequitur and a labeller cannot judge it.
+
+    Three cases in the suite had this and none of them went red: the expect
+    block cannot see whether a conversation coheres, so they passed every run
+    while making no sense. It was found by a person reading a transcript
+    during the first labelling session. This is the same check, moved to the
+    moment the turns are written, which is the only moment it is cheap.
+
+    Reported rather than refused: the turn is not wrong, it is fragile, and
+    what to put in its place depends on what the case is for.
+    """
+    flagged = []
+    previous_agent = ""
+    for index, (who, text) in enumerate(pairs):
+        if who != "user":
+            previous_agent = text if who == "agent" else previous_agent
+            continue
+        named: set[str] = set()
+        for match in _REFERENCE.finditer(text):
+            phrase = (match.group(1) or match.group(2) or "").strip().lower()
+            named.update(w for w in re.findall(r"[a-z]{3,}", phrase) if w not in _FILLER)
+        echoed = sorted(w for w in named if w in previous_agent.lower())
+        if echoed:
+            flagged.append({"turn": index, "text": text, "echoes": echoed})
+    return flagged
 
 
 def _card_line(request: dict, approval: str) -> str:
@@ -337,7 +389,7 @@ def draft(
         if result.get("complete"):
             break
 
-    return {
+    result = {
         "turns": user_turns,
         # Two views, because they have different readers. `conversation` is
         # what the person saw, and it is what you read while deciding what the
@@ -357,6 +409,11 @@ def draft(
         "measures_path": str(measures_path),
         "log_path": str(log_path),
     }
+    # Named last because it is the thing to read before anything is frozen.
+    result["depends_on_the_reply"] = turns_that_depend_on_the_reply(
+        [(entry["who"], entry["text"]) for entry in result["conversation"]]
+    )
+    return result
 
 
 def main() -> None:
@@ -376,6 +433,19 @@ def main() -> None:
     else:
         Path(args.out).write_text(payload, encoding="utf-8")
         print(f"Wrote {len(result['turns'])} turns to {args.out}")
+    fragile = result.get("depends_on_the_reply") or []
+    if fragile:
+        print("\n! These turns point by name at something the agent said in THIS pass:")
+        for entry in fragile:
+            print(f"    {entry['text']}")
+            print(f"      echoes: {', '.join(entry['echoes'])}")
+        print(
+            "  They will not survive being frozen: on a replay the agent suggests\n"
+            "  something else and the turn refers to nothing. Rewrite them to point at\n"
+            "  a position (\"the first one\") or to propose the thing outright. Three\n"
+            "  cases in the suite had this and passed every run regardless, because an\n"
+            "  expect block cannot see whether a conversation coheres."
+        )
     print(
         "\nNow by hand: read every turn, cut what the person would not say, write the expect "
         "block, assign the id and the suite tier, name what it covers, register it in "
