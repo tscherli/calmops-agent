@@ -1,5 +1,34 @@
 """One place that decides which model a node talks to, and how it is built.
 
+**Why the agent is on OpenAI, and why the project is not on one provider.**
+Asked often enough to write down. Four reasons, in order of how hard they are
+to undo:
+
+1. **An LLM judge must not share a family with what it grades.** A model finds
+   its own reasoning persuasive, so grading GPT output with GPT invites
+   correlated blind spots (`evals/judge.py`). That means *something* here has
+   to be a second provider -- a single-provider setup does not remove the
+   problem, it just decides which side is compromised. The judge is the
+   cheapest place to put the boundary: short trajectories, and its whole
+   output is one bit.
+2. **The web search is OpenAI's own server-side tool**, bound as
+   `{"type": "web_search"}` (`agent/graph.py`). It is executed by OpenAI
+   rather than by this code, so there is nothing here to point at another
+   provider -- moving the agent means rebuilding that path, not reconfiguring
+   it.
+3. **Cost tracking only prices OpenAI.** `observability/tracing.py` holds
+   rates for `gpt-5-nano` and `gpt-5-mini`; anything else lands in
+   `unpriced_models` and reports nothing. A silent zero is worse than no
+   figure, and cost tracking is a stated requirement of this project.
+4. **Every recorded finding is on `gpt-5-mini`.** The hand tests, the
+   stage-54 measurements, the cost per turn the eval budget is planned
+   against. Switching the agent does not just change a setting; it invalidates
+   the baseline everything else is compared to.
+
+None of this argues OpenAI is better. It argues that the split is structural
+rather than incidental: reason 1 means two providers are required, and reasons
+2 to 4 decide which one the agent sits on today.
+
 Two settings are project-wide and easy to get wrong in only one of several
 call sites:
 
