@@ -24,6 +24,7 @@ from evals.calibrate_judge import (
     plant_situation_violation,
     question_report,
 )
+from evals.outputs import situation_sentences
 
 
 def _lookup(*measure_ids):
@@ -718,3 +719,56 @@ def test_a_declined_situation_is_not_something_the_agent_asserted():
     )
 
     assert not _would_ask(SITUATION_KEY, outputs)
+
+
+def test_a_situation_can_be_planted_where_there_is_no_card():
+    """The question was widened to read recorded situations because cards
+    alone appear in a handful of trajectories. A planter that only edited
+    cards could not plant in the ones it had just been widened to cover, so
+    the five plants the gate needs would still have been out of reach."""
+    outputs = _outputs(
+        approvals=[],
+        messages=[
+            {"role": "human", "content": "rough morning"},
+            {
+                "role": "ai",
+                "content": "",
+                "tool_calls": [
+                    {"name": "record_choices", "args": {"situation": "back to back calls"}}
+                ],
+            },
+            {"role": "ai", "content": "Two from your list.", "tool_calls": None},
+        ],
+    )
+
+    planted = plant_situation_violation(outputs)
+
+    assert _planting_took(SITUATION_KEY, planted)
+    assert "landlord" in " ".join(situation_sentences(planted))
+
+
+def test_a_declined_situation_is_not_planted_into():
+    """"not given" is a sentinel. Extending it would produce a sentence no
+    agent could have written."""
+    outputs = _outputs(
+        approvals=[],
+        messages=[
+            {"role": "human", "content": "rather not say"},
+            {
+                "role": "ai",
+                "content": "",
+                "tool_calls": [{"name": "record_choices", "args": {"situation": "not given"}}],
+            },
+            {"role": "ai", "content": "Two from your list.", "tool_calls": None},
+        ],
+    )
+
+    assert not _planting_took(SITUATION_KEY, plant_situation_violation(outputs))
+
+
+def test_a_card_is_still_preferred_when_there_is_one():
+    outputs = _outputs()
+
+    planted = plant_situation_violation(outputs)
+
+    assert "landlord" in (planted["approvals"][0]["args"]["circumstances"])

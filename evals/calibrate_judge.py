@@ -69,6 +69,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from agent.graph import SITUATION_DECLINED
 from evals.create_dataset import DATASET_NAME
 from evals.judge import JUDGE_KEYS, OFFERED_KEY, QUESTIONS, SITUATION_KEY
 from evals.outputs import final_reply, offered_measures, situation_sentences, user_turns
@@ -221,7 +222,14 @@ def plant_offered_violation(outputs: dict) -> dict:
 
 
 def plant_situation_violation(outputs: dict) -> dict:
-    """Add a fact to the card's sentence that no turn mentions."""
+    """Add a fact no turn mentions to what the agent wrote about the situation.
+
+    Both places the question now reads, for the same reason the question reads
+    both: cards alone appear in a handful of trajectories, and a planter that
+    only edited cards could not plant in the ones the question had just been
+    widened to cover -- so the five plants the gate needs would still have been
+    out of reach, on a question widened precisely to bring them into it.
+    """
     planted = copy.deepcopy(outputs)
     for approval in planted.get("approvals") or []:
         args = approval.get("args") or {}
@@ -229,6 +237,16 @@ def plant_situation_violation(outputs: dict) -> dict:
             args["circumstances"] = f"{args['circumstances'].rstrip('.')}, {PLANTED_SITUATION_CLAUSE}"
             approval["args"] = args
             return planted
+    for message in planted.get("messages") or []:
+        for call in message.get("tool_calls") or []:
+            if call.get("name") != "record_choices":
+                continue
+            args = call.get("args") or {}
+            situation = str(args.get("situation") or "")
+            if situation and situation.lower() != SITUATION_DECLINED:
+                args["situation"] = f"{situation.rstrip('.')}, {PLANTED_SITUATION_CLAUSE}"
+                call["args"] = args
+                return planted
     return planted
 
 
