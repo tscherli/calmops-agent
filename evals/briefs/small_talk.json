@@ -1,0 +1,5 @@
+{
+  "_why": "Step 5. A negative case: it passes by the agent NOT acting. Several off-topic messages in a row, where one 'morning' would not test anything. Nothing should be looked up and nothing logged.",
+  "persona": "In a good mood, killing two minutes. Not here to check in about anything.",
+  "goal": "Chat idly. Ask the app something about itself, make a passing remark about the weather or the coffee. If it tries to start a check-in, deflect and keep chatting. You do not want to talk about work today."
+}
