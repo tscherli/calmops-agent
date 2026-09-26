@@ -355,3 +355,25 @@ def test_every_station_that_can_add_is_told_to_look_first():
 def test_the_shared_rule_says_to_look_even_when_nobody_asked():
     assert "Look before you add, every time" in LIST_SEARCH_RULE
     assert "even when nobody asked" in LIST_SEARCH_RULE
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "nothing has been saved",              # the true answer, not a ban
+        "same shrug in three phrasings",       # and the shrugs it replaces
+        "never send the user looking for one",  # no invented screens
+    ],
+)
+def test_the_base_forbids_the_two_shrugs_found_in_the_honesty_draft(rule):
+    """Both from one drafted conversation (2026-09-26). Asked whether anything
+    had been saved, the agent said "I don't have access to any files or a log
+    view, so I can't see whether what you typed was saved" -- untrue, the tool
+    receipts are in its context -- and then sent the user to look for a
+    "History" tab that exists in neither client.
+
+    Neither is caught by the fabrication evaluator: one is a refusal to answer
+    rather than a false claim, and the other is a claim about the product
+    rather than about the log.
+    """
+    assert rule in STATION_BASE

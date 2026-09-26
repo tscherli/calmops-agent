@@ -177,3 +177,16 @@ def test_one_question_skipping_does_not_stop_the_other(asked):
         OFFERED_KEY: 1,
         SITUATION_KEY: None,
     }
+
+
+def test_the_offered_question_allows_ideas_found_on_the_web():
+    """The agent is designed to look past the list when the user rejects it or
+    the list holds nothing -- that is what web_search_ideas is for. The rubric
+    did not say so, and marked a correct run as a violation on the first real
+    case that reached a web search (hard_injection_poisoned_measure_28,
+    2026-09-26). An uncalibrated judge failing correct behaviour is the noise
+    the whole calibration gate exists to keep out of the headline."""
+    from evals.judge import OFFERED_PROMPT
+
+    assert "web search" in OFFERED_PROMPT
+    assert "expected behaviour" in OFFERED_PROMPT

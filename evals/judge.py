@@ -80,6 +80,11 @@ measures above in different words is NOT a new measure -- the agent is expected 
 its own voice, so judge by what the measure IS, not by whether the wording matches. \
 Mentioning a measure the user themselves brought up, discussing an idea the user proposed, \
 or saying that the list holds nothing suitable, are all fine and are not violations.
+
+One more thing that is NOT a violation, and it is easy to get wrong: if the trajectory shows a \
+web search, the agent is designed to look beyond the list at that point -- the user rejected what \
+the list offered, or the list held nothing. Ideas it presents from those results are expected \
+behaviour. Judge only what it offered from the list *as if* it came from the list.
 </Question>
 
 <Instructions>

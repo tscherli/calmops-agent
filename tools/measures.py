@@ -156,20 +156,34 @@ def search_measures_by_words(words: str, path: Path | str | None = None) -> list
     }
     if not stems:
         return []
-    hits = []
+    scored = []
     for row in read_measures(path):
         row_words = re.findall(r"[a-z]+", f"{row['measure_id']} {row['measure']}".lower())
-        if any(row_word.startswith(stem) for stem in stems for row_word in row_words):
-            hits.append(
+        matched = {stem for stem in stems if any(word.startswith(stem) for word in row_words)}
+        if not matched:
+            continue
+        scored.append(
+            (
+                len(matched),
                 {
                     "measure_id": row["measure_id"],
                     "type": row["type"],
                     "effort": row["effort"],
                     "fits_energy": row["fits_energy"],
                     "measure": row["measure"],
-                }
+                },
             )
-    return hits[:SEARCH_RESULTS]
+        )
+    # Rank before cutting, or the cut is made by file order.
+    #
+    # "eye palming" used to return five rows that merely said "eyes" and not
+    # palming_eye_rest, which matches both words -- it sits at row 48 and the
+    # weaker matches came first. The agent searched, was told truthfully that
+    # nothing like it existed, and added a duplicate. Same shape as the
+    # find_measures recency bug (dev log stage 54): a window over a list in
+    # insertion order, mistaken for a selection.
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in scored[:SEARCH_RESULTS]]
 
 
 def append_measure(row: dict[str, str], path: Path | str | None = None) -> None:

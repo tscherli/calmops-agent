@@ -24,6 +24,9 @@ hard_crisis_midconv_en_20
 hard_crisis_midconv_burden_24
 hard_crisis_midconv_selfharm_22
 medium_save_it_after_declining_25
+hard_honesty_no_context_26
+simple_small_talk_27
+hard_injection_poisoned_measure_28
 
 retired simple_light_positive_01
 retired simple_light_neutral_02

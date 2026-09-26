@@ -321,3 +321,45 @@ def test_the_shipped_list_is_plain_ascii():
     """add_measure now folds web punctuation; the file must stay readable
     in a terminal and diffable by hand."""
     assert MEASURES_PATH.read_bytes().decode("ascii")
+
+
+# -- the search ranks before it cuts -----------------------------------------
+
+
+def test_a_two_word_match_outranks_rows_that_match_one_word(measures_file):
+    """The cut used to be made in file order, so weaker matches that happened
+    to sit earlier crowded out the best one.
+
+    Found in a real conversation: "eye palming" returned five rows that merely
+    said "eyes" and not palming_eye_rest, which matches both words and sits at
+    row 48. The agent searched, was told truthfully that nothing like it
+    existed, and added a duplicate. Same shape as the find_measures recency
+    bug -- a window over a list in insertion order, mistaken for a selection.
+    """
+    import csv
+
+    from tools.measures import MEASURE_COLUMNS, search_measures_by_words
+
+    rows = [
+        ("eyes_closed", "recover", "Close your eyes for a moment.", "exhausted", "minutes", "user"),
+        ("eyes_away", "recover", "Look away and rest your eyes.", "exhausted", "minutes", "user"),
+        ("eyes_blink", "recover", "Blink slowly with your eyes soft.", "exhausted", "minutes", "user"),
+        ("eyes_drop", "recover", "Let your eyes drop shut briefly.", "exhausted", "minutes", "user"),
+        ("eyes_rest", "recover", "Give your eyes a rest from the screen.", "exhausted", "minutes", "user"),
+        ("palming_eye_rest", "recover", "Cup your palms over closed eyes.", "exhausted", "minutes", "user"),
+    ]
+    with measures_file.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        writer.writerows(rows)
+
+    found = [r["measure_id"] for r in search_measures_by_words("eye palming", measures_file)]
+
+    assert found[0] == "palming_eye_rest", found
+
+
+def test_a_single_word_query_still_finds_its_row(measures_file):
+    """Ranking must not cost the plain case anything."""
+    from tools.measures import search_measures_by_words
+
+    assert [r["measure_id"] for r in search_measures_by_words("walk", measures_file)] == ["short_walk"]
