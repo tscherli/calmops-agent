@@ -9,6 +9,8 @@ import pytest
 from agent.prompts import (
     ASK_GOAL_AGAIN,
     CARD_RULES,
+    DEBATE_PROMPT,
+    FEEDBACK_PROMPT,
     LIST_SEARCH_RULE,
     SEARCH_INSTRUCTION,
     STATION_BASE,
@@ -95,8 +97,16 @@ def test_a_found_measure_is_not_offered_again(station):
     assert LIST_SEARCH_RULE in STATION_PROMPTS[station]
 
 
-def test_the_debate_does_not_offer_to_add_what_is_already_there():
-    assert "If it is already there, don't offer to add it again" in debate_prompt("go for a walk")
+def test_the_debate_does_not_add_what_is_already_there():
+    """Reworded 2026-09-26 after the rule failed in a real conversation. It
+    used to read "don't offer to add it again" -- a ban with no next action,
+    while the closing bullet still said to call add_measure once the user
+    decided to keep the idea. The model followed the instruction it had and
+    wrote a second copy. The rule now names what to do instead."""
+    rendered = debate_prompt("go for a walk")
+
+    assert "there is nothing to add" in rendered
+    assert "Never write a second copy of it under a different id" in rendered
 
 
 def test_the_ask_station_forbids_inferring_the_users_own_readings():
@@ -277,3 +287,71 @@ def test_the_internal_goal_names_never_reach_the_user_facing_texts():
         assert "calm_now" not in text
         assert "plan_recovery" not in text
         assert "change_situation" not in text
+
+
+# -- a chosen suggestion is not an idea of the user's own ---------------------
+
+
+def test_choosing_a_suggestion_is_not_an_idea_of_their_own():
+    """The `debate` station has add_measure and no log_checkin, so anything
+    routed there can only write by adding a measure. A user picking one of the
+    two measures just offered got read as bringing an idea; three turns later
+    "you can save it" became add_measure, because in that station it could not
+    become anything else.
+
+    Fixing this at the routing edge rather than by giving `debate` a log tool:
+    what a station is not given, it cannot do, and widening it would cost more
+    than the misread it prevents.
+    """
+    assert "not an idea of their own" in FEEDBACK_PROMPT
+    assert "logging question" in FEEDBACK_PROMPT
+
+
+def test_an_idea_already_in_the_list_has_a_next_action_not_only_a_ban():
+    """A prohibition is not an instruction -- the stage-54 finding, again. The
+    old rule said "don't offer to add it again" and left the turn with nothing
+    to do, while the closing bullet still said to call add_measure when the
+    user decides to keep it. The model followed the instruction it had."""
+    assert "there is nothing to add" in DEBATE_PROMPT
+    assert 'idea_decided "try"' in DEBATE_PROMPT
+    assert "only when it is not already in their list" in DEBATE_PROMPT
+
+
+def test_the_debate_station_still_cannot_log():
+    """The fix must not become "give debate a log tool". The read/write split
+    per station is the guarantee; the idea gets closed and the next turn logs."""
+    from agent.graph import build_agent
+
+    from tests.conftest import StubChatModel
+
+    agent = build_agent(model=StubChatModel(responses=[]))
+    assert "log_checkin" not in agent.station_tools["debate"]
+    assert "log_checkin" in agent.station_tools["follow_up"]
+
+
+def test_every_station_that_can_add_is_told_to_look_first():
+    """The rule the whole duplicate bug came down to.
+
+    Both list-check rules used to fire only "if they ask", so nothing gated
+    adding on looking: the agent wrote a second copy of a measure already in
+    the list without ever calling search_measures. Stated per station rather
+    than once, because the property that matters is "no station can add
+    blind" -- a new station with add_measure and no rule would reopen it.
+    """
+    from agent.graph import build_agent
+
+    from tests.conftest import StubChatModel
+
+    agent = build_agent(model=StubChatModel(responses=[]))
+    can_add = [s for s, tools in agent.station_tools.items() if "add_measure" in tools]
+    assert can_add, "no station can add a measure -- this test is checking nothing"
+
+    for station in can_add:
+        prompt = STATION_PROMPTS.get(station) or debate_prompt("go for a walk")
+        assert "search_measures" in prompt, station
+        assert "before" in prompt and "add" in prompt, station
+
+
+def test_the_shared_rule_says_to_look_even_when_nobody_asked():
+    assert "Look before you add, every time" in LIST_SEARCH_RULE
+    assert "even when nobody asked" in LIST_SEARCH_RULE

@@ -459,11 +459,22 @@ def test_the_result_carries_the_rows_and_whether_a_write_happened(tmp_path):
 
 def test_a_case_records_no_cost_unless_the_runner_asks(tmp_path):
     """Writing was the default once, and every test that drove a case left a
-    record in evals/results/. The runner decides; run_case does not."""
+    record in evals/results/. The runner decides; run_case does not.
+
+    Asserted as "this call did not touch it" rather than "the file does not
+    exist": the file legitimately appears the first time the suite is run for
+    real, and a test that goes red because someone ran the suite is a test
+    that gets muted rather than read.
+    """
+    from evals.target import EVAL_RUNS_LOG
+
+    before = EVAL_RUNS_LOG.read_bytes() if EVAL_RUNS_LOG.exists() else None
+
     run_case({"turns": ["hello"]}, agent_graph=_StubGraph(),
              log_path=tmp_path / "log.csv", measures_path=tmp_path / "m.csv")
 
-    assert not (Path("evals") / "results" / "eval-runs.jsonl").exists()
+    after = EVAL_RUNS_LOG.read_bytes() if EVAL_RUNS_LOG.exists() else None
+    assert after == before
 
 
 def test_the_eval_cost_record_is_not_the_apps(tmp_path):

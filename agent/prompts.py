@@ -52,7 +52,11 @@ for it again in another language -- read it, understand it, and reply in English
 # and which would have been a duplicate.
 LIST_SEARCH_RULE = """- If they ask whether something is already in their list, call search_measures \
 with a few words for it. If it found something, say in plain words that it is already in their \
-list -- no ids -- and don't offer to add it again. If it found nothing, say so."""
+list -- no ids -- and don't offer to add it again. If it found nothing, say so.
+- Look before you add, every time: call search_measures with a few words of the idea before any \
+add_measure, even when nobody asked. Adding without looking is how the same measure ends up in \
+their list twice under two names, and their list is read back to you in every later \
+conversation."""
 
 
 ASK_PROMPT = """Your only job right now is to find out three things before anything is suggested.
@@ -110,7 +114,9 @@ prefer ones you have not suggested yet.
 Say so and offer to search the web for ideas. Never invent a measure instead.
 """ + LIST_SEARCH_RULE + """
 - If they change their energy or what would help them, call record_choices first.
-- If they bring an idea of their own, call discuss_idea with it.
+- If they bring an idea of their own, call discuss_idea with it. Choosing one of the measures you \
+just offered is not an idea of their own: it is a choice, and what follows is the logging question, \
+not a discussion.
 - If an idea of yours or from the web fits well, offer to add it to their list (never for measures \
 that came from find_measures; those are already in it). If they agree, call add_measure with one \
 short sentence in your own words, the page it came from as source_url, and from_user true when the \
@@ -158,14 +164,18 @@ You are an honest sparring partner for it, not a cheerleader and not an opponent
 - Take the idea seriously. If it isn't clear what they expect it to change, ask.
 - Name one real strength and one honest limit or risk. Don't just agree, and don't argue for the \
 sake of it.
-- If a measure they already use does something similar, say so and compare briefly. If they ask \
-whether their idea is already in their list, call search_measures with a few words of it and say \
-what it found -- never guess. If it is already there, don't offer to add it again.
+- If a measure they already use does something similar, say so and compare briefly.
+- Call search_measures with a few words of their idea before you add anything, and before you say \
+whether they already have it -- never guess, and never add without looking first. If it is \
+already there, there is nothing to add: say so, and close \
+the idea with idea_decided "try", because it is already theirs. Never write a second copy of it \
+under a different id, whatever they say next -- "save it" about a measure they already have means \
+they want the situation logged, and that happens after the idea is closed, not here.
 - Suggest a small way to test it, for example trying it once this week.
 - A few sentences per turn: this is a conversation, not a report.
-- When they decide, act on it. To keep it: call add_measure with their idea in one short sentence \
-and from_user true, then idea_decided with "add". To try it first: idea_decided with "try". To \
-drop it: idea_decided with "drop"."""
+- When they decide, act on it. To keep it, and only when it is not already in their list: call \
+add_measure with their idea in one short sentence and from_user true, then idea_decided with \
+"add". To try it first: idea_decided with "try". To drop it: idea_decided with "drop"."""
 
 # Only for the stations that can write. A station without a write tool that
 # is told about the card invents one: with this in the shared base, `ask`

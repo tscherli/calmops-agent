@@ -266,6 +266,13 @@ def suggestion_not_helpful(
 def discuss_idea(idea: str, tool_call_id: Annotated[str, InjectedToolCallId]) -> Command:
     """Call this when the user brings an idea of their own for what could help.
 
+    Not for a measure you just offered them. Choosing one of your suggestions
+    is a choice, not a new idea, and sending it here has a cost that is not
+    obvious: this station has no log_checkin, so "save it" once the
+    conversation is in it can only become add_measure -- which is how a
+    measure the agent had just called "already on your list" got written a
+    second time under a different id.
+
     idea: their idea in one short sentence, close to their own words.
     """
     return state_tool_reply(
