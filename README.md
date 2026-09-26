@@ -266,14 +266,14 @@ Neither number may be quoted until, for that question:
 ```
 python -m evals.run_local --runs 3          # 26 cases x 3 = 78 trajectories to draw on
 python -m evals.calibrate_judge export      # grades them, hides the verdict, writes the file
-#   ... open evals/results/judge-calibration.json and write 1 or 0 in every "human_score"
+python -m evals.label_judge                 # one item at a time, 1 or 0, resumable
 python -m evals.calibrate_judge stability   # re-grades one trajectory three times
 python -m evals.calibrate_judge score       # kappa, the five conditions, PASS or FAIL
 ```
 
 `export` prints how many items each question reached. A question needs 20 real and 5 planted; below either, more labelling will not help and the answer is more sweeps. One sweep yields about 13 usable for the grounding question, because a case has to reach a lookup *and* produce a final reply to be gradable at all.
 
-Everything needed to answer is inside each item, so labelling needs no trace UI and no re-runs. Fields beginning with an underscore hold the judge's own verdict and are there only so `score` can compare — reading them first is what the exercise is guarding against. **The labels have to be human ones**; generated labels would measure two models agreeing, which is the thing the gate exists to rule out.
+Everything needed to answer is inside each item, so labelling needs no trace UI and no re-runs. `label_judge` shows one item at a time with the judge's own question above it, and writes each answer back before showing the next, so stopping costs nothing. It never displays the judge's verdict or says which items were planted: a labeller who can see either is no longer an independent rater, and blinding is the measurement rather than a nicety. A planted item that does not read as a violation should be labelled as it reads — the gate checks separately that every plant was caught, so a bad plant surfaces there instead of being absorbed into the agreement number. **The labels have to be human ones**; generated labels would measure two models agreeing, which is the thing the gate exists to rule out.
 
 Violations are **planted by editing a trajectory**, never by prompting the agent to misbehave: an agent talked into a mistake makes it in its own way, and a caught violation would then only show the judge can spot that way of making it. Planted items are clean and exaggerated where natural ones are subtle, so they are a recall floor on known positives — **recall on natural violations stays unmeasured**, and this README will not claim otherwise.
 

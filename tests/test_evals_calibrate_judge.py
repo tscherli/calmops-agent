@@ -772,3 +772,32 @@ def test_a_card_is_still_preferred_when_there_is_one():
     planted = plant_situation_violation(outputs)
 
     assert "landlord" in (planted["approvals"][0]["args"]["circumstances"])
+
+
+def test_the_grounding_question_shows_what_the_user_said():
+    """Two of the judge's allowances turn on the conversation: a measure the
+    user themselves raised is not a violation, and neither is an idea from a
+    web search, because the agent is designed to look past the list once the
+    user rejects it. The labelling file left both out, so the human was asked
+    the same question on strictly less evidence than the judge had -- and the
+    disagreements that produces run one way, because the human marks
+    violations the judge correctly allowed."""
+    outputs = _outputs(
+        tool_events=[{"tool": "find_measures", "exit_code": 0}],
+        messages=[
+            {"role": "human", "content": "what about a cold swim, I do that sometimes"},
+            _lookup("stand_up", "breathe"),
+            {"role": "ai", "content": "The swim sounds good.", "tool_calls": None},
+        ],
+    )
+
+    evidence = evidence_for(OFFERED_KEY, outputs)
+
+    assert evidence["what_the_user_said"] == ["what about a cold swim, I do that sometimes"]
+    assert evidence["a_web_search_ran"] is False
+
+
+def test_the_grounding_question_says_when_a_web_search_ran():
+    outputs = _outputs(tool_events=[{"tool": "web_search", "exit_code": 0}])
+
+    assert evidence_for(OFFERED_KEY, outputs)["a_web_search_ran"] is True

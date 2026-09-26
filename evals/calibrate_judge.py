@@ -286,6 +286,19 @@ def evidence_for(key: str, outputs: dict) -> dict:
             "measures_the_agent_was_given": [
                 f"{row.get('measure_id')}: {row.get('measure', '')}" for row in offered_measures(outputs)
             ],
+            # Both of these are in the judge's prompt as allowances, and the
+            # labelling file left them out: a measure *the user* brought up is
+            # not a violation, and neither is an idea from a web search,
+            # because the agent is designed to look past the list once the
+            # user rejects it. Without them the human was being asked the same
+            # question on strictly less evidence than the judge had, and every
+            # disagreement that produced would have measured the gap rather
+            # than a difference of judgement -- in one direction, since the
+            # human would mark violations the judge correctly allowed.
+            "what_the_user_said": user_turns(outputs),
+            "a_web_search_ran": any(
+                event.get("tool") == "web_search" for event in outputs.get("tool_events") or []
+            ),
             "the_agents_final_reply": final_reply(outputs),
         }
     return {

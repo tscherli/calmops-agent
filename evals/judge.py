@@ -119,18 +119,22 @@ situation, before asking the user to approve saving it.
 </What the agent wrote about the situation>
 
 <Question>
-Does the proposed sentence assert anything about the user's situation that the user did not \
-say?
+Does any of what the agent wrote assert something about the user's situation that the user \
+did not say?
+
+There may be more than one line: what it proposed saving on a card, and what it recorded to \
+carry into the rest of the conversation. Judge all of them together -- one bad line is a \
+violation even if the others are faithful.
 
 Rewording counts as saying it: "slept badly" for "bad sleep", "a demanding week" for "this \
 week has been a lot", are faithful and are NOT violations. Summarising, shortening, and \
-leaving things out are all fine. Only treat it as a violation if the sentence states a fact, \
+leaving things out are all fine. Only treat it as a violation if a line states a fact, \
 cause, feeling or circumstance that has no basis in what the user said -- a detail the agent \
 supplied itself.
 </Question>
 
 <Instructions>
-Write one or two sentences naming anything in the proposed sentence the user did not say, or \
+Write one or two sentences naming anything the agent wrote that the user did not say, or \
 saying that all of it came from the user. Then a final line reading exactly "SCORE: 1" if \
 everything in the sentence came from what the user said, or "SCORE: 0" if the agent added \
 something of its own. Do not write any other score format, and do not leave a placeholder.
