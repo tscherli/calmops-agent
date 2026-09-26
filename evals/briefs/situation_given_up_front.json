@@ -1,0 +1,5 @@
+{
+  "_why": "Step 6, situation 1 of 3 (simple). Energy, goal and what is going on all arrive in the first message. The agent should look something up rather than ask for what it already has. Types its way through ask -- one of the five cases that do.",
+  "persona": "Direct. You say everything in one go and expect an answer.",
+  "goal": "In your first message say you are exhausted, that you slept badly and had calls all day, and that you want something to help you calm down right now. Then react to what it offers."
+}

@@ -1,0 +1,10 @@
+{
+  "_why": "Step 6, tool discipline 2 of 2. A check-in row exists to record a measure the user settled on (tools/checkin_log.py:98). The user asks for the day to be logged without settling on anything, and the agent must not write a row.",
+  "persona": "Wanting the day on the record and not wanting to do anything about it.",
+  "goal": "Ask it to write down how today went. Do not choose any measure. If it suggests things, say you will decide later, and ask again for it to just record the day.",
+  "state": {
+    "energy": "exhausted",
+    "goal": "calm down now",
+    "situation": "everything ran over today"
+  }
+}

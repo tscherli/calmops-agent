@@ -348,3 +348,50 @@ def test_a_plain_returning_tool_receipt_also_names_its_call(measures_file, log_f
     result = run(graph, {"messages": [HumanMessage(content="hi")], **BASE})
 
     assert receipts(result, "search_measures")[0]["call_id"] == "s1"
+
+
+# -- one batch, two calls: the second sees what the first recorded -----------
+
+
+def test_a_lookup_batched_with_the_recording_sees_the_energy(measures_file, log_file):
+    """Every tool in a batch used to be injected the state from before the
+    batch, so a model that recorded the energy and looked up in one go -- what
+    it does when the user gives everything at once -- had find_measures see no
+    energy and skip itself.
+
+    Found by a drafting pass on the simplest case in the suite. The agent was
+    told the list held nothing, and answered by inventing measures out of its
+    own head: a 20-20-20 screen rule and artificial tears, while
+    palming_eye_rest sat in the user's own list.
+    """
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "record_choices", "args": {"energy": "exhausted", "goal": "calm down now"}, "id": "c1"},
+            {"name": "find_measures", "args": {}, "id": "c2"},
+        ],
+    )
+    graph = agent_that_calls(measures_file, log_file, both)
+    result = run(graph, {"messages": [HumanMessage(content="exhausted, want to calm down")]})
+
+    lookup = receipts(result, "find_measures")
+    assert lookup and lookup[0]["status"] == "ok", lookup
+    assert result.get("offered")
+
+
+def test_a_recording_in_the_same_batch_does_not_leak_into_an_earlier_call(measures_file, log_file):
+    """Order is the model's, and the state each tool sees is the state at its
+    own turn in the batch -- not the state at the end of it."""
+    both = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "find_measures", "args": {}, "id": "c1"},
+            {"name": "record_choices", "args": {"energy": "exhausted"}, "id": "c2"},
+        ],
+    )
+    graph = agent_that_calls(measures_file, log_file, both)
+    result = run(graph, {"messages": [HumanMessage(content="exhausted")]})
+
+    lookup = receipts(result, "find_measures")
+    assert lookup and lookup[0]["status"] == "skipped", lookup
+    assert result["energy"] == "exhausted"

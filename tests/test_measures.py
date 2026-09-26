@@ -139,6 +139,33 @@ def test_find_measures_records_what_it_showed(measures_file):
     assert command.update["messages"][0].name == "find_measures"
 
 
+def test_a_second_lookup_does_not_carry_a_second_copy_of_the_slice(measures_file):
+    """Every call appended the whole slice, so a conversation with three
+    lookups carried three copies of it -- 90 ids for the widest slice, in a
+    field the client serializes into every payload and sends back. Nothing
+    reads the contents (routing only asks whether it is empty), which is why
+    the growth was invisible rather than harmless."""
+    tool = make_find_measures(measures_file)
+    state = {"energy": "wired", "goal": "calm down now", "offered": []}
+    first = _call(tool, {}, state=state).update["offered"]
+    second = _call(tool, {}, state={**state, "offered": first}).update["offered"]
+
+    assert second == first
+
+
+def test_a_later_lookup_still_adds_what_the_earlier_one_missed(measures_file):
+    """Deduplicating must not turn the field into a snapshot of the first
+    lookup: a second slice brings ids the first one never held."""
+    tool = make_find_measures(measures_file)
+    first = _call(tool, {}, state={"energy": "wired", "goal": "calm down now", "offered": []}).update["offered"]
+    second = _call(
+        tool, {}, state={"energy": "calm", "goal": "calm down now", "offered": first}
+    ).update["offered"]
+
+    assert set(first) < set(second)
+    assert second[: len(first)] == first
+
+
 def test_find_measures_without_an_energy_is_skipped_not_guessed(measures_file):
     command = _call(make_find_measures(measures_file), {}, state={"offered": []})
     message = command.update["messages"][0]

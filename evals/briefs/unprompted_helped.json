@@ -1,0 +1,12 @@
+{
+  "_why": "Step 6, light check-in 2 of 3. The user rates something nobody asked about. A row for that measure is already waiting for a rating, which is the state a real second conversation is in: the check-in was logged last time and the rating was not. route_start sends a rating straight to follow_up, the only station with log_checkin. First draft seeded nothing, and the rating was structurally unloggable -- the turn reached `ask`, which cannot log, and the agent answered 'give it a try' to someone who had already tried it.",
+  "persona": "Coming back later in the day, pleased that something worked.",
+  "goal": "Open by saying the breathing thing you tried earlier actually helped. Nobody asked. If it asks how much it helped, say it helped. Answer anything else briefly.",
+  "seed_entries": [
+    {
+      "energy": "wired",
+      "circumstances": "back to back calls all morning",
+      "measure_id": "deep_breaths"
+    }
+  ]
+}

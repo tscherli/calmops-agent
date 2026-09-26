@@ -28,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+from agent.graph import CARRIED_FIELDS
 from evals.create_dataset import DATASET_PATH, load_case_ids, load_cases
 from evals.expectations import EXPECT_FIELDS
 from evals.target import seed_measures
@@ -133,6 +134,68 @@ def assert_every_case_has_the_same_shape(cases: list[dict]) -> None:
             assert field in EXPECT_FIELDS, f"{case_id}: unknown expect field {field!r}"
 
 
+def _opens_from_a_payload(case: dict) -> bool:
+    """Does the case set conversation state on its first turn?
+
+    The payload shortcut: a case may hand the graph any of CARRIED_FIELDS on
+    turn one, the way a client hands over what its buttons collected. It is
+    not a shortcut past the agent -- it is the state a real conversation would
+    be in at that point -- but a suite made only of these never runs the
+    asking flow at all.
+    """
+    first = (case.get("turns") or [None])[0]
+    return isinstance(first, dict) and any(field in first for field in CARRIED_FIELDS)
+
+
+def _asserts_a_write(case: dict) -> bool:
+    expect = case.get("expect") or {}
+    if expect.get("reached_write") is True:
+        return True
+    rows = expect.get("log_rows")
+    if isinstance(rows, dict) and rows.get("count"):
+        return True
+    return bool(expect.get("measures_added"))
+
+
+def assert_a_write_assertion_can_be_reached(cases: list[dict]) -> None:
+    """A case asserting a write must be able to get to one.
+
+    Energy, goal and situation have to be recorded, the list looked up, a
+    measure settled on and a card approved. A one-turn case asserting a write
+    cannot pass, and would sit red forever for a reason that has nothing to do
+    with the agent -- which is worse than no case, because it trains everyone
+    to ignore a red line.
+    """
+    for case in cases:
+        if not _asserts_a_write(case):
+            continue
+        turns = case.get("turns") or []
+        assert _opens_from_a_payload(case) or len(turns) >= 4, (
+            f"{case['id']}: asserts a write from {len(turns)} typed turns and no opening "
+            "state. Set what the conversation already knows on the first turn, or give it "
+            "the turns it needs to get there."
+        )
+
+
+# The asking flow is what Step 1 changed, and the payload shortcut is cheaper
+# than typing, so without a floor the cheap option quietly eats the suite.
+# Crisis cases do not count: the gate returns before any agent turn, so they
+# exercise nothing of `ask` however they open.
+MIN_CASES_THROUGH_ASK = 4
+
+
+def assert_enough_cases_type_their_way_through_ask(cases: list[dict]) -> None:
+    typed = [
+        case["id"]
+        for case in cases
+        if not _opens_from_a_payload(case) and case.get("category") != "crisis"
+    ]
+    assert len(typed) >= MIN_CASES_THROUGH_ASK, (
+        f"only {len(typed)} cases type their way in ({typed}); the asking flow needs at "
+        f"least {MIN_CASES_THROUGH_ASK}"
+    )
+
+
 def assert_ids_are_unique_and_registered(cases: list[dict], registry: tuple[set, set]) -> None:
     """Ids key every run-to-run comparison, so one has to mean the same case
     forever. An unregistered id fails; a retired one reused fails."""
@@ -187,6 +250,8 @@ def test_the_real_dataset_obeys_every_rule():
     assert_pinned_measures_exist_and_are_forced(cases)
     assert_every_case_has_the_same_shape(cases)
     assert_ids_are_unique_and_registered(cases, load_case_ids())
+    assert_a_write_assertion_can_be_reached(cases)
+    assert_enough_cases_type_their_way_through_ask(cases)
 
 
 @pytest.mark.skipif(not CHECKIN_LOG_PATH.exists(), reason="no personal check-in log on this machine")
@@ -356,3 +421,101 @@ def test_covers_must_be_a_list_not_a_sentence():
     a time everywhere it is used."""
     with pytest.raises(AssertionError, match="must be a list"):
         assert_every_case_has_the_same_shape([_case(covers="LOG_PROMPT: asks before logging")])
+
+
+def test_a_one_turn_case_asserting_a_write_fails():
+    """It cannot pass: energy, goal and situation have to be recorded, the
+    list looked up, a measure settled on and a card approved. Red forever for
+    a reason that has nothing to do with the agent."""
+    with pytest.raises(AssertionError, match="asserts a write"):
+        assert_a_write_assertion_can_be_reached([_case(expect={"reached_write": True})])
+
+
+def test_a_one_turn_case_asserting_a_write_passes_if_it_opens_mid_conversation():
+    case = _case(
+        turns=[{"text": "log that one", "energy": "exhausted", "goal": "calm down now",
+                "situation": "long week", "step": "follow_up"}],
+        expect={"reached_write": True},
+    )
+    assert_a_write_assertion_can_be_reached([case])
+
+
+def test_four_typed_turns_are_enough_to_reach_a_write():
+    case = _case(turns=["exhausted", "calm down now", "long week", "yes save it"],
+                 expect={"reached_write": True})
+    assert_a_write_assertion_can_be_reached([case])
+
+
+def test_a_case_asserting_no_write_needs_no_turns_to_reach_one():
+    assert_a_write_assertion_can_be_reached([_case(expect={"reached_write": False})])
+
+
+def test_a_suite_that_never_types_its_way_in_fails():
+    """The payload shortcut is cheaper than typing, so without a floor it
+    quietly eats the suite -- and the asking flow is what Step 1 changed."""
+    opener = {"text": "something quick", "energy": "exhausted", "goal": "calm down now"}
+    cases = [_case(id=f"simple_example_{n}", turns=[opener]) for n in range(6)]
+
+    with pytest.raises(AssertionError, match="type their way in"):
+        assert_enough_cases_type_their_way_through_ask(cases)
+
+
+def test_crisis_cases_do_not_count_towards_the_asking_flow():
+    """The gate returns before any agent turn, so a crisis case exercises
+    nothing of `ask` however it opens."""
+    cases = [_case(id=f"hard_crisis_{n}", category="crisis") for n in range(6)]
+
+    with pytest.raises(AssertionError, match="type their way in"):
+        assert_enough_cases_type_their_way_through_ask(cases)
+
+
+def test_four_typed_cases_satisfy_the_floor():
+    cases = [_case(id=f"simple_example_{n}") for n in range(4)]
+    assert_enough_cases_type_their_way_through_ask(cases)
+
+
+# -- the suite has to cover the graph ----------------------------------------
+
+
+def _graph_nodes() -> set[str]:
+    from langchain_core.messages import AIMessage
+
+    from agent.graph import build_agent
+    from tests.conftest import StubChatModel
+
+    graph = build_agent(model=StubChatModel(responses=[AIMessage(content="")]))
+    return {node for node in graph.get_graph().nodes if not node.startswith("__")}
+
+
+def assert_every_graph_node_is_reached(cases: list[dict]) -> None:
+    """Every node must be named in some case's `reaches`.
+
+    `covers` is a claim written by hand and nothing checks it; `reaches` is
+    graded against the node path the harness read back from the checkpointer,
+    so a case naming a node it never enters goes red. That makes the union of
+    those claims a real statement about coverage.
+
+    Until 2026-09-26 nothing in the dataset reached `debate` or `close_idea`
+    at all, and nobody could have told from the file: several cases mentioned
+    the debate station in prose.
+    """
+    claimed = {
+        node
+        for case in cases
+        for node in ((case.get("expect") or {}).get("reaches") or [])
+    }
+    missing = sorted(_graph_nodes() - claimed)
+    assert not missing, (
+        f"no case asserts it reaches {missing}. Either a case gets there and says so, "
+        "or the node is untested by this suite and that should be a deliberate, "
+        "written-down decision rather than an oversight."
+    )
+
+
+def test_the_real_dataset_covers_every_graph_node():
+    assert_every_graph_node_is_reached(load_cases())
+
+
+def test_a_suite_that_never_reaches_a_node_fails():
+    with pytest.raises(AssertionError, match="no case asserts it reaches"):
+        assert_every_graph_node_is_reached([_case(expect={"reaches": ["ask"]})])

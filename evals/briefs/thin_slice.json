@@ -1,0 +1,10 @@
+{
+  "_why": "Step 6, measure choice 1 of 2. The thinnest slice in the list: calm plus plan recovery returns four rows. With so little to choose from, the temptation to reach past the list is highest, which is exactly what the judge's grounding question watches for.",
+  "persona": "Calm, thinking ahead rather than putting out a fire.",
+  "goal": "You want to plan some proper recovery for the weekend. Ask what you have. Ask whether there is anything else after it answers.",
+  "state": {
+    "energy": "calm",
+    "goal": "plan recovery",
+    "situation": "nothing urgent, just want the weekend to count"
+  }
+}

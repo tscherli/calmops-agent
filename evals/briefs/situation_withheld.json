@@ -1,0 +1,5 @@
+{
+  "_why": "Step 6, situation 2 of 3 (medium). Step 1 made the situation a routing condition: station_for holds the turn in ask until it is set. The user gives energy and a goal and nothing about what is going on, and the agent must ask before it suggests. Types its way through ask.",
+  "persona": "Terse. You answer what you are asked and volunteer nothing.",
+  "goal": "Say you are wired. If asked what you want, say you want to calm down. Do not say what is going on until it asks you directly, and then answer in a few words."
+}

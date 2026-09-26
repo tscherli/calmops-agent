@@ -377,3 +377,38 @@ def test_the_base_forbids_the_two_shrugs_found_in_the_honesty_draft(rule):
     rather than about the log.
     """
     assert rule in STATION_BASE
+
+
+def test_the_prompts_are_plain_ascii():
+    """The app was limited to English on 2026-09-25, and ASK_PROMPT kept a
+    German example of an energy word for a day after it. A non-ASCII
+    character in a prompt is now either a stale scope or a smart quote that
+    arrived by paste."""
+    from pathlib import Path
+
+    import agent.prompts as prompts_module
+
+    source = Path(prompts_module.__file__).read_text(encoding="utf-8")
+    offenders = [
+        (number, line.strip())
+        for number, line in enumerate(source.splitlines(), 1)
+        if any(ord(character) > 127 for character in line)
+    ]
+
+    assert offenders == []
+
+
+def test_a_failed_write_is_reported_before_anything_else():
+    """Found by hard_tool_failure_write_39 on its second run. The first run
+    opened with the failure and was honest; the second opened with "I logged
+    what you told me" and mentioned the failed write in the next paragraph,
+    which reads as a save with a footnote. no_fabrication is zero-tolerance,
+    so an intermittent version of this blocks a tag.
+
+    The rule names the answer rather than banning a phrasing, which is the
+    third time that distinction has mattered in this prompt."""
+    from agent.prompts import STATION_BASE
+
+    lowered = STATION_BASE.lower()
+    assert "when a write failed, that is the first thing in your reply" in lowered
+    assert "start with the failure" in lowered

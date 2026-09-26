@@ -168,6 +168,29 @@ def _decision_for(request: dict, approval: str, edit_text: str) -> dict:
     return {"type": "approve"}
 
 
+def _nodes_run(graph: Any, config: dict) -> list[str]:
+    """Which graph nodes ran on this turn, in order.
+
+    Read back from the checkpointer rather than recorded by the graph: each
+    snapshot's `next` names the node about to run, so the history read
+    oldest-first is the path taken. Nothing in agent/ has to know an eval is
+    happening, which is the point -- a `visited` channel on State would be a
+    production field that exists only for the suite.
+
+    Silent on a graph that cannot answer: tests inject stubs with no
+    checkpointer, and a case must not fail because of how it was driven.
+    """
+    try:
+        return [
+            node
+            for snapshot in reversed(list(graph.get_state_history(config)))
+            for node in snapshot.next
+            if not node.startswith("__")
+        ]
+    except Exception:
+        return []
+
+
 def _result(
     transcript: list[BaseMessage],
     tool_events: list[dict],
@@ -175,6 +198,7 @@ def _result(
     log_path: Path,
     measures_path: Path,
     measures_before: set[str],
+    nodes_run: list[str] | None = None,
 ) -> dict:
     """What a case reports, whichever way the turn loop ended.
 
@@ -198,6 +222,10 @@ def _result(
         "reached_write": any(
             e.get("tool") in WRITE_TOOLS and e.get("exit_code") == 0 for e in tool_events
         ),
+        # Every node the case actually ran, first-seen order. The suite claims
+        # to cover the graph; this is what turns that claim into something a
+        # test can check, per case and across the dataset.
+        "nodes_run": list(dict.fromkeys(nodes_run or [])),
     }
 
 
@@ -271,6 +299,10 @@ def run_case(
     # that drives a case append a record to the repo, which is how this was
     # first written and what the untracked file it left behind showed.
     recorder = RunRecorder(log_path=runs_log) if runs_log else None
+    # Which nodes ran, accumulated across turns. A case reaching `debate` on
+    # its third turn has reached it, and the union over the dataset is what
+    # tests/test_evals_dataset.py checks the graph against.
+    nodes_run: list[str] = []
 
     for turn in inputs["turns"]:
         turn_text, extra = (turn, {}) if isinstance(turn, str) else (turn["text"], dict(turn))
@@ -285,7 +317,10 @@ def run_case(
             # looked something up or wrote a row, and a case about that is
             # ungradable if the rows and cards vanish at the gate.
             return {
-                **_result(transcript, tool_events, approvals, log_path, measures_path, measures_before),
+                **_result(
+                    transcript, tool_events, approvals, log_path, measures_path,
+                    measures_before, nodes_run,
+                ),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
             }
@@ -327,6 +362,7 @@ def run_case(
         transcript.append(HumanMessage(content=turn_text))
         transcript.extend(produced)
 
+        nodes_run.extend(_nodes_run(graph, config))
         tool_events.extend(result.get("tool_events") or [])
         if recorder is not None:
             try:
@@ -338,5 +374,6 @@ def run_case(
                 pass
         state = next_turn_state(result)
 
-    return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before),
+    return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before,
+                      nodes_run),
             "crisis_intercepted": False}

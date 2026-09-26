@@ -247,3 +247,172 @@ def test_what_the_tools_did_still_comes_back_for_the_author(paths):
 
     assert [t["name"] for t in result["tools"]] == ["find_measures"]
     assert [e["who"] for e in result["conversation"]] == ["user", "agent"]
+
+
+# -- opening mid-conversation ------------------------------------------------
+
+
+def test_a_brief_may_open_from_a_payload_set_state(paths):
+    """Most Step 6 cases start with energy and goal already set, the way a
+    client sets them from its buttons. A pass that always started cold would
+    draft turns answering questions the case never asks."""
+    graph = _StubGraph()
+    brief = {**BRIEF, "state": {"energy": "exhausted", "goal": "calm down now"}}
+
+    draft(brief, author=_StubAuthor("need something quick"), agent_graph=graph, turns=1, **paths)
+
+    assert graph.calls[0]["energy"] == "exhausted"
+    assert graph.calls[0]["goal"] == "calm down now"
+
+
+def test_the_opening_state_is_not_re_sent_on_later_turns(paths):
+    """A case sets the payload on its first turn only; everything after that
+    is carried by next_turn_state. Re-applying the brief every turn would hide
+    a graph that had dropped the field, and the drafted turns would make sense
+    against a state the app never produces."""
+    graph = _StubGraph()
+    brief = {**BRIEF, "state": {"energy": "exhausted"}}
+
+    draft(brief, author=_StubAuthor("one", "two"), agent_graph=graph, turns=2, **paths)
+
+    assert graph.calls[0]["energy"] == "exhausted"
+    assert graph.calls[1].get("energy") != "exhausted"
+
+
+def test_the_drafter_is_told_what_the_app_already_knows(paths):
+    """Otherwise it opens by announcing an energy the app already has, and the
+    frozen turns read as a non-sequitur to whoever finds the case later."""
+    author = _StubAuthor("need something quick")
+    brief = {**BRIEF, "state": {"energy": "exhausted", "situation": "slept badly"}}
+
+    draft(brief, author=author, agent_graph=_StubGraph(), turns=1, **paths)
+
+    assert "exhausted" in author.prompts[0]
+    assert "slept badly" in author.prompts[0]
+
+
+def test_a_cold_brief_says_so_rather_than_leaving_the_block_empty(paths):
+    author = _StubAuthor("hi")
+
+    draft(BRIEF, author=author, agent_graph=_StubGraph(), turns=1, **paths)
+
+    assert "Nothing yet. This is the first thing you have said today." in author.prompts[0]
+
+
+def test_a_brief_cannot_open_from_a_field_no_client_carries(tmp_path):
+    """`mood` was a real field once. A brief setting one the graph does not
+    carry would play from a state the case can never reproduce, and the turns
+    would be drafted against a conversation that never happened."""
+    path = tmp_path / "brief.json"
+    path.write_text(json.dumps({**BRIEF, "state": {"mood": "grim"}}), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="mood"):
+        load_brief(path)
+
+
+def test_a_brief_may_open_from_any_field_a_client_carries(tmp_path):
+    path = tmp_path / "brief.json"
+    path.write_text(
+        json.dumps({**BRIEF, "state": {"energy": "wired", "step": "follow_up"}}), encoding="utf-8"
+    )
+
+    assert load_brief(path)["state"]["step"] == "follow_up"
+
+
+# -- the approval card, which the person sees and the transcript does not ----
+
+
+class _CardGraph(_StubGraph):
+    """Pauses on a card the first time it is called, like a real write."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.resumed = []
+
+    def invoke(self, payload, config=None):
+        from langgraph.types import Command
+
+        if isinstance(payload, Command):
+            self.resumed.append(payload.resume)
+            return {"messages": [AIMessage(content="Done.")], "complete": False}
+        self.calls.append(payload)
+        return {
+            "messages": list(payload["messages"]),
+            "__interrupt__": [
+                type("I", (), {"value": {"action_requests": [
+                    {"id": "call_1", "tool": "log_checkin", "description": "Log: slept badly."}
+                ]}})()
+            ],
+        }
+
+
+def test_the_drafter_is_shown_the_card_the_person_saw(paths):
+    """A card stops the conversation and asks a yes/no question. A drafter
+    that cannot see it writes the next turn as though nothing was proposed."""
+    author = _StubAuthor("save that", "ok")
+
+    draft(BRIEF, author=author, agent_graph=_CardGraph(), turns=2, **paths)
+
+    assert "Log: slept badly." in author.prompts[1]
+    assert "You confirmed it." in author.prompts[1]
+
+
+def test_a_brief_may_decline_the_card(paths):
+    """A case about what the agent says AFTER a rejected card cannot be
+    drafted from a pass that approved it: the turns would answer a reply the
+    case never produces."""
+    graph = _CardGraph()
+    author = _StubAuthor("save that", "did you save it?")
+
+    draft({**BRIEF, "approval": "reject"}, author=author, agent_graph=graph, turns=2, **paths)
+
+    assert graph.resumed[0]["decisions"][0]["type"] == "reject"
+    assert "You declined it." in author.prompts[1]
+
+
+def test_a_misspelled_approval_is_refused(tmp_path):
+    """An unrecognised value falls through to approve, which is the one
+    outcome a brief about a declined card must not silently get."""
+    path = tmp_path / "brief.json"
+    path.write_text(json.dumps({**BRIEF, "approval": "rejected"}), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="rejected"):
+        load_brief(path)
+
+
+def test_a_brief_may_play_against_a_write_that_really_fails(tmp_path, monkeypatch):
+    """Drafted over a working log, every turn after the write answers a
+    success the case will never produce."""
+    seen = {}
+
+    def _fake_unwritable():
+        seen["used"] = True
+        return tmp_path / "blocked" / "checkin_log.csv"
+
+    monkeypatch.setattr(draft_module, "_unwritable_log_path", _fake_unwritable)
+
+    draft(
+        {**BRIEF, "simulate_write_failure": True},
+        author=_StubAuthor("log it"),
+        agent_graph=_StubGraph(),
+        turns=1,
+        measures_path=tmp_path / "measures.csv",
+    )
+
+    assert seen.get("used")
+
+
+def test_a_brief_may_seed_the_log(tmp_path):
+    """A rating case needs a check-in already waiting to be rated."""
+    log_path = tmp_path / "log.csv"
+
+    draft(
+        {**BRIEF, "seed_entries": [{"energy": "wired", "measure_id": "deep_breaths"}]},
+        author=_StubAuthor("that one helped"),
+        agent_graph=_StubGraph(),
+        turns=1,
+        log_path=log_path,
+        measures_path=tmp_path / "measures.csv",
+    )
+
+    assert "deep_breaths" in log_path.read_text(encoding="utf-8")

@@ -1,0 +1,5 @@
+{
+  "_why": "Step 6, the fourth negative case the authoring rule requires: no suggestion for someone who said they only wanted to say it out loud. FEEDBACK_PROMPT carries that rule and nothing tests it. It passes by the agent not acting. Types its way through ask.",
+  "persona": "Angry about a meeting and not looking for a fix.",
+  "goal": "Say what happened in the meeting. Say clearly that you do not want suggestions, you just want to say it. If it offers anything anyway, say no thanks and repeat that you just wanted to get it out."
+}

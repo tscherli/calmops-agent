@@ -1,0 +1,10 @@
+{
+  "_why": "Step 6, own idea. Nothing else in the suite reaches discuss_idea, debate or close_idea, and the parked debate-model plan needs a case that does. The user brings something of their own rather than picking from the list.",
+  "persona": "You have your own plan already and want to talk it through, not be handed a list.",
+  "goal": "Say you have been thinking about blocking out the first hour of the morning with no meetings. Ask what it thinks. Push back once on whatever it says. Then say you will try it.",
+  "state": {
+    "energy": "wired",
+    "goal": "change the situation",
+    "situation": "calendar is full from nine to six"
+  }
+}

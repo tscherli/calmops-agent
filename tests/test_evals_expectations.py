@@ -486,3 +486,58 @@ def test_the_lookup_check_refuses_to_guess_which_list_was_used():
 
     assert _scores(results) == {"expect_lookup_rows": False}
     assert "which measure list" in results[0]["comment"]
+
+
+# -- reaches: which graph nodes the case actually ran ------------------------
+
+
+def test_a_case_that_reached_the_node_it_names_passes():
+    result = check_expectations({"nodes_run": ["ask", "tools", "suggest"]}, {"reaches": ["suggest"]})
+
+    assert result == [{"key": "expect_reaches", "score": True}]
+
+
+def test_a_case_that_never_reached_the_node_fails():
+    """Nothing in the dataset reached `debate` or `close_idea` on 2026-09-26,
+    while several cases named them. A covers line is a claim; this is the
+    check."""
+    result = check_expectations({"nodes_run": ["ask", "tools"]}, {"reaches": ["debate"]})
+
+    assert result[0]["score"] is False
+    assert "debate" in result[0]["comment"]
+
+
+def test_passing_through_other_nodes_is_not_a_failure():
+    """A subset check, like tools_called. A case about `debate` should not
+    fail because the turn before it went through `suggest`."""
+    result = check_expectations(
+        {"nodes_run": ["ask", "suggest", "debate", "close_idea"]}, {"reaches": ["debate"]}
+    )
+
+    assert result[0]["score"] is True
+
+
+def test_a_harness_that_recorded_no_path_scores_nothing():
+    """A stub graph with no checkpointer answers nothing, and a case must not
+    fail on how it was driven."""
+    result = check_expectations({}, {"reaches": ["debate"]})
+
+    assert result[0]["score"] is None
+
+
+def test_a_known_field_given_the_wrong_shape_fails_loudly():
+    """It used to raise out of check_expectations, and the runner caught it a
+    level up: the case reported no assertions at all -- a dash in every
+    column, reading as "nothing to check" rather than "this case is broken".
+    Two cases sat like that until a report was read carefully."""
+    result = check_expectations({"messages": []}, {"lookup_rows": "full_slice"})
+
+    assert result[0]["key"] == "expect_schema"
+    assert result[0]["score"] is False
+    assert "lookup_rows" in result[0]["comment"]
+
+
+def test_a_well_formed_block_is_untouched_by_the_guard():
+    result = check_expectations({"reached_write": True}, {"reached_write": True})
+
+    assert result == [{"key": "expect_reached_write", "score": True}]

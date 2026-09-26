@@ -46,9 +46,16 @@ load_dotenv()
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from agent.common import message_text
-from agent.graph import next_turn_state
+from agent.graph import CARRIED_FIELDS, next_turn_state
 from agent.safety import screen_for_crisis
-from evals.target import _isolated_log_path, _isolated_measures_path, build_eval_graph, seed_measures
+from evals.target import (
+    _isolated_log_path,
+    _isolated_measures_path,
+    _unwritable_log_path,
+    build_eval_graph,
+    seed_log,
+    seed_measures,
+)
 
 # The drafter. Pro rather than the judge's flash tier: writing a person who is
 # terse, changes their mind and says no is the one job here where capability
@@ -82,6 +89,10 @@ You are NOT the assistant. You write only what the person types.
 <What you want from this conversation>
 {goal}
 </What you want from this conversation>
+
+<What the app already knows about you>
+{known}
+</What the app already knows about you>
 
 <Measures that exist in your own list>
 These are things you wrote down previously. You may refer to them the way a person refers to their \
@@ -125,6 +136,21 @@ def load_brief(path: Path) -> dict:
             f"{path}: a brief describes a person, not a test. Remove {sorted(leaked)} -- "
             "those are written by hand after reading the transcript."
         )
+    approval = brief.get("approval", "approve")
+    if approval not in ("approve", "reject", "edit"):
+        raise SystemExit(
+            f"{path}: approval must be approve, reject or edit -- {approval!r} is none of them, "
+            "and an unrecognised value silently approves, which is the one outcome a brief "
+            "about a declined card must not get."
+        )
+    unknown = set(brief.get("state") or {}) - set(CARRIED_FIELDS)
+    if unknown:
+        raise SystemExit(
+            f"{path}: {sorted(unknown)} is not carried between turns. A brief may set only "
+            f"{list(CARRIED_FIELDS)}, because that is what a client puts in the payload; "
+            "anything else is silently ignored by the graph and the pass would play from a "
+            "state the case can never reproduce."
+        )
     return brief
 
 
@@ -150,6 +176,42 @@ def _reject_assertions(text: str) -> str:
 
 def _format_measures(rows: list[dict]) -> str:
     return "\n".join(f"- {r['measure_id']}: {r['measure']}" for r in rows) or "- (nothing yet)"
+
+
+def _card_line(request: dict, approval: str) -> str:
+    """The approval card, as the person saw it.
+
+    A card is an interrupt rather than a message, so nothing in the transcript
+    shows it. But it is the most visible thing that happens in the app -- the
+    conversation stops and asks a yes/no question -- and a drafter that cannot
+    see it writes the next turn as though nothing had been proposed. Rendering
+    it is also the only way the drafter learns that a rejected card was
+    rejected.
+    """
+    verb = {"reject": "declined it", "edit": "edited the wording and confirmed"}.get(
+        approval, "confirmed it"
+    )
+    return f"[a card asked you to confirm: {request.get('description', '')}] You {verb}."
+
+
+def _describe_state(state: dict) -> str:
+    """What the app already knows, told to the drafter in the person's own terms.
+
+    A brief may open the pass mid-conversation, the way a case opens with
+    `energy` and `goal` in its first turn (the payload shortcut,
+    agent/graph.py:512). Without telling the drafter, the pass plays from a
+    state the person is unaware of: it writes an opening message that answers
+    a question already answered, and the frozen turns read as a non-sequitur
+    to anyone who later reads the case.
+    """
+    labels = {
+        "energy": "Your energy today, which you have already given it:",
+        "goal": "What you said you want from today:",
+        "situation": "What you already told it is going on:",
+        "idea": "An idea of your own you have already put forward:",
+    }
+    lines = [f"- {labels[key]} {state[key]}" for key in labels if state.get(key)]
+    return "\n".join(lines) or "Nothing yet. This is the first thing you have said today."
 
 
 def _is_user_visible(message: BaseMessage) -> bool:
@@ -199,10 +261,19 @@ def draft(
     transcript is for reading while the `expect` block is written; only the
     turns go into the dataset.
     """
-    log_path = log_path or _isolated_log_path()
+    # The same switch a case carries (evals/target.py:237). A brief about what
+    # the agent says when a write fails has to play against a write that really
+    # fails: drafted over a working log, every turn after the write answers a
+    # success the case will never produce.
+    if log_path is None:
+        log_path = (
+            _unwritable_log_path() if brief.get("simulate_write_failure") else _isolated_log_path()
+        )
     measures_path = measures_path or _isolated_measures_path()
     if brief.get("seed_measures"):
         seed_measures(brief["seed_measures"], measures_path)
+    if brief.get("seed_entries"):
+        seed_log(brief["seed_entries"], log_path)
 
     author = author if author is not None else build_author()
     graph = agent_graph if agent_graph is not None else build_eval_graph(log_path, measures_path)
@@ -217,7 +288,13 @@ def draft(
 
     from evals.target import _decision_for
 
-    state: dict[str, Any] = {"messages": []}
+    # The payload shortcut, the same one a case's first turn uses: whatever the
+    # brief sets is carried into the first invoke and then maintained by
+    # next_turn_state, so the pass plays from the state the case will start in.
+    opening_state = {key: value for key, value in (brief.get("state") or {}).items()}
+    approval = str(brief.get("approval") or "approve")
+    edit_text = str(brief.get("edit_text") or "")
+    state: dict[str, Any] = {"messages": [], **opening_state}
     transcript: list[BaseMessage] = []
     user_turns: list[str] = []
 
@@ -225,6 +302,7 @@ def draft(
         prompt = PERSONA_PROMPT.format(
             persona=brief["persona"],
             goal=brief["goal"],
+            known=_describe_state(opening_state),
             measures=measures,
             transcript=_format_transcript(transcript),
         )
@@ -243,10 +321,14 @@ def draft(
         result = graph.invoke({**state, "messages": messages_before}, config)
         while result.get("__interrupt__"):
             requests = result["__interrupt__"][0].value["action_requests"]
-            # Drafting approves everything. What the user does with a card is
-            # the case's decision, written by hand afterwards; refusing here
-            # would end most conversations before they reach a write.
-            decisions = [{"id": r["id"], **_decision_for(r, "approve", "")} for r in requests]
+            # Drafting approves by default. What the user does with a card is
+            # the case's decision, and refusing everywhere would end most
+            # conversations before they reach a write. A brief may say
+            # otherwise, because a case about what the agent says *after* a
+            # rejected card cannot be drafted from a pass that approved it:
+            # the turns would answer a reply the case never produces.
+            decisions = [{"id": r["id"], **_decision_for(r, approval, edit_text)} for r in requests]
+            transcript.extend(AIMessage(content=_card_line(r, approval)) for r in requests)
             result = graph.invoke(Command(resume={"decisions": decisions}), config)
 
         produced = result["messages"][len(messages_before):]

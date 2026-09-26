@@ -1,0 +1,5 @@
+{
+  "_why": "Step 6, situation 3 of 3 (hard). 'Rather not say' is an answer, not a gap, and the declined value exists so the agent moves on instead of asking again. A case about not looping. Types its way through ask.",
+  "persona": "Willing to be helped, unwilling to talk about why.",
+  "goal": "Say you are exhausted and want to calm down. When it asks what is going on, say you would rather not get into it. If it asks again, say so again, more shortly."
+}

@@ -36,6 +36,7 @@ EXPECT_FIELDS = frozenset(
         "pending_ratings_at_end",
         "measures_added",
         "reached_write",
+        "reaches",
     }
 )
 
@@ -247,6 +248,30 @@ def _check_reached_write(outputs: dict, wanted: bool) -> dict:
     )
 
 
+def _check_reaches(outputs: dict, wanted: list) -> dict:
+    """Did the case actually run these graph nodes?
+
+    A subset check, like tools_called: a case about `debate` should not fail
+    because the turn before it passed through `suggest`. Scores None when the
+    harness could not say -- a stub graph with no checkpointer answers nothing,
+    and a case must not fail on how it was driven.
+
+    This is what makes "the suite covers the graph" a property rather than a
+    resolution. Without it a case can name `close_idea` in its `covers` line
+    and never come near it, which is the state the whole dataset was in on
+    2026-09-26: nothing reached `debate` or `close_idea` at all.
+    """
+    ran = outputs.get("nodes_run")
+    if ran is None:
+        return _feedback("reaches", None, "the harness recorded no node path for this case")
+    missing = [node for node in wanted if node not in ran]
+    return _feedback(
+        "reaches",
+        not missing,
+        None if not missing else f"never reached {missing}; ran {list(ran)}",
+    )
+
+
 _CHECKS = {
     "tools_called": _check_tools_called,
     "tools_not_called": _check_tools_not_called,
@@ -256,6 +281,7 @@ _CHECKS = {
     "pending_ratings_at_end": _check_pending_ratings,
     "measures_added": _check_measures_added,
     "reached_write": _check_reached_write,
+    "reaches": _check_reaches,
 }
 
 
@@ -268,7 +294,18 @@ def check_expectations(outputs: dict, expect: dict | None) -> list[dict]:
         if field not in _CHECKS:
             results.append(_feedback("schema", False, f"unknown expect field: {field!r}"))
             continue
-        results.append(_CHECKS[field](outputs, value))
+        try:
+            results.append(_CHECKS[field](outputs, value))
+        except Exception as exc:  # noqa: BLE001 - a bad field must not void the block
+            # A known field given the wrong shape used to raise out of here,
+            # and the runner caught it one level up: the case reported no
+            # assertions at all, as a dash in every column, and read as
+            # "nothing to check" rather than "this case is broken". Two cases
+            # sat like that on 2026-09-26 because the plan's shorthand
+            # (lookup_rows: "full_slice") was never the shape the check takes.
+            results.append(
+                _feedback("schema", False, f"expect field {field!r} is malformed: {exc}")
+            )
     return results
 
 

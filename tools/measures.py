@@ -247,12 +247,18 @@ def make_find_measures(path: Path | str | None = None):
         detail = f"{len(found)} measures" if found else "nothing in the list for this"
         if not goal:
             detail += " (any goal)"
+        # Deduplicated, in first-seen order. Every call appends the whole
+        # slice, so three lookups in one conversation carried three copies of
+        # it -- 90 ids for the widest slice, in a field the client serializes
+        # into every payload and sends back. Nothing reads the contents today
+        # (routing only asks whether it is empty), which is why the growth was
+        # invisible rather than harmless.
         return _reply(
             as_tool_content(found),
             tool_call_id,
             "find_measures",
             detail=detail,
-            offered=offered + [m["measure_id"] for m in found],
+            offered=list(dict.fromkeys(offered + [m["measure_id"] for m in found])),
         )
 
     return find_measures

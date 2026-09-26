@@ -175,7 +175,7 @@ class State(TypedDict, total=False):
     energy: Energy | None
     goal: Goal | None
     situation: str | None       # what is going on, in the user's words, or DECLINED
-    offered: list[str]          # measure ids already shown in this conversation
+    offered: list[str]          # every measure id the lookup returned, not the two shown
     rejections: int             # suggestions rejected in a row
     step: Station | None        # the active station
     idea: str | None            # an idea of the user's, while it is discussed
@@ -865,7 +865,14 @@ def build_agent(
                 events.append(tool_event(name or "unknown", "error", "unknown tool", call_id=call_id))
                 continue
             try:
-                result = _invoke_tool(target, call, state)
+                # The state as of the calls already run in this batch, not as
+                # of the turn. A model that records the energy and looks up in
+                # one go -- which is what it does when the user gives
+                # everything at once -- had the lookup injected the state from
+                # before the recording, so find_measures saw no energy and
+                # skipped itself. The agent then had an empty result and
+                # invented measures out of its own head.
+                result = _invoke_tool(target, call, {**state, **update})
             except Exception as exc:  # noqa: BLE001 - a broken tool must not end the turn
                 outputs.append(
                     ToolMessage(

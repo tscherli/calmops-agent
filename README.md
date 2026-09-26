@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.12.0`) — not evaluated yet.** The station architecture is built and covered by 682 tests, but the eval suite is **mid-rebuild**: the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`, and `evals/dataset.jsonl` currently holds 6 of a planned 26. There are **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> 🚧 **Pre-release (`v0.12.0`) — not evaluated yet.** The station architecture is built and covered by 758 tests, and `evals/dataset.jsonl` now holds all 26 cases of the rebuilt suite (the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`). There are still **no valid quality numbers for this version**: each case has been run once, not the three times the threshold needs, and the baseline comparison has not been made. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -218,7 +218,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **The dataset is mid-rebuild.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds 6 crisis cases of a planned 26. The commands below work, and what they report is true of those 6; it is not yet a picture of the agent.
+> **The dataset is rebuilt but not yet measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 23 in the regression tier, which must pass, and 3 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. Every case has been run once while it was written. The commands below work; a single run of each is not yet a picture of the agent, because the threshold is a pass in 2 of 3 runs and the baseline has not been run at all.
 
 **With LangSmith:**
 
@@ -288,7 +288,7 @@ For values rather than names, use the debugger: `.vscode/launch.json` has a conf
 
 ## Results & limitations
 
-**Current state: pre-release. 682 passing tests, and no valid eval numbers.**
+**Current state: pre-release. 758 passing tests, a complete 26-case dataset, and no valid eval numbers yet.**
 
 The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
