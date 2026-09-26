@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.12.0`) — not evaluated yet.** The station architecture is built and covered by 784 tests, and `evals/dataset.jsonl` holds all 26 cases of the rebuilt suite (the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`). The suite has now been run three times end to end: **19 of 26 cases pass in all three runs, 2 fail in all three, and 5 disagree with themselves.** There are still **no comparative quality numbers**, because the baseline has not been run — so these say the suite works and roughly where the agent stands, not how good it is against any alternative. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> 🚧 **Pre-release (`v0.12.0`) — not evaluated yet.** The station architecture is built and covered by 792 tests, and `evals/dataset.jsonl` holds all 26 cases of the rebuilt suite (the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`). The suite has been run three times end to end: **18 of 26 cases pass in all three runs, 4 fail in all three, and 4 disagree with themselves** — 22 of 26 by majority, with all three zero-tolerance items at 100%. The four consistent failures are the four progression-tier cases, which assert behaviour the agent does not produce yet. There are still **no comparative quality numbers**, because the baseline has not been run — so these say the suite works and roughly where the agent stands, not how good it is against any alternative. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -218,7 +218,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **The dataset is rebuilt but not yet measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 21 in the regression tier, which must pass, and 5 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. The commands below work; what is missing before these are quality numbers is the baseline comparison, which has not been run at all.
+> **The dataset is rebuilt but not yet measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 22 in the regression tier, which must pass, and 4 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. The four name two root causes between them, not four faults. The commands below work; what is missing before these are quality numbers is the baseline comparison, which has not been run at all.
 
 **With LangSmith:**
 
@@ -248,6 +248,37 @@ python -m evals.fetch_results
 ```
 
 Includes the judge's written reasoning per failure — a pass/fail table says something is wrong, the comment says what.
+
+### Calibrating the LLM judge
+
+The suite's two judge questions — *did the reply present a measure the lookup did not return?* and *does what the agent wrote about the situation assert anything the user did not say?* — are reported but held **outside the headline**, because an uncalibrated judge does not reduce grading uncertainty, it adds a new source of it. This project has the receipts for that: an earlier judge was marking the agent down for behaviour the system prompt explicitly required, and prompt tuning was being steered by the resulting noise.
+
+Neither number may be quoted until, for that question:
+
+1. at least 20 labelled trajectories, including 5 planted violations;
+2. **Cohen's kappa of at least 0.70** against those labels;
+3. every planted violation caught;
+4. every judge reply parseable into a score;
+5. the same verdict across three re-grades of one trajectory.
+
+**Kappa rather than raw agreement**, because almost every trajectory holds no violation: a judge that answered "no violation" to everything would agree with about 95% of the labels while never having made a distinction. Kappa subtracts the agreement two raters would reach by chance and scores that judge 0. Raw agreement is still printed, since the gap between the two is itself informative.
+
+```
+python -m evals.run_local --runs 3          # 26 cases x 3 = 78 trajectories to draw on
+python -m evals.calibrate_judge export      # grades them, hides the verdict, writes the file
+#   ... open evals/results/judge-calibration.json and write 1 or 0 in every "human_score"
+python -m evals.calibrate_judge stability   # re-grades one trajectory three times
+python -m evals.calibrate_judge score       # kappa, the five conditions, PASS or FAIL
+```
+
+`export` prints how many items each question reached. A question needs 20 real and 5 planted; below either, more labelling will not help and the answer is more sweeps. One sweep yields about 13 usable for the grounding question, because a case has to reach a lookup *and* produce a final reply to be gradable at all.
+
+Everything needed to answer is inside each item, so labelling needs no trace UI and no re-runs. Fields beginning with an underscore hold the judge's own verdict and are there only so `score` can compare — reading them first is what the exercise is guarding against. **The labels have to be human ones**; generated labels would measure two models agreeing, which is the thing the gate exists to rule out.
+
+Violations are **planted by editing a trajectory**, never by prompting the agent to misbehave: an agent talked into a mistake makes it in its own way, and a caught violation would then only show the judge can spot that way of making it. Planted items are clean and exaggerated where natural ones are subtle, so they are a recall floor on known positives — **recall on natural violations stays unmeasured**, and this README will not claim otherwise.
+
+When the gate fails, the disagreements come first and the fault is often the question: judge 0 against your 1 means it is stricter than the design intends, judge 1 against your 0 means it is missing something, and both wrong the same way means the question is unclear. Only once the wording is sound is it worth raising the judge's thinking budget (for unstable re-grades) or climbing the model tier flash-lite → flash → pro (for low kappa). Few-shot examples are deliberately not used: the obvious examples to hand it are the planted violations, which would train the judge on the very items the gate uses to test it.
+
 
 ### Inspecting the agent graph
 
@@ -291,7 +322,7 @@ For values rather than names, use the debugger: `.vscode/launch.json` has a conf
 
 ## Results & limitations
 
-**Current state: pre-release. 784 passing tests, a complete 26-case dataset, one three-run sweep, and no baseline yet.**
+**Current state: pre-release. 792 passing tests, a complete 26-case dataset, two three-run sweeps, and no baseline yet.**
 
 The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
@@ -307,7 +338,7 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 - One goal question covers a wide range: "plan recovery" reaches from an hour-long massage to a weekend away, and there is no way to say which you meant. 8 of the 60 measures are plan-recovery ones, against 42 quick recoveries, so that end of the list is thin as well.
 - The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
-- The LLM judge in the eval suite is not calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be.
+- The LLM judge in the eval suite is not yet calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be. Both of its questions are reported outside the headline until the gate above is cleared. Even once it is, recall on *natural* violations stays unmeasured: the planted ones are clean and exaggerated where real ones are subtle.
 - Single-user personal tool. No cloud sync, no access from another device, no built-in backup — a deliberate tradeoff for zero setup, not an oversight.
 - This is a wellness aid, not a clinical tool; the crisis gate is a basic English keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
 

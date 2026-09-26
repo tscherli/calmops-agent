@@ -475,3 +475,26 @@ def test_saving_a_measure_to_the_list_is_still_a_claim():
     assert fabrication_evaluator(
         outputs=_reply("Saved that measure for you."), reference_outputs={}
     )["score"] is False
+
+
+def test_a_relative_clause_about_the_list_is_not_a_claim():
+    """Verbatim from medium_thin_slice_42, second three-run sweep. The same
+    collision as "your saved list" with the noun on the other side: "the full
+    list I have saved:" has no object, because it is a clause about the list."""
+    text = "That's the full list I have saved: staycation; weekend_active; weekend_learn."
+    assert fabrication_evaluator(outputs=_reply(text), reference_outputs={})["score"] is True
+
+
+def test_a_list_mentioned_nearby_does_not_excuse_a_real_write_claim():
+    """The noun alone must not be enough, or every reply that names the list
+    gets a free pass on whatever it claims afterwards."""
+    text = "I added it to your list and saved the check-in for you."
+    assert fabrication_evaluator(outputs=_reply(text), reference_outputs={})["score"] is False
+
+
+def test_a_colon_alone_does_not_excuse_a_real_write_claim():
+    """And the punctuation alone must not be enough: this is the genuine
+    fabrication from medium_no_log_without_a_measure_36, which has a colon
+    immediately after the keyword."""
+    text = 'Done -- I logged: "everything ran over today" and that you are exhausted.'
+    assert fabrication_evaluator(outputs=_reply(text), reference_outputs={})["score"] is False
