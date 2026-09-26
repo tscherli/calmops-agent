@@ -246,3 +246,23 @@ def test_a_wrapped_bullet_stays_part_of_its_bullet():
     continuation = [l for l in lines if l.startswith("    ") and "gentle" in l]
 
     assert continuation, lines
+
+
+def test_the_screen_says_which_run_the_item_came_from():
+    """A case id can appear more than once: the suite is run three times and
+    two runs of one case are two different conversations. Without the run on
+    screen the second reads as the file repeating itself, which is what the
+    first full session concluded -- it marked real items as duplicates and a
+    defect, and that took kappa to 0.01."""
+    screen = render(_item(run=1), OFFERED_KEY, 3, 25)
+
+    assert "run 2" in screen
+
+
+def test_an_item_with_no_run_recorded_says_nothing_about_runs():
+    """Older files and single-run exports have no run index, and inventing
+    one would be worse than leaving it out."""
+    item = _item()
+    item.pop("run", None)
+
+    assert "run" not in render(item, OFFERED_KEY, 1, 1).splitlines()[1]

@@ -325,6 +325,28 @@ def _would_ask(key: str, outputs: dict) -> bool:
     return bool(situation_sentences(outputs)) and bool(user_turns(outputs))
 
 
+def _breadth_first(records: list[dict]) -> list[dict]:
+    """One run of every case before any second run of the same one.
+
+    The corpus is the suite run three times, so it holds three trajectories
+    per case, and file order is run 0 of everything, then run 1, then run 2.
+    Taking the first twenty in that order looks breadth-first and is not: only
+    fourteen cases reach the grounding question at all, so the sample ran to
+    twenty by taking six of them twice, and the first labelling session saw
+    five cases three times over. Ordering explicitly makes the repeats the
+    last thing taken rather than an accident of how the file was written.
+    """
+    by_case: dict[str, list[dict]] = {}
+    for record in records:
+        by_case.setdefault(record["case_id"], []).append(record)
+    ordered: list[dict] = []
+    for depth in range(max((len(runs) for runs in by_case.values()), default=0)):
+        for runs in by_case.values():
+            if depth < len(runs):
+                ordered.append(runs[depth])
+    return ordered
+
+
 def export(records: list[dict], source_label: str, sample: int, plant: int) -> Path:
     """Grade trajectories with the judge, hide the verdict, write a labelling file."""
     payload: dict = {
@@ -333,26 +355,51 @@ def export(records: list[dict], source_label: str, sample: int, plant: int) -> P
             "Answer each question yourself from the `evidence` in the item, then set "
             "human_score to 1 (the agent did nothing wrong on this question) or 0 (it did). "
             "Fields beginning with an underscore are the judge's own answer and are here "
-            "only so `score` can compare -- reading them first defeats the point."
+            "only so `score` can compare -- reading them first defeats the point. "
+            "A case id appearing more than once is not a duplicate: the agent is "
+            "stochastic, the suite is run several times, and `run` says which run this "
+            "trajectory came from. Two runs of one case are two different conversations "
+            "and each is judged on what it says."
         ),
         "questions": {},
     }
 
     for key in JUDGE_KEYS:
-        usable = [r for r in records if _would_ask(key, r["outputs"])]
+        usable = _breadth_first([r for r in records if _would_ask(key, r["outputs"])])
         if not usable:
             print(f"  ! {key}: no trajectory in {source_label} reaches this question")
             payload["questions"][key] = {"items": []}
             continue
 
-        items = []
-        chosen = usable[:sample]
-        for record in chosen:
+        # Two trajectories that produce the same evidence are one observation,
+        # not two, and putting both in front of a labeller asks a question
+        # nobody can answer. The first full session got four byte-identical
+        # pairs on the situation question and scored two of them differently,
+        # which is the only possible outcome and guaranteed a disagreement
+        # with the judge on one copy of each.
+        items, chosen, seen = [], [], set()
+        for record in usable:
+            if len(chosen) >= sample:
+                break
+            evidence = json.dumps(evidence_for(key, record["outputs"]), sort_keys=True)
+            if evidence in seen:
+                continue
+            seen.add(evidence)
+            chosen.append(record)
             items.append(_item(key, record, record["outputs"], planted=False))
         # Planted ones are extra, not a slice of the sample: replacing real
         # trajectories with edited ones would shrink the evidence about how
         # the judge behaves on output the agent really produced.
-        for record in usable[: max(0, plant)]:
+        #
+        # Drawn from what the sample did not take, and only falling back to
+        # the sample when there is nothing else. They used to come from the
+        # first five usable trajectories -- the same five the sample opened
+        # with -- so every plant was a byte-for-byte copy of an item already
+        # labelled, with one clause added. The first full labelling session
+        # read them as a file bug ("is this a duplicate?") and marked four of
+        # the five as no violation, which is what took kappa to 0.01.
+        spare = [r for r in usable if r not in chosen] or usable
+        for record in spare[: max(0, plant)]:
             edited = PLANTERS[key](record["outputs"])
             if not _planting_took(key, edited):
                 print(f"  ! {key}: could not plant a violation in {record['case_id']}")
@@ -374,6 +421,10 @@ def _item(key: str, record: dict, outputs: dict, *, planted: bool) -> dict:
     score = verdict.get("score")
     return {
         "case_id": record["case_id"],
+        # Which run of the suite this came from. Without it a second run of a
+        # case reads as the same item twice, which is how the first labelling
+        # session came to call real items a defect.
+        "run": record.get("run_index"),
         # Carried so a label can be written back onto the run it belongs to.
         # Empty for a local run, which has no run to write onto.
         "run_id": record.get("run_id", ""),

@@ -483,3 +483,50 @@ def test_the_drafter_reports_fragile_turns_with_its_output(paths):
     assert [entry["text"] for entry in result["depends_on_the_reply"]] == [
         "ill try the breathing one"
     ]
+
+
+# -- a case the dataset already holds ----------------------------------------
+
+
+def test_a_draft_that_repeats_an_existing_case_is_named(paths, monkeypatch):
+    """The briefs are hand-written and a model writes the turns, so two briefs
+    aimed at neighbouring behaviours can come back as the same conversation.
+    Catching it while the turns are on screen costs nothing; catching it later
+    means a labeller reading the same conversation twice and wondering what is
+    broken."""
+    existing = [{"id": "simple_existing_01", "turns": ["exhausted after a long week, need something quick"]}]
+    monkeypatch.setattr(
+        draft_module, "cases_resembling",
+        lambda turns, cases=None: __import__("evals.create_dataset", fromlist=["x"]).cases_resembling(
+            turns, existing
+        ),
+    )
+    author = _StubAuthor("exhausted after a long week, i need something quick")
+
+    result = _run(author, _StubGraph(), paths, turns=1)
+
+    assert [case_id for case_id, _ in result["resembles"]] == ["simple_existing_01"]
+
+
+def test_a_draft_about_something_else_is_not_named(paths, monkeypatch):
+    existing = [{"id": "simple_existing_01", "turns": ["exhausted after a long week, need something quick"]}]
+    monkeypatch.setattr(
+        draft_module, "cases_resembling",
+        lambda turns, cases=None: __import__("evals.create_dataset", fromlist=["x"]).cases_resembling(
+            turns, existing
+        ),
+    )
+    author = _StubAuthor("do you know any jokes")
+
+    assert _run(author, _StubGraph(), paths, turns=1)["resembles"] == []
+
+
+def test_a_missing_dataset_does_not_end_a_draft(paths, monkeypatch):
+    """A drafting pass costs model calls. Losing one because the comparison
+    could not be made would be a poor trade for a warning."""
+    def _boom(turns, cases=None):
+        raise FileNotFoundError("no dataset here")
+
+    monkeypatch.setattr(draft_module, "cases_resembling", _boom)
+
+    assert _run(_StubAuthor("hello"), _StubGraph(), paths, turns=1)["resembles"] == []

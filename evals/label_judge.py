@@ -133,10 +133,17 @@ def _render_evidence(evidence: dict) -> str:
 def render(item: dict, key: str, position: int, total: int) -> str:
     """One screen. Never includes the judge's verdict or the planted flag."""
     note = item.get("human_note") or ""
+    # The run number is on the header because a case id can appear more than
+    # once: the agent is stochastic, the suite is run three times, and two
+    # runs of one case are two different conversations. Without it the second
+    # one reads as the file repeating itself, which is what the first full
+    # session concluded -- it marked real items as duplicates and a defect.
+    run = item.get("run")
+    where = f"[{item.get('case_id', '?')}]" + ("" if run is None else f" run {run + 1}")
     return "\n".join(
         [
             "=" * WIDTH,
-            f"{key}   item {position} of {total}   [{item.get('case_id', '?')}]",
+            f"{key}   item {position} of {total}   {where}",
             "=" * WIDTH,
             "",
             _render_evidence(item.get("evidence") or {}),

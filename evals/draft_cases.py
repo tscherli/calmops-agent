@@ -49,6 +49,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from agent.common import message_text
 from agent.graph import CARRIED_FIELDS, next_turn_state
 from agent.safety import screen_for_crisis
+from evals.create_dataset import cases_resembling
 from evals.target import (
     _isolated_log_path,
     _isolated_measures_path,
@@ -409,10 +410,16 @@ def draft(
         "measures_path": str(measures_path),
         "log_path": str(log_path),
     }
-    # Named last because it is the thing to read before anything is frozen.
+    # Named last because they are the things to read before anything is
+    # frozen: a turn that will not survive a replay, and a case the dataset
+    # already holds.
     result["depends_on_the_reply"] = turns_that_depend_on_the_reply(
         [(entry["who"], entry["text"]) for entry in result["conversation"]]
     )
+    try:
+        result["resembles"] = cases_resembling(user_turns)
+    except Exception:  # noqa: BLE001 - a missing dataset must not end a draft
+        result["resembles"] = []
     return result
 
 
@@ -445,6 +452,17 @@ def main() -> None:
             "  a position (\"the first one\") or to propose the thing outright. Three\n"
             "  cases in the suite had this and passed every run regardless, because an\n"
             "  expect block cannot see whether a conversation coheres."
+        )
+    resembles = result.get("resembles") or []
+    if resembles:
+        print("\n! These turns look like a case the dataset already holds:")
+        for case_id, score in resembles:
+            print(f"    {case_id}  ({score:.0%} of the same words)")
+        print(
+            "  Two cases saying the same thing are one case and a wasted sweep, and\n"
+            "  nothing downstream would notice: ids are unique, covers is free text,\n"
+            "  and both copies pass their own expect blocks. Either point this brief\n"
+            "  at something the other one does not cover, or drop it."
         )
     print(
         "\nNow by hand: read every turn, cut what the person would not say, write the expect "

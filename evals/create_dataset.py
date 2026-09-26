@@ -58,6 +58,60 @@ def load_cases(path: Path = DATASET_PATH) -> list[dict]:
     return cases
 
 
+# Two cases saying the same thing are one case and a wasted sweep, and nothing
+# else in the suite would notice: ids are unique by test, `covers` is free text
+# that six pairs already share legitimately, and both copies pass their own
+# expect blocks.
+#
+# Far above what the suite actually reaches. The closest pair is 0.29 -- the
+# two turn-one crisis cases, which say nearly the same thing on purpose, one a
+# bare statement and the other wrapping it in a disclaimer that must not
+# disable the gate. A case reworded from another scores well over 0.6.
+#
+# Lives here rather than in the test that enforces it, because the drafter
+# checks the same thing against the same number at the moment a new case is
+# written, and a threshold kept in two places is one that will differ.
+MAX_TURN_OVERLAP = 0.50
+
+
+def turn_words(turns: list) -> set[str]:
+    """Every word the user says in a case, however its turns are written."""
+    words: set[str] = set()
+    for turn in turns or []:
+        text = turn if isinstance(turn, str) else (turn or {}).get("text", "")
+        words.update(str(text).lower().split())
+    return words
+
+
+def turn_overlap(first: list, second: list) -> float:
+    """How much two cases' turns say the same thing, 0 to 1."""
+    left, right = turn_words(first), turn_words(second)
+    if not (left and right):
+        return 0.0
+    return len(left & right) / len(left | right)
+
+
+def cases_resembling(turns: list, cases: list[dict] | None = None) -> list[tuple[str, float]]:
+    """Cases in the dataset whose turns these turns look like.
+
+    For the drafter: the briefs are hand-written and a model writes the turns,
+    so two briefs aimed at neighbouring behaviours can come back as the same
+    conversation twice. Catching that while the turns are still on screen
+    costs nothing; catching it later means a labeller reading the same
+    conversation twice three weeks afterwards and wondering what is broken.
+    """
+    cases = load_cases() if cases is None else cases
+    close = [
+        (case["id"], turn_overlap(turns, case.get("turns") or []))
+        for case in cases
+    ]
+    return sorted(
+        ((case_id, score) for case_id, score in close if score >= MAX_TURN_OVERLAP),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+
+
 def case_to_example(case: dict) -> dict:
     """Convert one dataset.jsonl case into a LangSmith Example's
     inputs/outputs/metadata triple."""

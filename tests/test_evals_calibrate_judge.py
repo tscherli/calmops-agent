@@ -135,8 +135,28 @@ def stub_judge(monkeypatch):
 @pytest.fixture
 def trajectories(tmp_path):
     path = tmp_path / "trajectories.jsonl"
+    # Three *different* trajectories. They used to be three copies of one,
+    # which stopped meaning "three" the day export started collapsing
+    # identical evidence into a single item -- correctly, since two
+    # trajectories with the same evidence are one observation.
     lines = [
-        json.dumps({"case_id": f"case_{i:02d}", "category": "measure_choice", "outputs": _outputs()})
+        json.dumps(
+            {
+                "case_id": f"case_{i:02d}",
+                "category": "measure_choice",
+                "outputs": _outputs(
+                    messages=[
+                        {"role": "human", "content": f"wired after call {i}"},
+                        _lookup("stand_up", "breathe"),
+                        {"role": "ai", "content": f"Two from your list ({i}).", "tool_calls": None},
+                    ],
+                    approvals=[
+                        {"call_id": "w1", "args": {"circumstances": f"a long call {i}"},
+                         "decision": "approve"}
+                    ],
+                ),
+            }
+        )
         for i in range(3)
     ]
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -876,3 +896,106 @@ def test_the_grounding_question_says_when_a_web_search_ran():
     outputs = _outputs(tool_events=[{"tool": "web_search", "exit_code": 0}])
 
     assert evidence_for(OFFERED_KEY, outputs)["a_web_search_ran"] is True
+
+
+# -- the sample must not read as a file full of duplicates -------------------
+
+
+def _run_of(case_id, index):
+    return {
+        "case_id": case_id,
+        "run_index": index,
+        "outputs": _outputs(
+            messages=[
+                {"role": "human", "content": f"turn for {case_id} run {index}"},
+                _lookup("stand_up", "breathe"),
+                {"role": "ai", "content": f"reply {index}", "tool_calls": None},
+            ]
+        ),
+    }
+
+
+@pytest.fixture
+def offline_judge(monkeypatch):
+    """No network in the test suite. `export` grades every item it writes, and
+    two of the tests below call it, so without this they spend a minute and a
+    handful of Gemini calls to check how a list was ordered."""
+    monkeypatch.setattr(
+        calib,
+        "QUESTIONS",
+        {key: (lambda outputs, _k=key: {"key": _k, "score": 1, "comment": "stub"})
+         for key in calib.JUDGE_KEYS},
+    )
+
+
+def test_one_run_of_every_case_comes_before_any_second_run():
+    """File order is run 0 of everything, then run 1, then run 2, which looks
+    breadth-first and is not once a question only reaches some cases. The
+    first labelling session saw five cases three times over."""
+    records = [_run_of("a", 0), _run_of("a", 1), _run_of("b", 0), _run_of("b", 1)]
+
+    ordered = calib._breadth_first(records)
+
+    assert [(r["case_id"], r["run_index"]) for r in ordered] == [
+        ("a", 0), ("b", 0), ("a", 1), ("b", 1)
+    ]
+
+
+def test_the_item_says_which_run_it_came_from():
+    """Without it a second run of a case reads as the same item twice."""
+    item = calib._item(OFFERED_KEY, _run_of("a", 2), _run_of("a", 2)["outputs"], planted=False)
+
+    assert item["run"] == 2
+
+
+def test_a_plant_is_not_a_copy_of_something_already_in_the_sample(monkeypatch, offline_judge):
+    """Plants used to come from the first five usable trajectories -- the same
+    five the sample opened with -- so each was a byte-for-byte copy of an item
+    already labelled, with one clause added. The session read them as a file
+    bug and marked four of five as no violation, which is what took kappa to
+    0.01."""
+    monkeypatch.setattr(calib, "LABEL_PATH", calib.RESULTS_DIR / "test-labels.json")
+    records = [_run_of(f"case_{n:02d}", 0) for n in range(8)]
+
+    calib.export(records, "test", sample=5, plant=2)
+
+    payload = json.loads(calib.LABEL_PATH.read_text(encoding="utf-8"))
+    items = payload["questions"][OFFERED_KEY]["items"]
+    sampled = {i["case_id"] for i in items if not i["_planted"]}
+    planted = {i["case_id"] for i in items if i["_planted"]}
+
+    assert planted and not (planted & sampled)
+    calib.LABEL_PATH.unlink()
+
+
+def test_plants_fall_back_to_the_sample_when_there_is_nothing_spare(monkeypatch, offline_judge):
+    """A small corpus must still produce plants; better a duplicate than no
+    planted violation, because the gate fails outright without them."""
+    monkeypatch.setattr(calib, "LABEL_PATH", calib.RESULTS_DIR / "test-labels2.json")
+    records = [_run_of(f"case_{n:02d}", 0) for n in range(3)]
+
+    calib.export(records, "test", sample=5, plant=2)
+
+    payload = json.loads(calib.LABEL_PATH.read_text(encoding="utf-8"))
+    items = payload["questions"][OFFERED_KEY]["items"]
+
+    assert sum(1 for i in items if i["_planted"]) == 2
+    calib.LABEL_PATH.unlink()
+
+
+def test_two_trajectories_with_the_same_evidence_yield_one_item(monkeypatch, offline_judge):
+    """Two trajectories producing identical evidence are one observation, not
+    two. The first full session got four byte-identical pairs on the situation
+    question and scored two of them differently -- the only possible outcome,
+    and a guaranteed disagreement with the judge on one copy of each."""
+    monkeypatch.setattr(calib, "LABEL_PATH", calib.RESULTS_DIR / "test-labels3.json")
+    twin = _run_of("case_a", 0)
+    same_again = {**_run_of("case_a", 1), "outputs": twin["outputs"]}
+
+    calib.export([twin, same_again, _run_of("case_b", 0)], "test", sample=5, plant=0)
+
+    payload = json.loads(calib.LABEL_PATH.read_text(encoding="utf-8"))
+    items = payload["questions"][OFFERED_KEY]["items"]
+
+    assert [i["case_id"] for i in items] == ["case_a", "case_b"]
+    calib.LABEL_PATH.unlink()
