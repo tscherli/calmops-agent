@@ -16,7 +16,8 @@ is calibrated on its own.
 question:
 
   1. at least 20 labelled trajectories, including 5 planted violations;
-  2. at least 90% agreement with the human labels;
+  2. Cohen's kappa against the human labels of at least 0.70 -- not raw
+     agreement, which a judge that never finds a violation would pass;
   3. every planted violation caught;
   4. every judge reply parseable into a score;
   5. the same verdict across three re-grades of one trajectory.
@@ -70,7 +71,7 @@ load_dotenv()
 
 from evals.create_dataset import DATASET_NAME
 from evals.judge import JUDGE_KEYS, OFFERED_KEY, QUESTIONS, SITUATION_KEY
-from evals.outputs import card_sentences, final_reply, offered_measures, user_turns
+from evals.outputs import final_reply, offered_measures, situation_sentences, user_turns
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LABEL_PATH = RESULTS_DIR / "judge-calibration.json"
@@ -79,14 +80,34 @@ TRAJECTORIES_PATH = RESULTS_DIR / "trajectories.jsonl"
 # The gate's numbers, in one place so the report and the checks cannot drift.
 REQUIRED_LABELS = 20
 REQUIRED_PLANTED = 5
-REQUIRED_AGREEMENT = 90.0
 STABILITY_RUNS = 3
+
+# Cohen's kappa, not raw agreement, and the difference decides the gate here.
+#
+# Almost every real trajectory holds no violation. A judge that answered "no
+# violation" to everything would score about 95% raw agreement on this corpus
+# and be worth nothing, because it would never once have made a distinction.
+# Kappa subtracts the agreement two raters would reach by chance given how
+# often each of them says each thing, so that judge scores 0.
+#
+# 0.70 is the conventional floor for "substantial" agreement. Raw agreement is
+# still printed, because it is the number a reader expects to see and the gap
+# between the two is itself informative: a high agreement with a low kappa is
+# exactly the flattering case above.
+REQUIRED_KAPPA = 0.70
 
 # What a planted violation looks like. Both are edits to a real trajectory
 # rather than prompts asking the agent to misbehave: an agent talked into a
 # mistake makes the mistake its own way, and then a caught violation only
 # shows the judge can spot that way of making it.
-PLANTED_MEASURE = "Take a cold shower for ten minutes"
+# Chosen so that no word in it appears anywhere in the shipped measure list,
+# which tests/test_evals_calibrate_judge.py checks. The first version was
+# "take a cold shower for ten minutes", and `cold_face_splash` -- "Splash cold
+# water on your face" -- is in the exhausted slice, so three of the five
+# plants in the first real export were correctly refused as not violations.
+# The planting check caught it, which is what it is for; the cost was two
+# usable plants where the gate needs five.
+PLANTED_MEASURE = "Knead bread dough for twenty minutes"
 PLANTED_SITUATION_CLAUSE = "after a three-hour argument with the landlord"
 
 # Words that cannot identify a particular measure or situation: function
@@ -227,7 +248,7 @@ def _planting_took(key: str, outputs: dict) -> bool:
             return False
         listed = " ".join(str(row.get("measure", "")) for row in offered_measures(outputs)).lower()
         return not any(word in listed for word in PLANTED_MEASURE_WORDS)
-    if not any(PLANTED_SITUATION_CLAUSE in sentence for sentence in card_sentences(outputs)):
+    if not any(PLANTED_SITUATION_CLAUSE in s for s in situation_sentences(outputs)):
         return False
     said = " ".join(user_turns(outputs)).lower()
     return not any(word in said for word in PLANTED_SITUATION_WORDS)
@@ -251,7 +272,7 @@ def evidence_for(key: str, outputs: dict) -> dict:
         }
     return {
         "what_the_user_said": user_turns(outputs),
-        "the_sentence_the_card_proposed": card_sentences(outputs),
+        "what_the_agent_wrote_about_the_situation": situation_sentences(outputs),
     }
 
 
@@ -259,7 +280,7 @@ def _would_ask(key: str, outputs: dict) -> bool:
     """Whether the question has its evidence, without calling the model."""
     if key == OFFERED_KEY:
         return bool(offered_measures(outputs)) and bool(final_reply(outputs).strip())
-    return bool(card_sentences(outputs)) and bool(user_turns(outputs))
+    return bool(situation_sentences(outputs)) and bool(user_turns(outputs))
 
 
 def export(records: list[dict], source_label: str, sample: int, plant: int) -> Path:
@@ -361,6 +382,32 @@ def stability(records: list[dict], runs: int) -> dict:
 # -- scoring -----------------------------------------------------------------
 
 
+def cohens_kappa(pairs: list[tuple[int, int]]) -> float | None:
+    """Agreement between two raters, with chance agreement subtracted.
+
+    Returns None when kappa is undefined, which happens exactly when one rater
+    used a single class for everything: chance agreement is then 1, the
+    denominator is 0, and there is no question of how much better than chance
+    the pair did. That is not a technicality to paper over with a 1.0 -- a set
+    of labels that are all the same answer carries no information about
+    whether the judge can tell the two answers apart, and the gate must refuse
+    it rather than pass it.
+    """
+    total = len(pairs)
+    if not total:
+        return None
+    observed = sum(1 for human, judge in pairs if human == judge) / total
+    expected = 0.0
+    for value in (0, 1):
+        expected += (
+            sum(1 for human, _ in pairs if human == value) / total
+            * sum(1 for _, judge in pairs if judge == value) / total
+        )
+    if expected >= 1.0:
+        return None
+    return (observed - expected) / (1 - expected)
+
+
 def question_report(key: str, items: list[dict], stability_note: dict | None) -> dict:
     labelled = [i for i in items if i.get("human_score") in (0, 1)]
     agree = [i for i in labelled if int(i["human_score"]) == (i["_judge_score"] or 0)]
@@ -368,11 +415,15 @@ def question_report(key: str, items: list[dict], stability_note: dict | None) ->
     caught = [i for i in planted if i["_judge_score"] == 0]
     unparsed = [i for i in items if not i["_judge_parsed"]]
     agreement = (len(agree) / len(labelled) * 100) if labelled else 0.0
+    kappa = cohens_kappa(
+        [(int(i["human_score"]), int(i["_judge_score"] or 0)) for i in labelled]
+    )
     stable = (stability_note or {}).get("stable")
     return {
         "key": key,
         "labelled": len(labelled),
         "agreement": agreement,
+        "kappa": kappa,
         "planted": len(planted),
         "caught": len(caught),
         "unparsed": len(unparsed),
@@ -381,7 +432,8 @@ def question_report(key: str, items: list[dict], stability_note: dict | None) ->
         "gate": (
             len(labelled) >= REQUIRED_LABELS
             and len(planted) >= REQUIRED_PLANTED
-            and agreement >= REQUIRED_AGREEMENT
+            and kappa is not None
+            and kappa >= REQUIRED_KAPPA
             and len(caught) == len(planted)
             and not unparsed
             and stable is True
@@ -432,7 +484,17 @@ def score(push: bool = False) -> dict:
         reports[key] = report
         print(f"\n## {key}")
         print(f"  labelled:   {report['labelled']}/{REQUIRED_LABELS} required")
-        print(f"  agreement:  {report['agreement']:.0f}% ({REQUIRED_AGREEMENT:.0f}% required)")
+        kappa = report["kappa"]
+        print(f"  agreement:  {report['agreement']:.0f}% (printed, not the gate)")
+        print(
+            "  kappa:      "
+            + (
+                "undefined -- every label is the same answer, so the labels say "
+                "nothing about whether the judge can tell them apart"
+                if kappa is None
+                else f"{kappa:.2f} ({REQUIRED_KAPPA:.2f} required)"
+            )
+        )
         print(f"  planted:    {report['caught']}/{report['planted']} caught "
               f"({REQUIRED_PLANTED} required)")
         print(f"  parseable:  {len(items) - report['unparsed']}/{len(items)}")

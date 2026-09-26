@@ -33,9 +33,12 @@ re-run during calibration.
 
 **Neither number may be quoted until it is calibrated.** The gate is in
 evals/calibrate_judge.py: at least 20 labelled trajectories per question
-including 5 planted violations, at least 90% agreement with every planted
-violation caught, fully parseable output, and the same verdict across three
-re-grades of one trajectory. Until then both keys are advisory -- reported,
+including 5 planted violations, Cohen's kappa of at least 0.70 against those
+labels with every planted violation caught, fully parseable output, and the
+same verdict across three re-grades of one trajectory. Kappa rather than raw
+agreement because almost every trajectory holds no violation, and a judge
+that always answered so would agree with about 95% of the labels while
+never having made a distinction. Until then both keys are advisory -- reported,
 and deliberately outside the headline (evals/run_experiment.py).
 """
 from __future__ import annotations
@@ -44,7 +47,7 @@ import os
 
 from agentevals.trajectory.llm import create_trajectory_llm_as_judge
 
-from evals.outputs import card_sentences, final_reply, offered_measures, user_turns
+from evals.outputs import final_reply, offered_measures, situation_sentences, user_turns
 
 # Gemini by default, pinned to a flash-tier model on purpose.
 #
@@ -111,9 +114,9 @@ situation, before asking the user to approve saving it.
 {user_said}
 </Everything the user said, in order>
 
-<The sentence the agent proposed saving>
+<What the agent wrote about the situation>
 {card_sentence}
-</The sentence the agent proposed saving>
+</What the agent wrote about the situation>
 
 <Question>
 Does the proposed sentence assert anything about the user's situation that the user did not \
@@ -180,14 +183,19 @@ def grade_offered_from_the_list(outputs: dict) -> dict:
 
 
 def grade_situation_from_user_words(outputs: dict) -> dict:
-    """Did the card's sentence assert anything the user never said?
+    """Did the agent assert anything about the situation the user never said?
 
-    Graded on the card, not the written row, and skipped when no card carried
-    a sentence -- a case that never proposed one has nothing to have invented.
+    Graded on what the agent wrote rather than on the row that was saved: an
+    edit turn overwrites the row with the user's own wording, so a row can
+    look faultless after the agent proposed something they never said.
+
+    Both places count -- the card's `circumstances` and the `situation` it
+    recorded. Cards alone reached two trajectories in a full sweep of the
+    suite, which is too few to ever calibrate; see evals/outputs.py.
     """
-    sentences = card_sentences(outputs)
+    sentences = situation_sentences(outputs)
     if not sentences:
-        return _skipped(SITUATION_KEY, "no card proposed a situation sentence")
+        return _skipped(SITUATION_KEY, "the agent wrote nothing about the situation")
     said = user_turns(outputs)
     if not said:
         return _skipped(SITUATION_KEY, "no user turns to compare against")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -36,7 +37,7 @@ from evals.evaluators import (
 )
 from evals.expectations import expectation_evaluator
 from evals.judge import judge_evaluator
-from evals.run_experiment import _build_report, _write_report
+from evals.run_experiment import _build_report, _write_report, case_passed
 from evals.target import EVAL_RUNS_LOG, run_case
 
 # Where a run leaves its trajectories. Calibrating the judge means reading
@@ -44,6 +45,10 @@ from evals.target import EVAL_RUNS_LOG, run_case
 # have to be paid for again to get them back. Gitignored with the rest of
 # evals/results.
 TRAJECTORIES_LOG = EVAL_RUNS_LOG.parent / "trajectories.jsonl"
+
+# Per-case verdicts across several runs. The threshold is a pass in 2 of 3,
+# so this rather than any single report is what says whether a case holds.
+MAJORITY_PATH = EVAL_RUNS_LOG.parent / "majority.json"
 
 EVALUATORS = (
     crisis_gate_evaluator,
@@ -129,58 +134,151 @@ def evaluate_case(case: dict) -> dict:
 
 
 def _save_trajectories(rows: list[dict], path: Path) -> int:
-    """Write one line per case: the case id and everything the run produced.
+    """Write one line per case run: the case id and everything it produced.
 
-    Replaces the file rather than appending. Two runs interleaved in one file
-    would be labelled as though they came from one agent, and the judge's
-    agreement number would be measured against a mixture.
+    Replaces the file rather than appending. Two *invocations* interleaved in
+    one file would be labelled as though they came from one agent, and the
+    judge's agreement number would be measured against a mixture. Repeats
+    within one invocation are a different thing and are all kept: three runs
+    of one case are three real trajectories, and the situation question can
+    only reach twenty labels because of them.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            if not row.get("outputs"):
-                continue
-            record = {
-                "case_id": row["case_id"],
-                "category": row["category"],
-                "outputs": row["outputs"],
-            }
-            handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-            written += 1
+    lines = []
+    for row in rows:
+        if not row.get("outputs"):
+            continue
+        record = {
+            "case_id": row["case_id"],
+            "category": row["category"],
+            "outputs": row["outputs"],
+        }
+        if row.get("run_index") is not None:
+            record["run_index"] = row["run_index"]
+        lines.append(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        written += 1
+    path.write_text("".join(lines), encoding="utf-8")
+    # And a copy nobody overwrites. A seventy-eight trajectory corpus from a
+    # three-run sweep was destroyed by a two-case re-run made ten minutes
+    # later, and rebuilding it costs another sweep. The fixed name stays the
+    # newest, which is what `calibrate_judge --from` defaults to; the stamped
+    # one is what you point it at when the newest is not the one you meant.
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    (path.parent / f"{path.stem}-{stamp}{path.suffix}").write_text(
+        "".join(lines), encoding="utf-8"
+    )
     return written
+
+
+def majority(rows_by_run: list[list[dict]]) -> list[dict]:
+    """Per case: how many runs it passed, and the verdict that follows.
+
+    The threshold is a pass in at least 2 of 3 runs, so a single run is not a
+    verdict -- it is one sample of a stochastic system. What this exists to
+    surface is the *split*: a case that passed twice and failed once is the
+    one to re-run with `--case` before anyone calls it stable, and a report
+    that shows only the majority hides exactly those.
+    """
+    verdicts: dict[str, list[bool]] = {}
+    for rows in rows_by_run:
+        for row in rows:
+            verdicts.setdefault(row["case_id"], []).append(case_passed(row["scores"]))
+    summary = []
+    for case_id, results in verdicts.items():
+        passed = sum(1 for r in results if r)
+        summary.append({
+            "case_id": case_id,
+            "passed": passed,
+            "runs": len(results),
+            "verdict": passed * 2 >= len(results),
+            "split": 0 < passed < len(results),
+        })
+    return summary
+
+
+def _print_majority(summary: list[dict]) -> None:
+    runs = summary[0]["runs"] if summary else 0
+    print(f"\n## Majority over {runs} runs\n")
+    print("| case_id | passed | verdict |")
+    print("|---|---|---|")
+    for row in sorted(summary, key=lambda r: (r["verdict"], -r["passed"], r["case_id"])):
+        mark = "pass" if row["verdict"] else "FAIL"
+        split = " (split)" if row["split"] else ""
+        print(f"| {row['case_id']} | {row['passed']}/{row['runs']} | {mark}{split} |")
+    splits = [r["case_id"] for r in summary if r["split"]]
+    passing = sum(1 for r in summary if r["verdict"])
+    print(f"\nMajority pass: {passing}/{len(summary)} cases.")
+    if splits:
+        print(
+            f"{len(splits)} case(s) did not agree with themselves: {', '.join(splits)}.\n"
+            "Re-run each with --case five more times before calling it stable; a 2-1 "
+            "split is one sample of a coin, not a measurement."
+        )
+
+
+def _one_pass(cases: list[dict], workers: int) -> list[dict]:
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        rows = list(pool.map(evaluate_case, cases))
+    # Preserve dataset order regardless of completion order, so two reports
+    # are diffable line by line.
+    order = {case["id"]: i for i, case in enumerate(cases)}
+    rows.sort(key=lambda r: order.get(r["case_id"], 0))
+    return rows
 
 
 def run_local(
     cases: list[dict] | None = None,
     workers: int = DEFAULT_WORKERS,
     trajectories_log: Path | None = None,
+    runs: int = 1,
 ) -> dict:
     cases = cases if cases is not None else load_cases()
     print(f"Running {len(cases)} cases locally ({workers} workers, no LangSmith)...")
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(evaluate_case, cases))
+    rows_by_run = []
+    for index in range(runs):
+        if runs > 1:
+            print(f"\n-- run {index + 1} of {runs} --")
+        pass_rows = _one_pass(cases, workers)
+        for row in pass_rows:
+            row["run_index"] = index
+        rows_by_run.append(pass_rows)
 
-    # Preserve dataset order regardless of completion order, so two reports
-    # are diffable line by line.
-    order = {case["id"]: i for i, case in enumerate(cases)}
-    rows.sort(key=lambda r: order.get(r["case_id"], 0))
-
+    rows = rows_by_run[-1]
     report = _build_report(rows, experiment_url=None, experiment_name="local run (no LangSmith)")
     report_path = _write_report(report)
     print(report)
     print(f"\nFull report written to {report_path}")
+
+    summary = None
+    if runs > 1:
+        # The report above is one run. With several, the majority is the
+        # verdict and the single-run report is only the last sample of it.
+        summary = majority(rows_by_run)
+        _print_majority(summary)
+        MAJORITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MAJORITY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        print(f"\nPer-case verdicts written to {MAJORITY_PATH}")
+
     if trajectories_log is not None:
-        written = _save_trajectories(rows, trajectories_log)
+        written = _save_trajectories(
+            [row for pass_rows in rows_by_run for row in pass_rows], trajectories_log
+        )
         print(f"{written} trajectories saved to {trajectories_log}")
-    return {"rows": rows, "report_path": report_path}
+    return {"rows": rows, "report_path": report_path, "majority": summary}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the Job Load Agent eval suite locally")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--case", action="append", help="Run only these case ids (repeatable).")
+    parser.add_argument(
+        "--runs", type=int, default=1,
+        help="Run the whole selection this many times and report the majority. "
+             "The threshold is a pass in 2 of 3, so one run is a sample rather "
+             "than a verdict.",
+    )
     args = parser.parse_args()
 
     selected = load_cases()
@@ -191,4 +289,9 @@ if __name__ == "__main__":
         if missing:
             parser.error(f"unknown case ids: {sorted(missing)}")
 
-    run_local(selected, workers=args.workers, trajectories_log=TRAJECTORIES_LOG)
+    run_local(
+        selected,
+        workers=args.workers,
+        trajectories_log=TRAJECTORIES_LOG,
+        runs=max(1, args.runs),
+    )

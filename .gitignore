@@ -22,6 +22,8 @@ venv/
 evals/results/*.md
 # Per-case cost and latency, written by every suite run
 evals/results/*.jsonl
+# Per-case verdicts and the judge labelling file, rewritten by every run
+evals/results/*.json
 
 # Local-only dev notes (never intended for the repo)
 notes/

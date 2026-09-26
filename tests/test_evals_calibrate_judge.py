@@ -102,7 +102,7 @@ def test_the_labeller_gets_everything_needed_to_answer_offline():
 
     evidence = evidence_for(SITUATION_KEY, _outputs())
     assert evidence["what_the_user_said"] == ["wired after a long call"]
-    assert evidence["the_sentence_the_card_proposed"] == ["a long call"]
+    assert evidence["what_the_agent_wrote_about_the_situation"] == ["a long call"]
 
 
 def test_a_question_with_no_evidence_is_not_exported(monkeypatch):
@@ -273,11 +273,15 @@ def test_a_planted_measure_the_list_already_holds_is_no_violation():
     """The planted strings are constants someone may edit. If one drifts into
     something the user's list already contains, the edit plants nothing, a
     correct judge scores it 1, and the gate reads that as a miss."""
+    # Derived from the plant rather than written out beside it: the id used to
+    # be "cold_shower", tied to a plant that has since changed, and the test
+    # went green against a list that no longer collided with anything.
+    collides = "_".join(calib.PLANTED_MEASURE_WORDS)
     outputs = _outputs(
         messages=[
             {"role": "human", "content": "wired"},
-            _lookup("cold_shower"),
-            {"role": "ai", "content": "Try the shower.", "tool_calls": None},
+            _lookup(collides),
+            {"role": "ai", "content": "Try that one.", "tool_calls": None},
         ]
     )
 
@@ -532,3 +536,185 @@ def test_a_replaced_plant_is_still_checked_against_the_list(monkeypatch):
     )
 
     assert not _planting_took(OFFERED_KEY, calib.plant_offered_violation(already_has_it))
+
+
+# -- kappa, not raw agreement ------------------------------------------------
+
+
+def test_perfect_agreement_across_both_answers_is_kappa_one():
+    pairs = [(1, 1)] * 20 + [(0, 0)] * 5
+    assert calib.cohens_kappa(pairs) == pytest.approx(1.0)
+
+
+def test_a_judge_that_answers_the_same_thing_every_time_scores_zero():
+    """The whole reason the gate is kappa and not raw agreement. Almost every
+    real trajectory holds no violation, so a judge that never finds one agrees
+    with 80% of these labels while having made no distinction at all."""
+    pairs = [(1, 1)] * 20 + [(0, 1)] * 5
+
+    assert calib.cohens_kappa(pairs) == pytest.approx(0.0)
+
+
+def test_kappa_is_undefined_when_every_label_is_the_same_answer():
+    """Chance agreement is 1 and the denominator is 0. Not a technicality to
+    paper over with a 1.0: labels that are all the same answer say nothing
+    about whether the judge can tell the two answers apart."""
+    assert calib.cohens_kappa([(1, 1)] * 25) is None
+
+
+def test_kappa_with_nothing_to_compare_is_undefined():
+    assert calib.cohens_kappa([]) is None
+
+
+def test_a_flattering_agreement_does_not_clear_the_gate():
+    """Twenty-five items, the judge says "no violation" to all of them, and it
+    misses every planted one. Raw agreement is 80%, which reads well in a
+    report; kappa is 0."""
+    report = question_report(OFFERED_KEY, _items(caught=0), STABLE)
+
+    assert report["agreement"] == pytest.approx(80.0)
+    assert report["kappa"] == pytest.approx(0.0)
+    assert report["gate"] is False
+
+
+def test_the_gate_needs_kappa_even_when_everything_else_holds():
+    """Twenty labels, five planted and all caught, parseable and stable -- and
+    the labels hold only one human answer among the real items, so there is no
+    evidence the judge distinguishes anything it was not handed."""
+    items = _items(labelled=20, agreeing=20, planted=5, caught=5)
+    for item in items:
+        item["human_score"] = 1
+        item["_judge_score"] = 1
+
+    report = question_report(OFFERED_KEY, items, STABLE)
+
+    assert report["kappa"] is None
+    assert report["gate"] is False
+
+
+def test_the_report_still_carries_raw_agreement():
+    """Printed beside kappa on purpose: the gap between them is informative,
+    and a reader expects to see the number they asked for."""
+    assert question_report(OFFERED_KEY, _items(), STABLE)["agreement"] == 100.0
+
+
+def _corpus(real: int, natural_violations_missed: int, planted: int = 5) -> list[dict]:
+    """A corpus where the judge catches every planted violation and misses
+    some natural ones -- which is the case the planted items cannot see.
+
+    Planted violations are clean and exaggerated by construction; natural ones
+    are subtle. A judge can catch all five plants, agree with over 90% of the
+    labels, and still be missing most of what actually occurs.
+    """
+    items = []
+    for i in range(real):
+        human = 0 if i < natural_violations_missed else 1
+        items.append({
+            "case_id": f"real_{i:02d}", "human_score": human, "human_note": "",
+            "_planted": False, "_judge_score": 1, "_judge_parsed": True, "_judge_comment": "",
+        })
+    for i in range(planted):
+        items.append({
+            "case_id": f"planted_{i:02d}", "human_score": 0, "human_note": "",
+            "_planted": True, "_judge_score": 0, "_judge_parsed": True, "_judge_comment": "",
+        })
+    return items
+
+
+def test_kappa_alone_can_fail_a_gate_everything_else_clears():
+    """Forty real trajectories, four of them genuine violations the judge
+    missed, and all five plants caught. Agreement is 91% and every other
+    condition holds -- and the judge is still poor at the only thing that
+    matters, because the four it missed are the kind that really happen."""
+    report = question_report(OFFERED_KEY, _corpus(real=40, natural_violations_missed=4), STABLE)
+
+    assert report["agreement"] > 90
+    assert report["caught"] == report["planted"] == 5
+    assert report["unparsed"] == 0
+    assert report["kappa"] < calib.REQUIRED_KAPPA
+    assert report["gate"] is False
+
+
+def test_the_same_corpus_clears_the_gate_once_the_judge_finds_them():
+    report = question_report(OFFERED_KEY, _corpus(real=40, natural_violations_missed=0), STABLE)
+
+    assert report["kappa"] == pytest.approx(1.0)
+    assert report["gate"] is True
+
+
+# -- the planted strings must not collide with the real list -----------------
+
+
+def test_the_planted_measure_shares_no_word_with_the_shipped_list():
+    """The planting check refuses a plant whose distinctive words already
+    appear in the measures the case was given -- correctly, because such a
+    plant is not a violation. The first real export lost three of five plants
+    that way: the plant said "cold shower" and `cold_face_splash` is in the
+    exhausted slice, which almost every case looks up.
+
+    So the constraint belongs here, where changing the string fails a test,
+    rather than in a warning printed halfway through an export.
+    """
+    from tools.measures import MEASURES_PATH, read_measures
+
+    listed = " ".join(row["measure"] for row in read_measures(MEASURES_PATH)).lower()
+    collisions = [word for word in calib.PLANTED_MEASURE_WORDS if word in listed]
+
+    assert collisions == [], (
+        f"{collisions} appear in the shipped measure list, so a plant built from "
+        f"{calib.PLANTED_MEASURE!r} will be refused for any case whose lookup returns "
+        "one of those rows"
+    )
+
+
+def test_the_planted_measure_still_has_words_to_be_recognised_by():
+    """A plant made only of generic words would pass the collision check by
+    having nothing distinctive left to collide."""
+    assert len(calib.PLANTED_MEASURE_WORDS) >= 2
+
+
+def test_a_recorded_situation_is_evidence_too():
+    """Cards alone reached two trajectories in a full sweep, so the question
+    they graded could never have been calibrated: twenty labels would have
+    meant ten sweeps of the same two cases. What the agent recorded through
+    record_choices is the same kind of claim, made more often, and it is the
+    one carried into every later turn."""
+    outputs = _outputs(
+        approvals=[],
+        messages=[
+            {"role": "human", "content": "rough morning"},
+            {
+                "role": "ai",
+                "content": "",
+                "tool_calls": [
+                    {"name": "record_choices", "args": {"situation": "back to back calls"}}
+                ],
+            },
+            {"role": "ai", "content": "Two from your list.", "tool_calls": None},
+        ],
+    )
+
+    assert _would_ask(SITUATION_KEY, outputs)
+    assert evidence_for(SITUATION_KEY, outputs)[
+        "what_the_agent_wrote_about_the_situation"
+    ] == ["back to back calls"]
+
+
+def test_a_declined_situation_is_not_something_the_agent_asserted():
+    """"not given" is the value that means the user would rather not say.
+    Grading it against what they said would fail every case that respected
+    the refusal."""
+    outputs = _outputs(
+        approvals=[],
+        messages=[
+            {"role": "human", "content": "rather not get into it"},
+            {
+                "role": "ai",
+                "content": "",
+                "tool_calls": [{"name": "record_choices", "args": {"situation": "not given"}}],
+            },
+            {"role": "ai", "content": "Two from your list.", "tool_calls": None},
+        ],
+    )
+
+    assert not _would_ask(SITUATION_KEY, outputs)

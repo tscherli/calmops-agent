@@ -11,6 +11,8 @@ Nothing here judges anything. These functions only say what happened.
 """
 from __future__ import annotations
 
+from agent.graph import SITUATION_DECLINED
+
 import json
 
 
@@ -60,6 +62,42 @@ def card_sentences(outputs: dict) -> list[str]:
         if sentence:
             sentences.append(sentence)
     return sentences
+
+
+def situation_sentences(outputs: dict) -> list[str]:
+    """Every sentence the agent wrote about what is going on for the user.
+
+    Two places, and both are the agent's own words rather than the user's:
+    the `circumstances` it proposed on an approval card, and the `situation`
+    it recorded through record_choices. Either can assert something no turn
+    said, and the recorded one is the more consequential of the two -- it is
+    carried into every later turn and shapes what gets suggested, while the
+    card's only reaches the log.
+
+    Why this is not just `card_sentences`: the judge's situation question was
+    graded on cards alone, and across a full sweep of the suite exactly two
+    trajectories reached one. Twenty labels of it would have taken ten sweeps
+    of the same two cases, which is not twenty observations -- so the question
+    could never have been calibrated, and an uncalibratable question is worse
+    than a slightly broader one. Recorded situations bring it within reach.
+
+    The declined marker is not a sentence about anything: "not given" is the
+    value that means the user would rather not say, and grading it against
+    what they said would fail every case that respected the refusal.
+    """
+    sentences: list[str] = []
+    for approval in outputs.get("approvals") or []:
+        sentence = str((approval.get("args") or {}).get("circumstances") or "").strip()
+        if sentence:
+            sentences.append(sentence)
+    for message in outputs.get("messages") or []:
+        for call in message.get("tool_calls") or []:
+            if call.get("name") != "record_choices":
+                continue
+            sentence = str((call.get("args") or {}).get("situation") or "").strip()
+            if sentence and sentence.lower() != SITUATION_DECLINED:
+                sentences.append(sentence)
+    return list(dict.fromkeys(sentences))
 
 
 def user_turns(outputs: dict) -> list[str]:

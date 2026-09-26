@@ -239,3 +239,87 @@ def test_the_report_never_reads_the_trajectory_off_the_row(monkeypatch, tmp_path
     result = run_local_module.run_local([_CASE], workers=1)
 
     assert result["rows"][0]["outputs"]["crisis_intercepted"] is False
+
+
+# -- majority over several runs ----------------------------------------------
+
+
+def _row(case_id, passed):
+    """A row as evaluate_case returns it, scored so case_passed agrees."""
+    return {
+        "case_id": case_id,
+        "difficulty": "simple",
+        "category": "light_checkin",
+        "scores": {"expect_reached_write": passed},
+    }
+
+
+def test_a_case_that_passes_every_run_passes():
+    summary = run_local_module.majority(
+        [[_row("a", True)], [_row("a", True)], [_row("a", True)]]
+    )
+
+    assert summary == [
+        {"case_id": "a", "passed": 3, "runs": 3, "verdict": True, "split": False}
+    ]
+
+
+def test_two_of_three_is_a_pass_and_is_flagged_as_a_split():
+    """The threshold is a pass in 2 of 3, and a case that does not agree with
+    itself is the one to re-run -- a report showing only the majority hides
+    exactly those."""
+    summary = run_local_module.majority(
+        [[_row("a", True)], [_row("a", False)], [_row("a", True)]]
+    )
+
+    assert summary[0]["verdict"] is True
+    assert summary[0]["split"] is True
+
+
+def test_one_of_three_fails():
+    summary = run_local_module.majority(
+        [[_row("a", True)], [_row("a", False)], [_row("a", False)]]
+    )
+
+    assert summary[0]["verdict"] is False
+    assert summary[0]["split"] is True
+
+
+def test_a_single_run_still_yields_a_verdict_and_no_split():
+    summary = run_local_module.majority([[_row("a", True)]])
+
+    assert summary[0] == {
+        "case_id": "a", "passed": 1, "runs": 1, "verdict": True, "split": False
+    }
+
+
+def test_every_case_gets_its_own_row():
+    summary = run_local_module.majority(
+        [[_row("a", True), _row("b", False)], [_row("a", True), _row("b", True)]]
+    )
+
+    assert {r["case_id"] for r in summary} == {"a", "b"}
+    assert {r["runs"] for r in summary} == {2}
+
+
+def test_a_run_leaves_a_copy_nobody_overwrites(tmp_path):
+    """A seventy-eight trajectory corpus from a three-run sweep was destroyed
+    by a two-case re-run ten minutes later, and rebuilding it costs another
+    sweep. The fixed name stays the newest; the stamped copy is what survives
+    the next partial run."""
+    path = tmp_path / "trajectories.jsonl"
+    rows = [{"case_id": "a", "category": "x", "outputs": {"messages": []}, "run_index": 0}]
+
+    assert run_local_module._save_trajectories(rows, path) == 1
+
+    stamped = [p for p in tmp_path.iterdir() if p.name != "trajectories.jsonl"]
+    assert len(stamped) == 1
+    assert stamped[0].read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+
+
+def test_a_row_with_no_outputs_is_not_written(tmp_path):
+    """A case whose target raised has nothing to label."""
+    path = tmp_path / "trajectories.jsonl"
+
+    assert run_local_module._save_trajectories([{"case_id": "a", "category": "x"}], path) == 0
+    assert path.read_text(encoding="utf-8") == ""
