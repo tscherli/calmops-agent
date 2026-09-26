@@ -150,7 +150,7 @@ NOT_HELPFUL_PHRASES = (
 # shortcut costs little -- the model reads the message and can reject itself.
 NOT_HELPFUL_MAX_EXTRA_WORDS = 5
 CARRIES_MORE_WORDS = frozenset(
-    "but if since because to add log save aber wenn weil da hinzu".split()
+    "but if since because to add log save".split()
 )
 
 # How a measure that is waiting for a rating can be rated in words. A check-in
@@ -159,8 +159,8 @@ CARRIES_MORE_WORDS = frozenset(
 # routes the turn -- the model still proposes the rating and the user approves
 # it on the card.
 RATING_PHRASES: dict[str, tuple[str, ...]] = {
-    "helped": ("helped", "it worked", "that worked", "worked well", "hat geholfen"),
-    "somewhat": ("somewhat", "a bit", "a little", "partly", "so-so", "teilweise"),
+    "helped": ("helped", "it worked", "that worked", "worked well"),
+    "somewhat": ("somewhat", "a bit", "a little", "partly", "so-so"),
     "didnt_help": ("didn't help", "did not help", "didnt help", "no change", "nothing changed"),
 }
 RATING_MAX_CHARS = 40

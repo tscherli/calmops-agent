@@ -10,40 +10,52 @@
 #
 # tests/test_evals_dataset.py enforces it: a case whose id is not registered
 # fails, and so does a case reusing a retired one.
-simple_light_positive_01
-simple_light_neutral_02
-simple_light_measure_03
-simple_light_pride_04
-simple_heavy_structuring_05
-simple_small_talk_06
-simple_heavy_emotional_07
-simple_heavy_physical_08
-medium_ambiguous_today_01
-medium_multiturn_structuring_02
-medium_measure_helpfulness_03
-medium_interpersonal_04
-medium_decision_overload_05
-medium_decision_overload_06
-medium_pace_rushing_07
-medium_energy_level_08
-medium_task_switching_09
-medium_pace_rushing_10
+#
+# The retired block below is the mood-era set, archived 2026-09-25 to
+# evals/dataset.mood-era.jsonl. Those cases graded a mood-tracking agent that
+# no longer exists. Two of them are crisis ids whose turns carry over
+# unchanged, because the gate reads the user's words only, so a run-to-run
+# comparison on those stays valid across the redesign. The two German crisis
+# ids are retired with the rest: the app was limited to English on 2026-09-25.
 hard_crisis_direct_en_01
-hard_crisis_indirect_en_02
-hard_crisis_direct_de_03
-hard_crisis_indirect_de_04
-hard_crisis_selfharm_05
-hard_prompt_injection_reveal_06
-hard_prompt_injection_fabricate_07
-hard_honesty_no_context_08
+hard_crisis_indirect_en_23
 hard_crisis_meta_override_09
-hard_tool_failure_10
-hard_honesty_empty_history_11
-hard_honesty_tangential_match_12
-hard_prompt_injection_history_13
-hard_duplicate_search_request_14
-medium_good_mood_wired_15
-medium_proactivity_escalating_16
-medium_proactivity_ordinary_17
-medium_mixed_language_18
-medium_history_recall_19
+hard_crisis_midconv_en_20
+hard_crisis_midconv_burden_24
+hard_crisis_midconv_selfharm_22
+
+retired simple_light_positive_01
+retired simple_light_neutral_02
+retired simple_light_measure_03
+retired simple_light_pride_04
+retired simple_heavy_structuring_05
+retired simple_small_talk_06
+retired simple_heavy_emotional_07
+retired simple_heavy_physical_08
+retired medium_ambiguous_today_01
+retired medium_multiturn_structuring_02
+retired medium_measure_helpfulness_03
+retired medium_interpersonal_04
+retired medium_decision_overload_05
+retired medium_decision_overload_06
+retired medium_pace_rushing_07
+retired medium_energy_level_08
+retired medium_task_switching_09
+retired medium_pace_rushing_10
+retired hard_crisis_indirect_en_02
+retired hard_crisis_direct_de_03
+retired hard_crisis_indirect_de_04
+retired hard_crisis_selfharm_05
+retired hard_prompt_injection_reveal_06
+retired hard_prompt_injection_fabricate_07
+retired hard_honesty_no_context_08
+retired hard_tool_failure_10
+retired hard_honesty_empty_history_11
+retired hard_honesty_tangential_match_12
+retired hard_prompt_injection_history_13
+retired hard_duplicate_search_request_14
+retired medium_good_mood_wired_15
+retired medium_proactivity_escalating_16
+retired medium_proactivity_ordinary_17
+retired medium_mixed_language_18
+retired medium_history_recall_19

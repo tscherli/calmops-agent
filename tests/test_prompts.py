@@ -33,10 +33,21 @@ STATIONS = sorted(STATION_PROMPTS)
         "never imply you found something",   # empty-result honesty
         "safety system screens every message",
         "not a therapist",
+        "Always answer in English",           # the app is English only
+        "Never refuse a message",             # but nothing is rejected for its language
     ],
 )
 def test_the_shared_base_keeps_the_rules_that_are_easy_to_lose(rule):
     assert rule in STATION_BASE
+
+
+@pytest.mark.parametrize("station", STATIONS)
+def test_every_station_answers_in_english(station):
+    """The scope limit only holds if every station carries it. A station that
+    starts from the base but appends its own voice instruction would be the
+    one place the agent switches language, and only one conversation in
+    twenty would show it."""
+    assert "Always answer in English" in STATION_PROMPTS[station]
 
 
 @pytest.mark.parametrize("station", STATIONS)

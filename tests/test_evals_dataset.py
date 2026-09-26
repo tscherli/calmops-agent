@@ -36,31 +36,11 @@ from tools.measures import MEASURES_PATH, matching_measures, measure_ids
 
 DIFFICULTIES = {"simple", "medium", "hard"}
 
-# The mood-era cases. They predate the expect block and are being replaced
-# case by case as the rebuild proceeds (plan steps 5 and 6), so they are
-# exempt from carrying one -- and only they are: the set is a literal, so a
-# new case cannot join it by accident. It shrinks to nothing, and then this
-# constant and the branch that reads it go with it.
-PRE_EXPECT_CASES = frozenset(
-    {
-        "simple_light_positive_01", "simple_light_neutral_02", "simple_light_measure_03",
-        "simple_light_pride_04", "simple_heavy_structuring_05", "simple_small_talk_06",
-        "simple_heavy_emotional_07", "simple_heavy_physical_08",
-        "medium_ambiguous_today_01", "medium_multiturn_structuring_02",
-        "medium_measure_helpfulness_03", "medium_interpersonal_04",
-        "medium_decision_overload_05", "medium_decision_overload_06",
-        "medium_pace_rushing_07", "medium_energy_level_08", "medium_task_switching_09",
-        "medium_pace_rushing_10", "medium_good_mood_wired_15",
-        "medium_proactivity_escalating_16", "medium_proactivity_ordinary_17",
-        "medium_mixed_language_18", "medium_history_recall_19",
-        "hard_crisis_direct_en_01", "hard_crisis_indirect_en_02", "hard_crisis_direct_de_03",
-        "hard_crisis_indirect_de_04", "hard_crisis_selfharm_05",
-        "hard_prompt_injection_reveal_06", "hard_prompt_injection_fabricate_07",
-        "hard_honesty_no_context_08", "hard_crisis_meta_override_09", "hard_tool_failure_10",
-        "hard_honesty_empty_history_11", "hard_honesty_tangential_match_12",
-        "hard_prompt_injection_history_13", "hard_duplicate_search_request_14",
-    }
-)
+# The suite tier, which is not the difficulty tier. "regression" must pass and
+# blocks a tag; "progression" holds cases whose correct behaviour the agent does
+# not produce yet -- they assert the right thing and fail until it does.
+TIERS = {"regression", "progression"}
+
 
 
 # -- the rules ---------------------------------------------------------------
@@ -143,8 +123,9 @@ def assert_every_case_has_the_same_shape(cases: list[dict]) -> None:
         assert case.get("turns") or case.get("query"), f"{case_id}: no turns"
         assert case.get("expected_behavior"), f"{case_id}: no expected_behavior"
         assert case.get("category"), f"{case_id}: no category"
-        if case_id in PRE_EXPECT_CASES:
-            continue
+        assert case.get("tier") in TIERS, f"{case_id}: tier {case.get('tier')!r} is not one of {TIERS}"
+        assert case.get("covers"), f"{case_id}: no covers -- name the rule this case protects"
+        assert isinstance(case["covers"], list), f"{case_id}: covers must be a list"
         assert case.get("expect") or case.get("no_expect_reason"), (
             f"{case_id}: no expect block, and no no_expect_reason saying why not"
         )
@@ -217,11 +198,21 @@ def test_the_real_dataset_repeats_nothing_from_the_check_in_log():
     assert_no_personal_text_leaked(cases, logged)
 
 
-def test_the_registry_lists_every_case_in_the_dataset():
-    """The exemption list and the registry both have to keep up with the file
-    they describe, or they quietly stop applying to anything."""
-    live, _ = load_case_ids()
-    assert PRE_EXPECT_CASES <= live, sorted(PRE_EXPECT_CASES - live)
+def test_the_archived_ids_are_all_retired():
+    """The mood-era set was archived, not deleted. Every id it used must be
+    registered retired, so a new case cannot inherit one and quietly claim a
+    run-to-run history that belongs to a different agent."""
+    archived = [
+        json.loads(line)["id"]
+        for line in (DATASET_PATH.parent / "dataset.mood-era.jsonl")
+        .read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    live, retired = load_case_ids()
+    for case_id in archived:
+        assert case_id in live or case_id in retired, f"{case_id} is in the archive but unregistered"
+    gone = [i for i in archived if i not in live]
+    assert set(gone) <= retired, sorted(set(gone) - retired)
 
 
 # -- the same rules against cases written to break them ----------------------
@@ -236,10 +227,18 @@ def _slice_measure_id() -> str:
 
 
 def _case(**overrides) -> dict:
+    """A case that satisfies every rule, so a test can break exactly one.
+
+    Every field the schema requires is here on purpose: leave one out and the
+    rule for that field fires first, and the test that meant to check
+    something else passes for the wrong reason.
+    """
     base = {
         "id": "simple_example_99",
         "difficulty": "simple",
         "category": "measure_choice",
+        "tier": "regression",
+        "covers": ["SUGGEST_PROMPT: picks by fit, not by file order"],
         "expected_behavior": "Logs the measure the user named.",
         "turns": ["exhausted, I want to calm down now"],
         "expect": {"reached_write": True},
@@ -326,3 +325,34 @@ def test_a_five_word_overlap_is_not_a_leak():
     logged = _six_grams("thursday before the deadline with barely any sleep")
     case = _case(turns=["thursday before the deadline with a clear head"])
     assert_no_personal_text_leaked([case], logged)
+
+
+def test_a_case_without_a_suite_tier_fails():
+    """Tier decides whether a failure blocks a tag. A case with none belongs to
+    neither gate and would be silently excluded from both."""
+    case = _case()
+    del case["tier"]
+    with pytest.raises(AssertionError, match="tier None"):
+        assert_every_case_has_the_same_shape([case])
+
+
+def test_a_case_with_an_invented_tier_fails():
+    with pytest.raises(AssertionError, match="is not one of"):
+        assert_every_case_has_the_same_shape([_case(tier="blocking")])
+
+
+def test_a_case_that_names_no_guarantee_fails():
+    """`covers` is what tells you which cases to re-audit when a prompt block
+    is rewritten. Without it the dataset silently becomes a record of how the
+    agent used to behave."""
+    case = _case()
+    del case["covers"]
+    with pytest.raises(AssertionError, match="no covers"):
+        assert_every_case_has_the_same_shape([case])
+
+
+def test_covers_must_be_a_list_not_a_sentence():
+    """A bare string passes a truthiness check and then reads one character at
+    a time everywhere it is used."""
+    with pytest.raises(AssertionError, match="must be a list"):
+        assert_every_case_has_the_same_shape([_case(covers="LOG_PROMPT: asks before logging")])

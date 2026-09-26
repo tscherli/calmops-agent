@@ -89,6 +89,12 @@ def case_to_example(case: dict) -> dict:
             "case_id": case["id"],
             "difficulty": case["difficulty"],
             "category": case["category"],
+            # The suite tier, not the difficulty tier: "regression" blocks a
+            # tag, "progression" is a known defect being tracked. The release
+            # gate is applied by hand from the report, so it has to travel
+            # with the case rather than living only in dataset.jsonl.
+            "tier": case.get("tier", "regression"),
+            "covers": case.get("covers", []),
         },
     }
 

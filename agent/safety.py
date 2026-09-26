@@ -38,19 +38,22 @@ _CRISIS_PATTERNS: list[str] = [
     r"\bcan'?t\s+see\s+(a\s+)?(future|point)\s+in\s+anything\b",
     r"\bwhat'?s\s+the\s+point\s+of\s+(anything|going\s+on|living)\b",
     r"\beveryone\s+would\s+be\s+better\s+off\s+without\s+me\b",
-    # German -- direct
-    r"\bsuizid\w*",
-    r"\bselbstmord\w*",
-    r"\bmich\s+(\w+\s+){0,2}(um)?bringen\b",
-    r"\bmich\s+t[öo]ten\b",
-    r"\b(nicht\s+mehr\s+leben\s+(will|m[öo]chte)|(will|m[öo]chte)\s+nicht\s+mehr\s+leben)\b",
-    r"\bmich\s+(selbst\s+)?(zu\s+)?verletzen\b",
-    r"\bmir\s+selbst\s+weh\s?tun\b",
-    # German -- indirect
-    r"\bkeinen\s+sinn\s+mehr\b",
-    r"\bbesser\s+dran\s+ohne\s+mich\b",
-    r"\bwill\s+(\w+\s+)?nicht\s+mehr\b",
 ]
+
+# English only, decided 2026-09-25 with the rest of the app's scope. Ten German
+# patterns were removed here (suizid, selbstmord, "mich umbringen", "mich
+# toeten", "nicht mehr leben", "mich verletzen", "mir selbst weh tun", "keinen
+# Sinn mehr", "besser dran ohne mich", "will nicht mehr").
+#
+# Stated plainly because it is a real reduction in what this gate covers, taken
+# deliberately rather than by oversight: "Ich moechte nicht mehr leben" now
+# reaches the model as ordinary text and gets an ordinary reply. README.md's
+# limitations section says so too. Anyone re-introducing German support should
+# restore these patterns in the same change.
+#
+# CRISIS_RESOURCES above is deliberately NOT changed. Telefonseelsorge and 112
+# are about where the user is, not what language they write in -- an
+# English-speaking user in Germany still needs the German emergency number.
 
 _COMPILED = [re.compile(p, re.IGNORECASE | re.UNICODE) for p in _CRISIS_PATTERNS]
 

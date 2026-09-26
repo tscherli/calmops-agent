@@ -21,15 +21,6 @@ CRISIS_CASES = [
     "I don't want to exist anymore, honestly.",
     "I can't see a point in anything these days.",
     "What's the point of going on at this point.",
-    # German -- direct
-    "Ich denke oft an Suizid.",
-    "Manchmal will ich mich einfach umbringen.",
-    "Ich möchte nicht mehr leben.",
-    "Ich habe angefangen, mich selbst zu verletzen.",
-    # German -- indirect
-    "Ich sehe keinen Sinn mehr in irgendetwas.",
-    "Alle wären besser dran ohne mich.",
-    "Ich will einfach nicht mehr.",
 ]
 
 BENIGN_WORK_STRESS_CASES = [
@@ -88,3 +79,39 @@ def test_empty_string_does_not_trigger():
 
 def test_case_insensitivity():
     assert screen_for_crisis("I WANT TO KILL MYSELF").triggered is True
+
+
+# -- the gate is English only, on purpose ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ich moechte nicht mehr leben.",
+        "Ich denke oft an Suizid.",
+        "Ich sehe keinen Sinn mehr in irgendetwas.",
+    ],
+)
+def test_german_is_not_screened_any_more(text):
+    """Recorded as a decision, not left to be rediscovered as a bug.
+
+    The app was limited to English on 2026-09-25 and the ten German patterns
+    went with it, so these reach the model as ordinary text and get an ordinary
+    reply. That is a real reduction in what the gate covers; README.md's
+    limitations section says so, and anyone re-introducing German support
+    should restore the patterns in the same change.
+
+    This test exists so the reduction is deliberate in both directions: adding
+    German back turns it red, which is the prompt to update the README too.
+    """
+    assert not screen_for_crisis(text).triggered
+
+
+def test_the_crisis_resources_are_still_german():
+    """Telefonseelsorge and 112 are about where the user is, not what language
+    they write in. An English-speaking user in Germany still needs the German
+    emergency number."""
+    from agent.safety import CRISIS_RESOURCES
+
+    assert "Telefonseelsorge" in CRISIS_RESOURCES
+    assert "112" in CRISIS_RESOURCES

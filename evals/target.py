@@ -168,6 +168,39 @@ def _decision_for(request: dict, approval: str, edit_text: str) -> dict:
     return {"type": "approve"}
 
 
+def _result(
+    transcript: list[BaseMessage],
+    tool_events: list[dict],
+    approvals: list[dict],
+    log_path: Path,
+    measures_path: Path,
+    measures_before: set[str],
+) -> dict:
+    """What a case reports, whichever way the turn loop ended.
+
+    One builder for both exits. They were two literals once, and the crisis
+    exit quietly carried four fields fewer -- so a case whose crisis arrives
+    after a write reported no rows, no cards and no write at all.
+    """
+    return {
+        "messages": serialize_messages(transcript),
+        "tool_events": tool_events,
+        "approvals": approvals,
+        "log_rows": read_checkin_rows(log_path),
+        "measures_added": sorted(measure_ids(measures_path) - measures_before),
+        # The case's own list, seeds included. An expectation about the lookup
+        # has to recompute the full slice from the list the case actually ran
+        # against, and no other output says which list that was.
+        "measures_path": str(measures_path),
+        # Its own key, so "never got there" stays separate from "wrote the
+        # wrong thing": about half the model-driven cases assert a write, and
+        # one prompt quirk would otherwise fail them all as wrong content.
+        "reached_write": any(
+            e.get("tool") in WRITE_TOOLS and e.get("exit_code") == 0 for e in tool_events
+        ),
+    }
+
+
 def run_case(
     inputs: dict,
     *,
@@ -247,11 +280,14 @@ def run_case(
 
         crisis = screen_for_crisis(turn_text)
         if crisis.triggered:
+            # The same result fields as a normal return, not a shorter dict.
+            # A crisis can arrive mid-conversation, after turns that already
+            # looked something up or wrote a row, and a case about that is
+            # ungradable if the rows and cards vanish at the gate.
             return {
-                "messages": serialize_messages(transcript),
+                **_result(transcript, tool_events, approvals, log_path, measures_path, measures_before),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
-                "tool_events": tool_events,
             }
         messages_before = list(state.get("messages") or []) + [HumanMessage(content=turn_text)]
         # `extra` carries what a client would put in the payload beside the
@@ -302,21 +338,5 @@ def run_case(
                 pass
         state = next_turn_state(result)
 
-    return {
-        "messages": serialize_messages(transcript),
-        "crisis_intercepted": False,
-        "tool_events": tool_events,
-        "approvals": approvals,
-        "log_rows": read_checkin_rows(log_path),
-        "measures_added": sorted(measure_ids(measures_path) - measures_before),
-        # The case's own list, seeds included. An expectation about the lookup
-        # has to recompute the full slice from the list the case actually ran
-        # against, and no other output says which list that was.
-        "measures_path": str(measures_path),
-        # Its own key, so "never got there" stays separate from "wrote the
-        # wrong thing": about half the model-driven cases assert a write, and
-        # one prompt quirk would otherwise fail them all as wrong content.
-        "reached_write": any(
-            e.get("tool") in WRITE_TOOLS and e.get("exit_code") == 0 for e in tool_events
-        ),
-    }
+    return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before),
+            "crisis_intercepted": False}

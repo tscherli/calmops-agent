@@ -1,6 +1,12 @@
 """Tests for evals/create_dataset.py: case_to_example shape and the
 idempotent upsert-by-case_id logic -- stubbed langsmith Client, no real
-network call."""
+network call.
+
+Rules *about the dataset* live in tests/test_evals_dataset.py. This module
+tests the code that reads and converts it, on files it writes itself.
+"""
+import json
+
 from evals.create_dataset import case_to_example, create_or_update_dataset, load_cases
 
 _SIMPLE_CASE = {
@@ -21,44 +27,44 @@ _MULTITURN_CASE = {
 }
 
 
-def test_load_cases_reads_all_lines():
-    """Validates shape rather than a hardcoded count -- the count changes
-    every time a case is added, and a test that only breaks on growth
-    catches nothing useful."""
-    cases = load_cases()
+def test_load_cases_reads_every_line_of_the_file_it_is_given(tmp_path):
+    """The loader's own job, tested on a file the test writes.
 
-    assert len(cases) >= 28, "cases should only ever be added, not silently dropped"
-    assert len({c["id"] for c in cases}) == len(cases), "duplicate case ids"
+    This used to assert facts about the live corpus -- at least 28 cases, a
+    seeded case exists, a failure-flag case exists. Those are rules about the
+    dataset, and they moved to tests/test_evals_dataset.py when the mood-era
+    set was archived (2026-09-25). A loader test that fails because the
+    dataset changed is testing the wrong thing.
+    """
+    path = tmp_path / "cases.jsonl"
+    path.write_text(
+        json.dumps(_SIMPLE_CASE) + "\n\n" + json.dumps(_MULTITURN_CASE) + "\n",
+        encoding="utf-8",
+    )
 
-    for case in cases:
-        assert case.get("query") or case.get("turns"), f"{case['id']}: no input"
-        assert not (case.get("query") and case.get("turns")), f"{case['id']}: both query and turns"
-        for field in ("id", "difficulty", "category", "expected_behavior", "notes"):
-            assert case.get(field), f"{case['id']}: missing {field}"
-        assert case["difficulty"] in {"simple", "medium", "hard"}, case["id"]
+    cases = load_cases(path)
 
-
-def test_every_case_id_is_unique_and_stable_looking():
-    """create_or_update_dataset upserts by case_id, so a renamed id orphans
-    the old LangSmith example and silently creates a duplicate."""
-    ids = [c["id"] for c in load_cases()]
-    assert all(i.startswith(("simple_", "medium_", "hard_")) for i in ids), ids
+    assert [c["id"] for c in cases] == ["case_01", "case_02"]
 
 
-def test_seeded_and_failure_flag_cases_are_wired_into_inputs():
+def test_load_cases_ignores_blank_lines(tmp_path):
+    path = tmp_path / "cases.jsonl"
+    path.write_text("\n\n" + json.dumps(_SIMPLE_CASE) + "\n\n", encoding="utf-8")
+
+    assert len(load_cases(path)) == 1
+
+
+def test_the_harness_flags_reach_the_target_through_inputs():
     """These flags only do anything if case_to_example forwards them --
     evaluate() hands the target function `inputs` and nothing else."""
-    cases = {c["id"]: c for c in load_cases()}
+    seeded = {**_SIMPLE_CASE, "seed_entries": [{"energy": "wired", "circumstances": "a loud day"}]}
+    assert case_to_example(seeded)["inputs"]["seed_entries"] == seeded["seed_entries"]
 
-    seeded = [c for c in cases.values() if c.get("seed_entries")]
-    assert seeded, "expected at least one history case with seeded entries"
-    for case in seeded:
-        assert case_to_example(case)["inputs"]["seed_entries"] == case["seed_entries"]
+    planted = {**_SIMPLE_CASE, "seed_measures": [{"measure_id": "planted", "measure": "Do it."}]}
+    assert case_to_example(planted)["inputs"]["seed_measures"] == planted["seed_measures"]
 
-    failing = [c for c in cases.values() if c.get("simulate_write_failure")]
-    assert failing, "expected the tool-failure case to carry the flag"
-    for case in failing:
-        assert case_to_example(case)["inputs"]["simulate_write_failure"] is True
+    failing = {**_SIMPLE_CASE, "simulate_write_failure": True}
+    assert case_to_example(failing)["inputs"]["simulate_write_failure"] is True
 
 
 def test_case_to_example_wraps_single_query_as_turns():
@@ -66,7 +72,13 @@ def test_case_to_example_wraps_single_query_as_turns():
     assert example["inputs"] == {"turns": ["Doing okay today."]}
     assert example["outputs"]["category"] == "light_checkin"
     assert example["outputs"]["messages"] == _SIMPLE_CASE["reference_trajectory"]
-    assert example["metadata"] == {"case_id": "case_01", "difficulty": "simple", "category": "light_checkin"}
+    assert example["metadata"] == {
+        "case_id": "case_01",
+        "difficulty": "simple",
+        "category": "light_checkin",
+        "tier": "regression",
+        "covers": [],
+    }
 
 
 def test_case_to_example_preserves_existing_turns_list():
@@ -138,3 +150,20 @@ def test_create_or_update_dataset_updates_existing_case_instead_of_duplicating()
     assert len(client.updated_examples) == 1
     assert client.updated_examples[0][0] == "ex-1"
     assert client.created_examples == []
+
+
+def test_the_suite_tier_travels_with_the_case():
+    """The release gate is applied by hand from the report, so a case that
+    blocks a tag has to say so somewhere the report can read."""
+    case = {**_SIMPLE_CASE, "tier": "progression", "covers": ["LOG_PROMPT: asks before logging"]}
+
+    metadata = case_to_example(case)["metadata"]
+
+    assert metadata["tier"] == "progression"
+    assert metadata["covers"] == ["LOG_PROMPT: asks before logging"]
+
+
+def test_a_case_with_no_tier_is_treated_as_blocking():
+    """The safe default. A case silently downgraded to "tracked" would stop
+    blocking a tag without anyone deciding that."""
+    assert case_to_example(_SIMPLE_CASE)["metadata"]["tier"] == "regression"

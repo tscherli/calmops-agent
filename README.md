@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.11.0`) — not evaluated yet.** The station architecture is built and covered by 549 tests, but the eval suite has **not** been rebuilt for it: `evals/dataset.jsonl` still holds cases written for the previous design, so there are currently **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> 🚧 **Pre-release (`v0.11.0`) — not evaluated yet.** The station architecture is built and covered by 682 tests, but the eval suite is **mid-rebuild**: the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`, and `evals/dataset.jsonl` currently holds 6 of a planned 26. There are **no valid quality numbers for this version**. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -10,7 +10,7 @@ Job Load Agent checks in with you — on a schedule you control, or whenever you
 
 It asks two things: **how much energy you have** (exhausted / calm / wired) and **what would help most right now** (calm down now / plan recovery / change the situation). Those two pick from a curated list of measures you own and can edit. You can reject suggestions, bring an idea of your own and have it argued through honestly, or add something new to your list. Nothing is logged until you confirm it.
 
-A deterministic safety gate screens every message for crisis language *before* any AI is involved.
+A deterministic safety gate screens every message for English crisis language *before* any AI is involved.
 
 ## Target user & scope
 
@@ -20,13 +20,15 @@ What distinguishes it from a mood-logging spreadsheet is that it acts: it narrow
 
 It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a team- or manager-facing analytics product.
 
+**English only.** The agent always replies in English, whatever language you write in, and nothing is rejected for being in another language. The crisis gate described below screens **English only** — see the limitations.
+
 ## Architecture
 
 | Component | Role |
 |---|---|
 | `app.py` | Tkinter chat window: consent screen, energy/goal and rating buttons, the approval card, free-text chat. |
 | `cli.py` | Terminal client for the same graph, with the buttons as typed commands. |
-| `agent/safety.py` | Deterministic crisis-keyword gate. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
+| `agent/safety.py` | Deterministic crisis-keyword gate, English only. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
 | `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
 | `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per station. |
 | `agent/model.py` | Model configuration. `gpt-5-mini` everywhere, the debate station included; set `OPENAI_MODEL=gpt-5-nano` for the cheaper run. |
@@ -216,7 +218,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **These have not been rebuilt for the station architecture yet.** `evals/dataset.jsonl` still holds the 37 cases written for the previous design, including categories that no longer exist (`history`, `proactivity`). Running them now grades the agent against behaviour it no longer has. The commands below work; the numbers they produce do not yet mean anything.
+> **The dataset is mid-rebuild.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds 6 crisis cases of a planned 26. The commands below work, and what they report is true of those 6; it is not yet a picture of the agent.
 
 **With LangSmith:**
 
@@ -286,14 +288,15 @@ For values rather than names, use the debugger: `.vscode/launch.json` has a conf
 
 ## Results & limitations
 
-**Current state: pre-release. 534 passing tests, and no valid eval numbers.**
+**Current state: pre-release. 682 passing tests, and no valid eval numbers.**
 
 The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
-**The eval figures from the previous architecture are not reproduced here**, because they measured a system that no longer exists (semantic tagging, history lookup, a structuring flow — all removed). The last run under the old design scored 100% on both zero-tolerance items (crisis-gate correctness, no fabrication) and 73% overall, and that overall figure was dominated by an uncalibrated LLM judge. Rebuilding the dataset for the station design is the next planned step.
+**The eval figures from the previous architecture are not reproduced here**, because they measured a system that no longer exists (semantic tagging, history lookup, a structuring flow — all removed). The last run under the old design scored 100% on both zero-tolerance items (crisis-gate correctness, no fabrication) and 73% overall, and that overall figure was dominated by an uncalibrated LLM judge. Those cases are kept at `evals/dataset.mood-era.jsonl` so the old numbers remain reproducible; the rebuild for the station design is in progress.
 
 **Known limitations:**
 
+- **The crisis gate screens English only.** It matched German until 2026-09-25; those ten patterns were removed when the app was limited to English. A message like *"Ich möchte nicht mehr leben"* now reaches the model as ordinary text and gets an ordinary reply instead of crisis resources. The resources it does show name German services (Telefonseelsorge, 112), because those are about where the user is rather than what language they write in — so this gap matters most for exactly the person the resources were chosen for. Restoring German support means restoring the patterns in `agent/safety.py` and this line together.
 - Energy, goal and helpfulness are entirely self-report, not sensed.
 - Check-ins fire at configured times or a random interval, not adaptively.
 - Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
@@ -303,6 +306,6 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
 - The LLM judge in the eval suite is not calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be.
 - Single-user personal tool. No cloud sync, no access from another device, no built-in backup — a deliberate tradeoff for zero setup, not an oversight.
-- This is a wellness aid, not a clinical tool; the crisis gate is a basic keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
+- This is a wellness aid, not a clinical tool; the crisis gate is a basic English keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
 
 **Data handling:** this tool records genuinely personal reflections. That content goes to OpenAI's API and, with tracing on, to LangSmith — both third parties, with no redaction. That is a deliberate choice for debugging signal, not an oversight; leave `LANGSMITH_TRACING=false` if you are not comfortable with it. The logs themselves stay local. `data/*.csv`, `state/*.jsonl` and `observability/runs.jsonl` must never be committed to a public repo.
