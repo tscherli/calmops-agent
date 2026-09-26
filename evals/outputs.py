@@ -64,6 +64,33 @@ def card_sentences(outputs: dict) -> list[str]:
     return sentences
 
 
+def conversation(outputs: dict) -> list[str]:
+    """What a person would have seen on screen, in order.
+
+    Their own messages and the agent's spoken replies. Tool calls, tool
+    results and reasoning blocks are not shown to a user and must not be shown
+    to someone reading the exchange back.
+
+    Why this exists rather than a list of user turns: a labelling file built
+    from `user_turns` plus the *final* reply drops every agent turn in
+    between, so "yeah go ahead" sits in the evidence with nothing visible to
+    be agreeing to. The first labelling session hit that on its second item.
+    The judge never had the problem -- it is handed the whole message list as
+    context -- which made this an asymmetry between the two raters rather than
+    a missing convenience.
+    """
+    lines = []
+    for message in outputs.get("messages") or []:
+        text = str(message.get("content") or "").strip()
+        if not text:
+            continue
+        if message.get("role") == "human":
+            lines.append(f"user: {text}")
+        elif message.get("role") == "ai" and not message.get("tool_calls"):
+            lines.append(f"agent: {text}")
+    return lines
+
+
 def situation_sentences(outputs: dict) -> list[str]:
     """Every sentence the agent wrote about what is going on for the user.
 

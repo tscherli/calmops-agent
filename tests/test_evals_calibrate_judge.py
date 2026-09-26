@@ -99,7 +99,7 @@ def test_the_labeller_gets_everything_needed_to_answer_offline():
     evidence = evidence_for(OFFERED_KEY, _outputs())
 
     assert any("stand_up" in row for row in evidence["measures_the_agent_was_given"])
-    assert evidence["the_agents_final_reply"].startswith("Two from your list")
+    assert evidence["the_final_reply_being_judged"].startswith("Two from your list")
 
     evidence = evidence_for(SITUATION_KEY, _outputs())
     assert evidence["what_the_user_said"] == ["wired after a long call"]
@@ -774,6 +774,79 @@ def test_a_card_is_still_preferred_when_there_is_one():
     assert "landlord" in (planted["approvals"][0]["args"]["circumstances"])
 
 
+def test_the_grounding_question_shows_the_exchange_in_order():
+    """First attempt at this gave the user's turns and the final reply and
+    dropped every agent turn between them, so "yeah go ahead" sat in the
+    evidence with nothing visible to be agreeing to. The first labelling
+    session found it on its second item, and the labeller's note was exactly
+    that: "what is the user saying yeah go ahead to?"
+
+    The judge never had the problem, because it is handed the whole message
+    list as context. That made it an asymmetry between the two raters."""
+    outputs = _outputs(
+        messages=[
+            {"role": "human", "content": "need something quick"},
+            _lookup("stand_up", "breathe"),
+            {"role": "ai", "content": "Two options: stand up, or breathe.", "tool_calls": None},
+            {"role": "human", "content": "yeah go ahead"},
+            {"role": "ai", "content": "Done.", "tool_calls": None},
+        ]
+    )
+
+    lines = evidence_for(OFFERED_KEY, outputs)["the_conversation_in_order"]
+
+    assert lines == [
+        "user: need something quick",
+        "agent: Two options: stand up, or breathe.",
+        "user: yeah go ahead",
+        "agent: Done.",
+    ]
+
+
+def test_the_exchange_leaves_out_what_no_user_ever_sees():
+    """Tool calls, tool results and empty reasoning turns are not on anyone's
+    screen and must not be in the evidence pretending to be."""
+    outputs = _outputs(
+        messages=[
+            {"role": "human", "content": "hi"},
+            {"role": "ai", "content": "", "tool_calls": [{"name": "find_measures", "args": {}}]},
+            _lookup("stand_up"),
+            {"role": "ai", "content": "One option.", "tool_calls": None},
+        ]
+    )
+
+    lines = evidence_for(OFFERED_KEY, outputs)["the_conversation_in_order"]
+
+    assert lines == ["user: hi", "agent: One option."]
+
+
+def test_the_reply_under_judgement_is_named_separately():
+    """The question is about the last reply; the rest is context, and the
+    labeller has to be able to tell which is which."""
+    outputs = _outputs(
+        messages=[
+            {"role": "human", "content": "hi"},
+            _lookup("stand_up"),
+            {"role": "ai", "content": "First.", "tool_calls": None},
+            {"role": "human", "content": "more"},
+            {"role": "ai", "content": "Second.", "tool_calls": None},
+        ]
+    )
+
+    assert evidence_for(OFFERED_KEY, outputs)["the_final_reply_being_judged"] == "Second."
+
+
+def test_the_situation_question_is_given_the_users_words_only():
+    """Deliberately not the exchange. That question asks whether the agent
+    asserted something *the user* did not say, and putting the agent's own
+    turns in front of the labeller invites crediting its words to the user --
+    which would make the question easier to pass than the judge finds it."""
+    evidence = evidence_for(SITUATION_KEY, _outputs())
+
+    assert "what_the_user_said" in evidence
+    assert not any("conversation" in field for field in evidence)
+
+
 def test_the_grounding_question_shows_what_the_user_said():
     """Two of the judge's allowances turn on the conversation: a measure the
     user themselves raised is not a violation, and neither is an idea from a
@@ -793,7 +866,9 @@ def test_the_grounding_question_shows_what_the_user_said():
 
     evidence = evidence_for(OFFERED_KEY, outputs)
 
-    assert evidence["what_the_user_said"] == ["what about a cold swim, I do that sometimes"]
+    assert evidence["the_conversation_in_order"][0] == (
+        "user: what about a cold swim, I do that sometimes"
+    )
     assert evidence["a_web_search_ran"] is False
 
 

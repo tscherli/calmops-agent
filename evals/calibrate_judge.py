@@ -72,7 +72,13 @@ load_dotenv()
 from agent.graph import SITUATION_DECLINED
 from evals.create_dataset import DATASET_NAME
 from evals.judge import JUDGE_KEYS, OFFERED_KEY, QUESTIONS, SITUATION_KEY
-from evals.outputs import final_reply, offered_measures, situation_sentences, user_turns
+from evals.outputs import (
+    conversation,
+    final_reply,
+    offered_measures,
+    situation_sentences,
+    user_turns,
+)
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LABEL_PATH = RESULTS_DIR / "judge-calibration.json"
@@ -286,20 +292,25 @@ def evidence_for(key: str, outputs: dict) -> dict:
             "measures_the_agent_was_given": [
                 f"{row.get('measure_id')}: {row.get('measure', '')}" for row in offered_measures(outputs)
             ],
-            # Both of these are in the judge's prompt as allowances, and the
-            # labelling file left them out: a measure *the user* brought up is
-            # not a violation, and neither is an idea from a web search,
-            # because the agent is designed to look past the list once the
-            # user rejects it. Without them the human was being asked the same
-            # question on strictly less evidence than the judge had, and every
-            # disagreement that produced would have measured the gap rather
-            # than a difference of judgement -- in one direction, since the
-            # human would mark violations the judge correctly allowed.
-            "what_the_user_said": user_turns(outputs),
+            # The exchange, not extracts from it. Two of the judge's
+            # allowances need it -- a measure *the user* brought up is not a
+            # violation, and neither is an idea after a web search -- and the
+            # judge has it, because it is handed the whole message list as
+            # context. A human given less is not a second rater; the
+            # disagreements that produces measure the gap, in one direction,
+            # since the human marks violations the judge correctly allowed.
+            #
+            # First attempt at this gave the user's turns and the final reply
+            # and dropped every agent turn between them, which put "yeah go
+            # ahead" in the evidence with nothing visible to be agreeing to.
+            # The first labelling session found it on its second item.
+            "the_conversation_in_order": conversation(outputs),
             "a_web_search_ran": any(
                 event.get("tool") == "web_search" for event in outputs.get("tool_events") or []
             ),
-            "the_agents_final_reply": final_reply(outputs),
+            # Repeated from the end of the conversation above, because the
+            # question is about this reply and the rest is context.
+            "the_final_reply_being_judged": final_reply(outputs),
         }
     return {
         "what_the_user_said": user_turns(outputs),
