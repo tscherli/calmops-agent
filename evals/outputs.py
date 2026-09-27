@@ -136,6 +136,24 @@ def user_turns(outputs: dict) -> list[str]:
     ]
 
 
+def searched_the_web(outputs: dict) -> bool:
+    """Did the provider's web search run anywhere in this conversation?
+
+    Read from `tool_events`, because that is the only place it is recorded.
+    The search runs on OpenAI's side and comes back as a content block, which
+    evals/target.py flattens to text with the rest of the message -- so the
+    message list the judge is handed as context carries no trace of it.
+
+    The judge's grounding question allows ideas found on the web, and from the
+    day that allowance was written (2026-09-26) it could never apply it: it was
+    told "if the trajectory shows a web search" and the trajectory never did. The labelling file read
+    this flag and the judge did not, so on hard_tool_failure_write_39 the human
+    correctly allowed a cited web idea and the judge failed it. One reader,
+    used by both, is what keeps the two raters on the same evidence.
+    """
+    return any(event.get("tool") == "web_search" for event in outputs.get("tool_events") or [])
+
+
 def final_reply(outputs: dict) -> str:
     """The last thing the agent said with no tool call attached to it.
 
@@ -154,5 +172,6 @@ __all__ = [
     "final_reply",
     "lookup_results",
     "offered_measures",
+    "searched_the_web",
     "user_turns",
 ]

@@ -41,7 +41,7 @@ import textwrap
 from pathlib import Path
 from typing import Callable, Iterable
 
-from evals.calibrate_judge import LABEL_PATH
+from evals.calibrate_judge import CONVERSATION_FIELD, FINAL_REPLY_FIELD, LABEL_PATH
 from tools.measures import _PUNCTUATION
 from evals.judge import JUDGE_KEYS, OFFERED_KEY, OFFERED_PROMPT, SITUATION_KEY, SITUATION_PROMPT
 
@@ -105,16 +105,42 @@ def _wrap(text: str, indent: str = "  ", hanging: str | None = None) -> str:
     return "\n".join(lines)
 
 
+FINAL_REPLY_STANDIN = "agent: (the final reply -- shown in full below)"
+
+
+def _without_the_repeated_reply(evidence: dict) -> dict:
+    """The same evidence, with the final reply on screen once instead of twice.
+
+    The grounding item carries the whole conversation and then the final reply
+    again as its own field. Rendered as stored, the reply being judged appeared
+    twice in a row, and the second copy read as something already seen. The
+    second labelling session skimmed past the planted sentence in all five
+    plants -- it sat at the very end of that second copy -- and asked of two of
+    them whether they were duplicates.
+
+    Screen only. The file is untouched, so labels keyed on a fingerprint of the
+    evidence still match, and the judge is graded on exactly what it was.
+    """
+    lines = evidence.get(CONVERSATION_FIELD)
+    reply = str(evidence.get(FINAL_REPLY_FIELD) or "").strip()
+    if not isinstance(lines, list) or not lines or not reply:
+        return evidence
+    if str(lines[-1]).strip() != f"agent: {reply}":
+        return evidence
+    return {**evidence, CONVERSATION_FIELD: [*lines[:-1], FINAL_REPLY_STANDIN]}
+
+
 def _render_evidence(evidence: dict) -> str:
     """The item's own evidence, in the order it was written.
 
     Lists become one indented line each; everything else is wrapped. The field
     names come straight from the file rather than being mapped to prettier
     labels, so that what is on screen and what is in the JSON are the same
-    thing when someone goes looking.
+    thing when someone goes looking. One exception: the final reply is shown
+    once, not twice (_without_the_repeated_reply).
     """
     blocks = []
-    for name, value in evidence.items():
+    for name, value in _without_the_repeated_reply(evidence).items():
         heading = name.replace("_", " ")
         if isinstance(value, list):
             body = (

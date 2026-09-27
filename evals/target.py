@@ -26,6 +26,7 @@ from agent.graph import EDITABLE_ARG, WRITE_TOOLS, build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
 from agent.safety import screen_for_crisis
 from observability.tracing import RunRecorder
+from tools import checkin_log
 from tools.checkin_log import append_checkin_row, read_checkin_rows
 from tools.measures import MEASURE_COLUMNS, MEASURES_PATH, append_measure, measure_ids
 from tools.measures import _clean_measure_text
@@ -106,6 +107,32 @@ def _unwritable_log_path() -> Path:
     blocker = directory / "not-a-directory"
     blocker.write_text("blocks the write below", encoding="utf-8")
     return blocker / "checkin_log.csv"
+
+
+def _isolate_pending_log() -> Path:
+    """Point the failed-write fallback away from the user's state folder.
+
+    A check-in that cannot be written falls back to
+    tools.checkin_log.PENDING_LOG_PATH, a module global that ignores the log
+    path a case passes -- so the `simulate_write_failure` case, and any case
+    whose write failed, put its row into the real state/pending_sheet_log.jsonl.
+    The runs of 2026-09-26 left at least 14 rows there carrying that case's
+    synthetic situation ("third late night this week"), mixed into the user's
+    own file.
+
+    One temp file per process, not per case: cases run on several threads, and
+    swapping a module global per case would race. Every candidate location is
+    a temp directory, so a race could only misfile a row between two temp
+    files, never into the real one.
+    """
+    global _PENDING_LOG
+    if _PENDING_LOG is None:
+        _PENDING_LOG = Path(tempfile.mkdtemp(prefix="joblog-evalpending-")) / "pending_sheet_log.jsonl"
+    checkin_log.PENDING_LOG_PATH = _PENDING_LOG
+    return _PENDING_LOG
+
+
+_PENDING_LOG: Path | None = None
 
 
 # Eval runs keep their own cost record. observability/runs.jsonl is the app's,
@@ -260,6 +287,7 @@ def run_case(
     `log_checkin` -- the eval suite graded an agent that was not allowed to
     do half of its job.
     """
+    _isolate_pending_log()
     # Paths are resolved even when a graph is injected: the case's rows are
     # read back from them at the end, and seeding needs somewhere to write.
     if log_path is None:

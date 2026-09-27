@@ -85,6 +85,58 @@ def test_a_boolean_reads_as_a_word():
     assert "a web search ran:\n  no" in render(_item(), OFFERED_KEY, 1, 10)
 
 
+def _planted_grounding_item():
+    """Built by the real exporter's own functions, so the test follows the
+    shape the file actually has rather than one written out by hand."""
+    from evals.calibrate_judge import evidence_for, plant_offered_violation
+
+    outputs = {
+        "messages": [
+            {"role": "human", "content": "wired, cant settle"},
+            {
+                "role": "tool",
+                "name": "find_measures",
+                "content": json.dumps([{"measure_id": "drink_water", "measure": "Go grab a glass of water."}]),
+            },
+            {"role": "ai", "content": "Try a glass of water.", "tool_calls": None},
+        ],
+        "tool_events": [],
+    }
+    return _item(evidence=evidence_for(OFFERED_KEY, plant_offered_violation(outputs)))
+
+
+def test_the_final_reply_is_on_screen_once():
+    """It is the last conversation turn and its own field as well. Shown
+    twice in a row, the second copy reads as already seen, and the second
+    labelling session missed the planted sentence -- the end of that second
+    copy -- in all five plants."""
+    screen = render(_planted_grounding_item(), OFFERED_KEY, 1, 10)
+
+    assert screen.count("knead bread dough") == 1
+    assert "shown in full below" in screen
+
+
+def test_showing_it_once_leaves_the_file_alone():
+    """Labels are carried across re-exports by a fingerprint of the evidence.
+    A screen fix that edited the stored evidence would orphan every label."""
+    item = _planted_grounding_item()
+    before = json.dumps(item["evidence"], sort_keys=True)
+
+    render(item, OFFERED_KEY, 1, 10)
+
+    assert json.dumps(item["evidence"], sort_keys=True) == before
+
+
+def test_a_conversation_that_does_not_end_on_the_reply_is_shown_whole():
+    item = _planted_grounding_item()
+    item["evidence"]["the_conversation_in_order"].append("user: one more thing")
+
+    screen = render(item, OFFERED_KEY, 1, 10)
+
+    assert "shown in full below" not in screen
+    assert "one more thing" in screen
+
+
 def test_an_empty_list_says_so_rather_than_rendering_nothing():
     item = _item()
     item["evidence"]["what_the_user_said"] = []

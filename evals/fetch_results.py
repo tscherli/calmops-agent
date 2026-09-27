@@ -100,7 +100,7 @@ def fetch_trajectories(
     """One record per case: what run_case actually returned, as saved by the
     hosted run.
 
-    The same shape evals/run_local.py writes to trajectories.jsonl, so the
+    The same shape evals/run_local.py writes to trajectories-<stamp>.jsonl, so the
     judge calibration reads a hosted experiment and a local run through one
     code path. A run whose outputs never made it back (a crash mid-collection,
     which this project has seen) is skipped rather than exported as an empty

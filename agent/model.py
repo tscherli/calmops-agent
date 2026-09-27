@@ -1,16 +1,19 @@
 """One place that decides which model a node talks to, and how it is built.
 
 **Why the agent is on OpenAI, and why the project is not on one provider.**
-Asked often enough to write down. Four reasons, in order of how hard they are
-to undo:
+Asked often enough to write down. Four reasons, the first a choice and the
+other three structural:
 
-1. **An LLM judge must not share a family with what it grades.** A model finds
-   its own reasoning persuasive, so grading GPT output with GPT invites
-   correlated blind spots (`evals/judge.py`). That means *something* here has
-   to be a second provider -- a single-provider setup does not remove the
-   problem, it just decides which side is compromised. The judge is the
-   cheapest place to put the boundary: short trajectories, and its whole
-   output is one bit.
+1. **The judge is kept out of the agent's model family, as a precaution.**
+   Self-preference bias is documented -- models can rate output like their
+   own more kindly -- so grading GPT output with GPT invites correlated blind
+   spots (`evals/judge.py`). This is a precaution, not a rule of the field:
+   practitioner guidance (Hamel Husain's evals FAQ) holds that the same model
+   is usually fine, because judging is a different task from producing, and
+   that what decides it is measured agreement with a human -- which is what
+   `evals/calibrate_judge.py` checks either way. Given that the precaution is
+   taken, the judge is the cheapest place to put the boundary: short
+   trajectories, and its whole output is one bit.
 2. **The web search is OpenAI's own server-side tool**, bound as
    `{"type": "web_search"}` (`agent/graph.py`). It is executed by OpenAI
    rather than by this code, so there is nothing here to point at another
@@ -25,9 +28,10 @@ to undo:
    against. Switching the agent does not just change a setting; it invalidates
    the baseline everything else is compared to.
 
-None of this argues OpenAI is better. It argues that the split is structural
-rather than incidental: reason 1 means two providers are required, and reasons
-2 to 4 decide which one the agent sits on today.
+None of this argues OpenAI is better. Reason 1 is why there are two
+providers -- chosen, and open to revisiting if calibration shows a same-family
+judge agrees with a human as well -- and reasons 2 to 4 decide which one the
+agent sits on today.
 
 Two settings are project-wide and easy to get wrong in only one of several
 call sites:

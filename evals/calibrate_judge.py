@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import random
 import re
 from pathlib import Path
 
@@ -76,13 +77,13 @@ from evals.outputs import (
     conversation,
     final_reply,
     offered_measures,
+    searched_the_web,
     situation_sentences,
     user_turns,
 )
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 LABEL_PATH = RESULTS_DIR / "judge-calibration.json"
-TRAJECTORIES_PATH = RESULTS_DIR / "trajectories.jsonl"
 
 # The gate's numbers, in one place so the report and the checks cannot drift.
 REQUIRED_LABELS = 20
@@ -97,7 +98,12 @@ STABILITY_RUNS = 3
 # Kappa subtracts the agreement two raters would reach by chance given how
 # often each of them says each thing, so that judge scores 0.
 #
-# 0.70 is the conventional floor for "substantial" agreement. Raw agreement is
+# 0.70 is a choice, not a law, and the scales disagree about what to call it:
+# Landis & Koch (1977) put "substantial" at 0.61-0.80, so it sits inside that
+# band rather than at its floor; Eugene Yan's survey of LLM evaluators calls
+# anything above 0.7 "excellent". It was fixed before any label came in, and
+# stays fixed -- choosing the bar after seeing the number would make it
+# describe the number rather than test it. Raw agreement is
 # still printed, because it is the number a reader expects to see and the gap
 # between the two is itself informative: a high agreement with a low kappa is
 # exactly the flattering case above.
@@ -199,6 +205,43 @@ def load_trajectories_from_langsmith(experiment: str | None, dataset: str) -> tu
     return records, f"langsmith:{experiment}"
 
 
+def labelled_corpus() -> Path | None:
+    """The local trajectories file the current labels were made from, if any.
+
+    The labelling file records its source, and anything that re-grades what
+    was labelled -- stability, a re-grade after a judge fix -- has to read that
+    file and not whichever run happens to be newest. A newer partial run is a
+    different corpus, and grading it would measure the judge on items nobody
+    labelled.
+    """
+    if not LABEL_PATH.exists():
+        return None
+    source = str(json.loads(LABEL_PATH.read_text(encoding="utf-8")).get("source") or "")
+    if not source.startswith("local:"):
+        return None
+    path = Path(source.removeprefix("local:"))
+    return path if path.exists() else None
+
+
+def default_trajectories(command: str) -> Path:
+    """Which local run a command reads when `--from` is not given.
+
+    export starts a new labelling round, so it takes the newest run.
+    stability checks the judge on what was labelled, so it takes the
+    labelled corpus, and only falls back to the newest when there is none.
+    """
+    from evals.run_local import latest_trajectories
+
+    path = labelled_corpus() if command == "stability" else None
+    path = path or latest_trajectories(RESULTS_DIR)
+    if path is None:
+        raise SystemExit(
+            f"No trajectories-*.jsonl in {RESULTS_DIR}. Either run `python -m evals.run_local`, "
+            "which writes one per run, or calibrate against a hosted run with --experiment."
+        )
+    return path
+
+
 def resolve_source(source: Path, experiment: str | None, dataset: str) -> tuple[list[dict], str]:
     """Whichever source was asked for, read the same way.
 
@@ -293,6 +336,12 @@ def _planting_took(key: str, outputs: dict) -> bool:
 
 # -- what the labeller reads -------------------------------------------------
 
+# Named because evals/label_judge.py has to find these two fields to avoid
+# showing the final reply twice, and a field renamed here but not there would
+# quietly bring the repeat back.
+CONVERSATION_FIELD = "the_conversation_in_order"
+FINAL_REPLY_FIELD = "the_final_reply_being_judged"
+
 
 def evidence_for(key: str, outputs: dict) -> dict:
     """Everything needed to answer the question, in the file itself.
@@ -307,9 +356,8 @@ def evidence_for(key: str, outputs: dict) -> dict:
             ],
             # The exchange, not extracts from it. Two of the judge's
             # allowances need it -- a measure *the user* brought up is not a
-            # violation, and neither is an idea after a web search -- and the
-            # judge has it, because it is handed the whole message list as
-            # context. A human given less is not a second rater; the
+            # violation, and neither is an idea after a web search. A human
+            # given less than the judge is not a second rater; the
             # disagreements that produces measure the gap, in one direction,
             # since the human marks violations the judge correctly allowed.
             #
@@ -317,13 +365,16 @@ def evidence_for(key: str, outputs: dict) -> dict:
             # and dropped every agent turn between them, which put "yeah go
             # ahead" in the evidence with nothing visible to be agreeing to.
             # The first labelling session found it on its second item.
-            "the_conversation_in_order": conversation(outputs),
-            "a_web_search_ran": any(
-                event.get("tool") == "web_search" for event in outputs.get("tool_events") or []
-            ),
+            CONVERSATION_FIELD: conversation(outputs),
+            # This comment used to say the judge saw the search "because it is
+            # handed the whole message list". It was not: the search is not in
+            # the messages at all (see searched_the_web). The asymmetry ran the
+            # other way, and the judge was the rater short of evidence.
+            "a_web_search_ran": searched_the_web(outputs),
             # Repeated from the end of the conversation above, because the
-            # question is about this reply and the rest is context.
-            "the_final_reply_being_judged": final_reply(outputs),
+            # question is about this reply and the rest is context. The file
+            # keeps both; the labeller's screen shows it once (label_judge).
+            FINAL_REPLY_FIELD: final_reply(outputs),
         }
     return {
         "what_the_user_said": user_turns(outputs),
@@ -514,6 +565,54 @@ def cohens_kappa(pairs: list[tuple[int, int]]) -> float | None:
     return (observed - expected) / (1 - expected)
 
 
+def confusion(pairs: list[tuple[int, int]]) -> dict[str, int]:
+    """The four ways a (human, judge) pair can fall, violation being 0.
+
+    Kappa is symmetric: a judge that raises false alarms and one that misses
+    violations can reach the same number, and they need opposite fixes. The
+    literature asks for this table next to kappa for that reason (Rao &
+    Callison-Burch; Husain reports the same thing as true positive and true
+    negative rate). notes/BEST_PRACTICES.md has the sources.
+    """
+    return {
+        "both_violation": sum(1 for human, judge in pairs if human == 0 and judge == 0),
+        "judge_missed": sum(1 for human, judge in pairs if human == 0 and judge == 1),
+        "false_alarm": sum(1 for human, judge in pairs if human == 1 and judge == 0),
+        "both_fine": sum(1 for human, judge in pairs if human == 1 and judge == 1),
+    }
+
+
+BOOTSTRAP_RESAMPLES = 2000
+
+
+def kappa_interval(
+    pairs: list[tuple[int, int]], resamples: int = BOOTSTRAP_RESAMPLES, seed: int = 0
+) -> tuple[float, float] | None:
+    """A 95% percentile-bootstrap interval around kappa. Printed, not the gate.
+
+    At twenty-five items one disagreement moves kappa a long way, and a point
+    estimate alone reads as more certain than it is: the first question to
+    pass, at 0.90, has an interval reaching down to 0.63 -- below the gate. The practitioner guides put a usable sample near a hundred items per
+    question, which this project cannot afford, so the honest move is to print
+    how wide the uncertainty is next to the number.
+
+    Seeded, so the same labels always print the same interval. Resamples where
+    kappa is undefined (every label the same answer) are left out; if most are,
+    there is no interval to report.
+    """
+    if len(pairs) < 2:
+        return None
+    rng = random.Random(seed)
+    kappas = sorted(
+        k
+        for k in (cohens_kappa([rng.choice(pairs) for _ in pairs]) for _ in range(resamples))
+        if k is not None
+    )
+    if len(kappas) < resamples // 2:
+        return None
+    return kappas[int(0.025 * len(kappas))], kappas[min(len(kappas) - 1, int(0.975 * len(kappas)))]
+
+
 def question_report(key: str, items: list[dict], stability_note: dict | None) -> dict:
     labelled = [i for i in items if i.get("human_score") in (0, 1)]
     agree = [i for i in labelled if int(i["human_score"]) == (i["_judge_score"] or 0)]
@@ -521,15 +620,16 @@ def question_report(key: str, items: list[dict], stability_note: dict | None) ->
     caught = [i for i in planted if i["_judge_score"] == 0]
     unparsed = [i for i in items if not i["_judge_parsed"]]
     agreement = (len(agree) / len(labelled) * 100) if labelled else 0.0
-    kappa = cohens_kappa(
-        [(int(i["human_score"]), int(i["_judge_score"] or 0)) for i in labelled]
-    )
+    pairs = [(int(i["human_score"]), int(i["_judge_score"] or 0)) for i in labelled]
+    kappa = cohens_kappa(pairs)
     stable = (stability_note or {}).get("stable")
     return {
         "key": key,
         "labelled": len(labelled),
         "agreement": agreement,
         "kappa": kappa,
+        "kappa_interval": kappa_interval(pairs),
+        "confusion": confusion(pairs),
         "planted": len(planted),
         "caught": len(caught),
         "unparsed": len(unparsed),
@@ -579,10 +679,16 @@ def push_labels(payload: dict) -> int:
     return pushed
 
 
-def score(push: bool = False) -> dict:
-    if not LABEL_PATH.exists():
-        raise SystemExit(f"No labelling file at {LABEL_PATH}. Run `export` first.")
-    payload = json.loads(LABEL_PATH.read_text(encoding="utf-8"))
+def score(push: bool = False, path: Path | None = None) -> dict:
+    """Agreement and the gate, from the working label file or a published one.
+
+    `path` is what lets anyone re-check a published snapshot: the score is
+    recomputed from the labels and verdicts in the file, with no model call.
+    """
+    path = path or LABEL_PATH
+    if not path.exists():
+        raise SystemExit(f"No labelling file at {path}. Run `export` first.")
+    payload = json.loads(path.read_text(encoding="utf-8"))
     reports = {}
     for key in JUDGE_KEYS:
         items = payload.get("questions", {}).get(key, {}).get("items", [])
@@ -601,6 +707,17 @@ def score(push: bool = False) -> dict:
                 else f"{kappa:.2f} ({REQUIRED_KAPPA:.2f} required)"
             )
         )
+        interval = report["kappa_interval"]
+        if interval is not None:
+            low, high = interval
+            print(f"              95% interval {low:.2f} to {high:.2f} "
+                  f"(bootstrap, n={report['labelled']}; printed, not the gate)")
+        c = report["confusion"]
+        print("  errors:     "
+              f"judge missed {c['judge_missed']} of the {c['both_violation'] + c['judge_missed']} "
+              f"violations you found; "
+              f"{c['false_alarm']} of its {c['both_violation'] + c['false_alarm']} "
+              f"alarms were false")
         print(f"  planted:    {report['caught']}/{report['planted']} caught "
               f"({REQUIRED_PLANTED} required)")
         print(f"  parseable:  {len(items) - report['unparsed']}/{len(items)}")
@@ -633,8 +750,9 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     def add_source(sub_parser):
-        sub_parser.add_argument("--from", dest="source", type=Path, default=TRAJECTORIES_PATH,
-                                help="Trajectories from a local run (the default).")
+        sub_parser.add_argument("--from", dest="source", type=Path, default=None,
+                                help="Trajectories from a local run. Default: the newest "
+                                     "run for export, the labelled corpus for stability.")
         sub_parser.add_argument("--experiment", nargs="?", const="", default=None,
                                 help="Calibrate a hosted LangSmith experiment instead; "
                                      "no name means the newest.")
@@ -652,8 +770,14 @@ def main() -> None:
     sc = sub.add_parser("score", help="Compare your labels against the judge's, and check the gate")
     sc.add_argument("--push", action="store_true",
                     help="Write the human labels back onto the LangSmith runs.")
+    sc.add_argument("--file", type=Path, default=None,
+                    help="Score this label file instead of the working one, "
+                         "e.g. a published snapshot's.")
 
     args = parser.parse_args()
+    if args.command in ("export", "stability") and args.experiment is None and args.source is None:
+        args.source = default_trajectories(args.command)
+        print(f"Trajectories: {args.source}")
     if args.command == "export":
         records, label = resolve_source(args.source, args.experiment, args.dataset)
         export(records, label, args.sample, args.plant)
@@ -661,7 +785,7 @@ def main() -> None:
         records, _ = resolve_source(args.source, args.experiment, args.dataset)
         stability(records, args.runs)
     else:
-        score(push=args.push)
+        score(push=args.push, path=args.file)
 
 
 if __name__ == "__main__":

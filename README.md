@@ -31,7 +31,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 | `agent/safety.py` | Deterministic crisis-keyword gate, English only. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
 | `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
 | `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per station. |
-| `agent/model.py` | Model configuration. `gpt-5-mini` everywhere, the debate station included; set `OPENAI_MODEL=gpt-5-nano` for the cheaper run. Its docstring says why the agent is on OpenAI while the eval judge is on Gemini — a judge must not share a family with what it grades, so two providers are a requirement rather than a preference. |
+| `agent/model.py` | Model configuration. `gpt-5-mini` everywhere, the debate station included; set `OPENAI_MODEL=gpt-5-nano` for the cheaper run. Its docstring says why the agent is on OpenAI while the eval judge is on Gemini — keeping the judge out of the agent's model family is a precaution against self-preference bias, not a requirement; what settles a judge is measured agreement with a human. |
 | `agent/common.py` | Helpers every client shares: receipt formatting, message text, transcript compaction. |
 | `tools/measures.py` | The curated measure list plus `find_measures` (filtered in code, never by the model) and `add_measure` (validated before writing). |
 | `tools/checkin_log.py` | `log_checkin` and the local CSV append. Never raises; falls back to a JSONL file on write failure. |

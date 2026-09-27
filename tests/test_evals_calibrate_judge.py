@@ -197,6 +197,50 @@ def test_planted_items_are_extra_not_a_slice_of_the_sample(stub_judge, records, 
     assert sum(1 for i in items if i["_planted"]) == 2
 
 
+def _dated_runs(directory):
+    labelled = directory / "trajectories-20260926-161714.jsonl"
+    newer = directory / "trajectories-20260927-090000.jsonl"
+    for path in (labelled, newer):
+        path.write_text("", encoding="utf-8")
+    return labelled, newer
+
+
+def test_export_starts_from_the_newest_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(calib, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
+    _, newer = _dated_runs(tmp_path)
+
+    assert calib.default_trajectories("export") == newer
+
+
+def test_stability_grades_the_corpus_that_was_labelled_not_the_newest(tmp_path, monkeypatch):
+    """A partial re-run after labelling is newer and is a different corpus.
+    Checking the judge's stability on it would measure the judge on items
+    nobody labelled."""
+    monkeypatch.setattr(calib, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
+    labelled, _ = _dated_runs(tmp_path)
+    calib.LABEL_PATH.write_text(json.dumps({"source": f"local:{labelled}"}), encoding="utf-8")
+
+    assert calib.default_trajectories("stability") == labelled
+
+
+def test_stability_falls_back_to_the_newest_when_nothing_is_labelled(tmp_path, monkeypatch):
+    monkeypatch.setattr(calib, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
+    _, newer = _dated_runs(tmp_path)
+
+    assert calib.default_trajectories("stability") == newer
+
+
+def test_no_run_at_all_says_how_to_make_one(tmp_path, monkeypatch):
+    monkeypatch.setattr(calib, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
+
+    with pytest.raises(SystemExit, match="run_local"):
+        calib.default_trajectories("export")
+
+
 def test_stability_records_every_verdict_it_got(stub_judge, records, tmp_path, monkeypatch):
     monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
 
@@ -617,6 +661,66 @@ def test_the_report_still_carries_raw_agreement():
     """Printed beside kappa on purpose: the gap between them is informative,
     and a reader expects to see the number they asked for."""
     assert question_report(OFFERED_KEY, _items(), STABLE)["agreement"] == 100.0
+
+
+# -- which way the judge is wrong, and how sure the number is -----------------
+
+
+def test_the_confusion_table_separates_misses_from_false_alarms():
+    """Kappa cannot: these two judges are wrong the same number of times in
+    opposite directions, and one of them needs a stricter question while the
+    other needs a looser one."""
+    misses = [(0, 1)] * 2 + [(0, 0)] * 3 + [(1, 1)] * 20
+    alarms = [(1, 0)] * 2 + [(0, 0)] * 3 + [(1, 1)] * 20
+
+    assert calib.confusion(misses) == {
+        "both_violation": 3, "judge_missed": 2, "false_alarm": 0, "both_fine": 20,
+    }
+    assert calib.confusion(alarms) == {
+        "both_violation": 3, "judge_missed": 0, "false_alarm": 2, "both_fine": 20,
+    }
+
+
+def test_the_report_carries_the_confusion_table():
+    report = question_report(OFFERED_KEY, _items(caught=4), STABLE)
+
+    assert report["confusion"]["judge_missed"] == 1
+    assert report["confusion"]["both_violation"] == 4
+
+
+def test_the_interval_brackets_kappa_and_is_wide_at_this_sample_size():
+    """Twenty-five items with two disagreements: kappa about 0.78, above the
+    gate, and an interval that reaches well below it. That width is the
+    finding -- a point estimate alone would read as settled."""
+    pairs = [(0, 0)] * 5 + [(0, 1)] + [(1, 0)] + [(1, 1)] * 18
+
+    low, high = calib.kappa_interval(pairs)
+
+    assert low <= calib.cohens_kappa(pairs) <= high
+    assert low < calib.REQUIRED_KAPPA
+
+
+def test_the_interval_is_the_same_every_time_it_is_printed():
+    """Seeded: a number that changed between two runs of `score` on the same
+    labels would look like the labels had changed."""
+    pairs = [(0, 0)] * 5 + [(0, 1)] + [(1, 0)] + [(1, 1)] * 18
+
+    assert calib.kappa_interval(pairs) == calib.kappa_interval(pairs)
+
+
+def test_no_interval_when_kappa_itself_is_undefined():
+    assert calib.kappa_interval([(1, 1)] * 25) is None
+    assert calib.kappa_interval([]) is None
+
+
+def test_the_interval_is_printed_but_never_decides_the_gate():
+    """The gate was set as a point estimate before any number came in, and
+    moving it after seeing the numbers would be choosing the rule to fit the
+    result. The interval is reported beside it."""
+    report = question_report(OFFERED_KEY, _items(), STABLE)
+
+    assert report["kappa_interval"] is not None
+    assert report["gate"] is True
 
 
 def _corpus(real: int, natural_violations_missed: int, planted: int = 5) -> list[dict]:

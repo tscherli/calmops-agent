@@ -190,3 +190,66 @@ def test_the_offered_question_allows_ideas_found_on_the_web():
 
     assert "web search" in OFFERED_PROMPT
     assert "expected behaviour" in OFFERED_PROMPT
+
+
+def test_a_search_does_not_excuse_an_idea_with_no_source():
+    """Told only "a web search ran", the judge excused any off-list measure
+    at all -- including a planted one with no link, in a conversation whose
+    search happened turns earlier (simple_just_venting_35, 2026-09-27). What
+    marks an idea as the search's is its link, which the agent is required
+    to give; without that line the allowance swallows the question."""
+    from evals.judge import OFFERED_PROMPT
+
+    assert "full link (URL)" in OFFERED_PROMPT
+    assert "not anything at all" in OFFERED_PROMPT
+
+
+def test_the_judge_leans_on_a_rule_the_agent_is_actually_given():
+    """The allowance is only fair if the agent really is told to cite. If
+    the search instruction ever stops requiring the link, every correct web
+    idea turns into a violation -- so the two are checked together."""
+    from agent.prompts import SEARCH_INSTRUCTION
+    from evals.judge import OFFERED_PROMPT
+
+    assert "full link (URL)" in SEARCH_INSTRUCTION
+    assert "full link (URL)" in OFFERED_PROMPT
+
+
+@pytest.mark.parametrize("events, told", [([{"tool": "web_search", "exit_code": 0}], "yes"), ([], "no")])
+def test_the_offered_question_is_told_whether_a_web_search_ran(asked, events, told):
+    """The allowance above is useless unless the judge can see a search
+    happened, and it cannot see it in the messages: the provider's search is
+    flattened out of them and survives only in tool_events. On
+    hard_tool_failure_write_39 the judge failed a cited web idea saying "no
+    web search appears in the trajectory" -- while the labelling file, reading
+    tool_events, told the human one had run."""
+    judge_evaluator(outputs=_outputs(tool_events=events), reference_outputs={})
+
+    assert asked["offered"]["web_search_ran"] == told
+
+
+def test_the_prompt_has_a_place_for_the_web_search_flag():
+    """Passing the value is half of it. A template with no slot for it drops
+    it silently, and the judge is back to guessing."""
+    from evals.judge import OFFERED_PROMPT
+
+    shown = OFFERED_PROMPT.format(
+        available_measures="", agent_reply="", outputs="", web_search_ran="SEARCH-FLAG"
+    )
+
+    assert "SEARCH-FLAG" in shown
+
+
+@pytest.mark.parametrize(
+    "events", [[], [{"tool": "web_search"}], [{"tool": "find_measures"}], None]
+)
+def test_judge_and_labeller_read_the_search_from_one_place(asked, events):
+    """Two raters on different evidence is how this bug happened, so the two
+    must agree on every input, not only on the two the test above uses."""
+    from evals.calibrate_judge import evidence_for
+
+    outputs = _outputs(tool_events=events)
+    judge_evaluator(outputs=outputs, reference_outputs={})
+
+    labeller = evidence_for(OFFERED_KEY, outputs)["a_web_search_ran"]
+    assert asked["offered"]["web_search_ran"] == ("yes" if labeller else "no")

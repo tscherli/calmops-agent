@@ -195,6 +195,23 @@ def test_a_write_failure_falls_back_and_never_raises(tmp_path, monkeypatch):
     assert json.loads(pending.read_text(encoding="utf-8").strip())["measure_id"] == "short_walk"
 
 
+def test_a_failed_write_in_a_test_never_reaches_the_real_state_folder(tmp_path):
+    """No monkeypatch here on purpose: this is the case every other test is
+    in. The conftest fixture has to catch it, or the row lands in the user's
+    state/pending_sheet_log.jsonl -- which is what two full test runs did on
+    2026-09-27 before the fixture existed."""
+    import tools.checkin_log as checkin_log
+
+    blocked = tmp_path / "afile"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    append_checkin_row(energy="wired", circumstances="x", measure_id="m01", path=blocked / "log.csv")
+
+    assert checkin_log.PENDING_LOG_PATH != checkin_log.BASE_DIR / "state" / "pending_sheet_log.jsonl"
+    assert checkin_log.PENDING_LOG_PATH.is_relative_to(tmp_path)
+    assert checkin_log.PENDING_LOG_PATH.exists()
+
+
 # -- the tool ----------------------------------------------------------------
 
 

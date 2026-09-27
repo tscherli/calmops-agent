@@ -40,15 +40,50 @@ from evals.judge import judge_evaluator
 from evals.run_experiment import _build_report, _write_report, case_passed
 from evals.target import EVAL_RUNS_LOG, run_case
 
-# Where a run leaves its trajectories. Calibrating the judge means reading
-# real ones by hand, and a run that has already been paid for should not
-# have to be paid for again to get them back. Gitignored with the rest of
-# evals/results.
-TRAJECTORIES_LOG = EVAL_RUNS_LOG.parent / "trajectories.jsonl"
+# Where runs leave their trajectories: one file per invocation, named
+# trajectories-<UTC yyyymmdd-hhmmss>.jsonl for the moment it was written, and
+# never a fixed name. Calibrating the judge means reading real ones by hand,
+# and a run that has already been paid for should not have to be paid for
+# again to get them back. Gitignored with the rest of evals/results.
+TRAJECTORIES_DIR = EVAL_RUNS_LOG.parent
+TRAJECTORIES_GLOB = "trajectories-*.jsonl"
 
-# Per-case verdicts across several runs. The threshold is a pass in 2 of 3,
-# so this rather than any single report is what says whether a case holds.
-MAJORITY_PATH = EVAL_RUNS_LOG.parent / "majority.json"
+
+def trajectories_path(directory: Path, when: datetime | None = None) -> Path:
+    """The file a run written at `when` (UTC, default now) goes to.
+
+    UTC rather than local time so two machines, or one machine across a
+    clock change, never produce names that sort in the wrong order -- and so
+    the stamp says the same thing wherever it is read. That is also why a
+    file's name can differ from the time Windows Explorer shows for it by
+    the local offset.
+    """
+    stamp = (when or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
+    return directory / f"trajectories-{stamp}.jsonl"
+
+
+def latest_trajectories(directory: Path) -> Path | None:
+    """The newest run's trajectories, by the stamp in the name.
+
+    By name, not by modification time: copying or touching a file changes
+    its mtime and says nothing about when the run happened. The stamp sorts
+    as text because it is fixed-width and most significant first.
+    """
+    found = sorted(directory.glob(TRAJECTORIES_GLOB), key=lambda p: p.name)
+    return found[-1] if found else None
+
+
+def majority_path(directory: Path, when: datetime) -> Path:
+    """Per-case verdicts across several runs, named like the run's trajectories.
+
+    The threshold is a pass in 2 of 3, so this rather than any single report
+    is what says whether a case holds. It used to be one fixed majority.json,
+    and it went the way trajectories.jsonl did: a three-case re-run replaced
+    the full sweep's verdicts two hours after the sweep, and the 22/26 it
+    recorded survives only in the development log. Same stamp as the
+    trajectories file of the same run, so the two can be found as a pair.
+    """
+    return directory / f"majority-{when.strftime('%Y%m%d-%H%M%S')}.json"
 
 EVALUATORS = (
     crisis_gate_evaluator,
@@ -136,12 +171,21 @@ def evaluate_case(case: dict) -> dict:
 def _save_trajectories(rows: list[dict], path: Path) -> int:
     """Write one line per case run: the case id and everything it produced.
 
-    Replaces the file rather than appending. Two *invocations* interleaved in
-    one file would be labelled as though they came from one agent, and the
-    judge's agreement number would be measured against a mixture. Repeats
-    within one invocation are a different thing and are all kept: three runs
-    of one case are three real trajectories, and the situation question can
-    only reach twenty labels because of them.
+    One file per invocation, created fresh and never overwritten -- opened in
+    exclusive mode, so an existing file with the same name is an error rather
+    than a loss. Two *invocations* in one file would be labelled as though
+    they came from one agent, and the judge's agreement number would be
+    measured against a mixture. Repeats within one invocation are a different
+    thing and are all kept: three runs of one case are three real
+    trajectories, and the situation question can only reach twenty labels
+    because of them.
+
+    History: this used to write a fixed `trajectories.jsonl` and a stamped
+    copy. The fixed name was overwritten by every run, so a two-case re-run
+    destroyed a seventy-eight trajectory sweep ten minutes after it was made;
+    and the corpus the first judge labels were made from was a hand merge that
+    existed *only* under the fixed name, one partial run away from being gone.
+    A name that every run writes to is a name nothing can safely depend on.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     written = 0
@@ -158,16 +202,8 @@ def _save_trajectories(rows: list[dict], path: Path) -> int:
             record["run_index"] = row["run_index"]
         lines.append(json.dumps(record, ensure_ascii=False, default=str) + "\n")
         written += 1
-    path.write_text("".join(lines), encoding="utf-8")
-    # And a copy nobody overwrites. A seventy-eight trajectory corpus from a
-    # three-run sweep was destroyed by a two-case re-run made ten minutes
-    # later, and rebuilding it costs another sweep. The fixed name stays the
-    # newest, which is what `calibrate_judge --from` defaults to; the stamped
-    # one is what you point it at when the newest is not the one you meant.
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    (path.parent / f"{path.stem}-{stamp}{path.suffix}").write_text(
-        "".join(lines), encoding="utf-8"
-    )
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write("".join(lines))
     return written
 
 
@@ -230,7 +266,7 @@ def _one_pass(cases: list[dict], workers: int) -> list[dict]:
 def run_local(
     cases: list[dict] | None = None,
     workers: int = DEFAULT_WORKERS,
-    trajectories_log: Path | None = None,
+    trajectories_dir: Path | None = None,
     runs: int = 1,
 ) -> dict:
     cases = cases if cases is not None else load_cases()
@@ -251,21 +287,28 @@ def run_local(
     print(report)
     print(f"\nFull report written to {report_path}")
 
+    # One moment for everything this invocation leaves behind, so its
+    # majority and its trajectories carry the same stamp.
+    finished = datetime.now(timezone.utc)
+
     summary = None
     if runs > 1:
         # The report above is one run. With several, the majority is the
         # verdict and the single-run report is only the last sample of it.
         summary = majority(rows_by_run)
         _print_majority(summary)
-        MAJORITY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        MAJORITY_PATH.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        print(f"\nPer-case verdicts written to {MAJORITY_PATH}")
+        path = majority_path(trajectories_dir or TRAJECTORIES_DIR, finished)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(summary, indent=2))
+        print(f"\nPer-case verdicts written to {path}")
 
-    if trajectories_log is not None:
+    if trajectories_dir is not None:
+        path = trajectories_path(trajectories_dir, finished)
         written = _save_trajectories(
-            [row for pass_rows in rows_by_run for row in pass_rows], trajectories_log
+            [row for pass_rows in rows_by_run for row in pass_rows], path
         )
-        print(f"{written} trajectories saved to {trajectories_log}")
+        print(f"{written} trajectories saved to {path}")
     return {"rows": rows, "report_path": report_path, "majority": summary}
 
 
@@ -292,6 +335,6 @@ if __name__ == "__main__":
     run_local(
         selected,
         workers=args.workers,
-        trajectories_log=TRAJECTORIES_LOG,
+        trajectories_dir=TRAJECTORIES_DIR,
         runs=max(1, args.runs),
     )

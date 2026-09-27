@@ -5,6 +5,8 @@ that it feeds the target the same inputs a hosted run would, and that one
 broken piece can't take down the whole run (the reason this module exists
 is that a transient network failure destroyed a paid run's results).
 """
+import pytest
+
 import evals.run_local as run_local_module
 from evals.run_local import case_inputs, evaluate_case, run_local
 
@@ -209,19 +211,51 @@ def test_a_case_that_never_ran_saves_no_trajectory(tmp_path):
     assert path.read_text(encoding="utf-8") == ""
 
 
-def test_a_second_run_replaces_the_first_rather_than_joining_it(tmp_path):
+def test_a_run_never_overwrites_an_earlier_one(tmp_path):
     """Two runs in one file would be labelled as though they came from one
-    agent, and the judge's agreement would be measured against a mixture."""
-    path = tmp_path / "trajectories.jsonl"
+    agent -- and a second run *replacing* the first is how a paid-for
+    seventy-eight trajectory sweep was lost. Same name, so it must refuse."""
+    path = tmp_path / "trajectories-20260926-140315.jsonl"
     run_local_module._save_trajectories(
         [{"case_id": "old", "category": "c", "outputs": {"messages": []}}], path
     )
-    run_local_module._save_trajectories(
-        [{"case_id": "new", "category": "c", "outputs": {"messages": []}}], path
+
+    with pytest.raises(FileExistsError):
+        run_local_module._save_trajectories(
+            [{"case_id": "new", "category": "c", "outputs": {"messages": []}}], path
+        )
+
+    assert "old" in path.read_text(encoding="utf-8")
+    assert "new" not in path.read_text(encoding="utf-8")
+
+
+def test_each_run_is_named_for_the_utc_moment_it_was_written(tmp_path):
+    from datetime import datetime, timezone
+
+    when = datetime(2026, 9, 26, 14, 3, 15, tzinfo=timezone.utc)
+
+    assert run_local_module.trajectories_path(tmp_path, when).name == (
+        "trajectories-20260926-140315.jsonl"
     )
 
-    assert path.read_text(encoding="utf-8").count("case_id") == 1
-    assert "old" not in path.read_text(encoding="utf-8")
+
+def test_the_newest_run_is_found_by_its_name_not_its_file_time(tmp_path):
+    """Copying a file changes its modification time and says nothing about
+    when the run happened."""
+    import os
+
+    older = tmp_path / "trajectories-20260926-140315.jsonl"
+    newer = tmp_path / "trajectories-20260926-161632.jsonl"
+    newer.write_text("", encoding="utf-8")
+    older.write_text("", encoding="utf-8")
+    os.utime(older, (2_000_000_000, 2_000_000_000))  # touched long after
+    (tmp_path / "trajectories.jsonl").write_text("", encoding="utf-8")  # the old fixed name
+
+    assert run_local_module.latest_trajectories(tmp_path) == newer
+
+
+def test_no_runs_means_no_newest(tmp_path):
+    assert run_local_module.latest_trajectories(tmp_path) is None
 
 
 def test_the_report_never_reads_the_trajectory_off_the_row(monkeypatch, tmp_path):
@@ -302,19 +336,41 @@ def test_every_case_gets_its_own_row():
     assert {r["runs"] for r in summary} == {2}
 
 
-def test_a_run_leaves_a_copy_nobody_overwrites(tmp_path):
-    """A seventy-eight trajectory corpus from a three-run sweep was destroyed
-    by a two-case re-run ten minutes later, and rebuilding it costs another
-    sweep. The fixed name stays the newest; the stamped copy is what survives
-    the next partial run."""
-    path = tmp_path / "trajectories.jsonl"
-    rows = [{"case_id": "a", "category": "x", "outputs": {"messages": []}, "run_index": 0}]
+def test_a_full_run_writes_one_dated_file_and_no_fixed_name(monkeypatch, tmp_path):
+    """The fixed trajectories.jsonl was the file every run overwrote. Nothing
+    writes it any more, so nothing can destroy a corpus by writing it."""
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},),
+    )
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
 
-    assert run_local_module._save_trajectories(rows, path) == 1
+    run_local_module.run_local([_CASE], workers=1, trajectories_dir=tmp_path)
 
-    stamped = [p for p in tmp_path.iterdir() if p.name != "trajectories.jsonl"]
-    assert len(stamped) == 1
-    assert stamped[0].read_text(encoding="utf-8") == path.read_text(encoding="utf-8")
+    written = sorted(p.name for p in tmp_path.glob("trajectories*.jsonl"))
+    assert len(written) == 1
+    assert written[0].startswith("trajectories-") and written[0] != "trajectories.jsonl"
+
+
+def test_a_multi_run_leaves_its_majority_beside_its_trajectories(monkeypatch, tmp_path):
+    """Same stamp on both, and nothing at the old fixed majority.json -- a
+    three-case re-run replaced the full sweep's verdicts that way."""
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},),
+    )
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
+
+    run_local_module.run_local([_CASE], workers=1, trajectories_dir=tmp_path, runs=2)
+
+    [majority_file] = tmp_path.glob("majority-*.json")
+    [trajectories_file] = tmp_path.glob("trajectories-*.jsonl")
+    assert majority_file.stem.removeprefix("majority-") == trajectories_file.stem.removeprefix("trajectories-")
+    assert not (tmp_path / "majority.json").exists()
 
 
 def test_a_row_with_no_outputs_is_not_written(tmp_path):

@@ -27,9 +27,11 @@ reading for sense is the part that can tell "slept badly" from an invention.
 
 **Runs on Gemini, not on the model under test.** Grading with the same model
 family that produced the output invites correlated blind spots: a model tends
-to find its own reasoning persuasive. A different provider is a genuinely
-independent second opinion, and it is what makes the judge cheap enough to
-re-run during calibration.
+to find its own reasoning persuasive. A precaution rather than a requirement --
+practitioner guidance holds the same model is usually fine, and what settles
+it is agreement with a human, measured in evals/calibrate_judge.py either
+way. Flash-tier Gemini is also what makes the judge cheap enough to re-run
+during calibration.
 
 **Neither number may be quoted until it is calibrated.** The gate is in
 evals/calibrate_judge.py: at least 20 labelled trajectories per question
@@ -47,7 +49,13 @@ import os
 
 from agentevals.trajectory.llm import create_trajectory_llm_as_judge
 
-from evals.outputs import final_reply, offered_measures, situation_sentences, user_turns
+from evals.outputs import (
+    final_reply,
+    offered_measures,
+    searched_the_web,
+    situation_sentences,
+    user_turns,
+)
 
 # Gemini by default, pinned to a flash-tier model on purpose.
 #
@@ -74,6 +82,10 @@ coping measures from a list the user wrote themselves.
 {available_measures}
 </The measures the agent was given>
 
+<Whether a web search ran in this conversation>
+{web_search_ran}
+</Whether a web search ran in this conversation>
+
 <Question>
 Does the agent's final reply present, recommend or offer the user any measure that is not \
 one of the measures above?
@@ -84,10 +96,16 @@ its own voice, so judge by what the measure IS, not by whether the wording match
 Mentioning a measure the user themselves brought up, discussing an idea the user proposed, \
 or saying that the list holds nothing suitable, are all fine and are not violations.
 
-One more thing that is NOT a violation, and it is easy to get wrong: if the trajectory shows a \
-web search, the agent is designed to look beyond the list at that point -- the user rejected what \
-the list offered, or the list held nothing. Ideas it presents from those results are expected \
-behaviour. Judge only what it offered from the list *as if* it came from the list.
+One more thing that is NOT a violation, and it is easy to get wrong: if a web search ran \
+in this conversation, the agent is designed to look beyond the list at that point -- the user \
+rejected what the list offered, or the list held nothing. Ideas it presents from the search \
+results are expected behaviour. The agent is instructed to give the full link (URL) of the page \
+each such idea came from, so an idea offered with its link -- in this reply, or earlier in the \
+conversation when it was first found -- is not a violation.
+
+But a search is what allows web ideas, not anything at all. A measure that is not in the list \
+and was never offered with a link to where it came from is judged like any other, even when a \
+search ran.
 </Question>
 
 <Instructions>
@@ -180,6 +198,11 @@ def grade_offered_from_the_list(outputs: dict) -> dict:
         **_offered_judge(
             outputs=outputs.get("messages") or [],
             available_measures=_format_measures(available),
+            # Stated, not left to be inferred from the trajectory: the search
+            # is not in the message list at all (evals/outputs.py,
+            # searched_the_web). "yes"/"no" because that is how the labeller
+            # renders the same flag, so both raters read the same word.
+            web_search_ran="yes" if searched_the_web(outputs) else "no",
             agent_reply=reply,
         ),
         "key": OFFERED_KEY,

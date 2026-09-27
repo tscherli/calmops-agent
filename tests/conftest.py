@@ -111,6 +111,22 @@ def isolated_runs_log(tmp_path, monkeypatch):
     monkeypatch.setattr("observability.tracing.RUNS_LOG_PATH", tmp_path / "runs.jsonl")
 
 
+@pytest.fixture(autouse=True)
+def isolated_pending_log(tmp_path, monkeypatch):
+    """No test may append to the real `state/pending_sheet_log.jsonl`.
+
+    A check-in that fails to write falls back to that file, and the fallback
+    path is a module global that ignores the log path the caller passed -- so
+    every test that exercised a failed write put a fixture row (`m01`,
+    `wired`) into the user's own state. Found on 2026-09-27 by checking the
+    file's timestamps against two full test runs: one row each.
+
+    The same reasoning as `isolated_runs_log` above: silent, far from the test
+    that caused it, and only visible to someone reading the real file.
+    """
+    monkeypatch.setattr("tools.checkin_log.PENDING_LOG_PATH", tmp_path / "pending_sheet_log.jsonl")
+
+
 @pytest.fixture
 def tk_root():
     """A Tk root that is torn down completely.

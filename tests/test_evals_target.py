@@ -179,6 +179,22 @@ def test_eval_runs_get_their_own_copy_of_the_measure_list(monkeypatch, tmp_path)
     assert rows and list(rows[0]) == MEASURE_COLUMNS
 
 
+def test_a_failed_eval_write_never_reaches_the_real_state_folder(monkeypatch):
+    """A check-in that cannot be written falls back to a module-global path,
+    which ignores the case's own log path -- so the write-failure case put its
+    synthetic situation into the user's state/pending_sheet_log.jsonl on every
+    sweep. The conftest fixture guards tests; this guards real eval runs,
+    which is why it checks for the eval's own temp prefix rather than for
+    "somewhere temporary" (the test fixture's path is temporary too)."""
+    import tools.checkin_log as checkin_log
+
+    monkeypatch.setattr("evals.target.build_agent", lambda **kwargs: _StubGraph())
+    run_case({"turns": ["quiet morning"]})
+
+    assert "joblog-evalpending-" in str(checkin_log.PENDING_LOG_PATH)
+    assert "state" not in checkin_log.PENDING_LOG_PATH.parts
+
+
 def test_each_case_gets_a_fresh_measure_copy(monkeypatch, tmp_path):
     """Cases must not see each other's added measures, or results depend on
     execution order."""
