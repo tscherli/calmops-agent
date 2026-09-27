@@ -185,6 +185,64 @@ def test_the_readme_names_the_commit_and_how_to_recheck(workspace):
     assert "calibrate_judge score --file" in readme
 
 
+# -- eval-runs snapshots ---------------------------------------------------------
+
+
+@pytest.fixture
+def run_files(tmp_path):
+    trajectories = tmp_path / "trajectories-20260927-141910.jsonl"
+    trajectories.write_text(json.dumps(_record()) + "\n", encoding="utf-8")
+    baseline = tmp_path / "baseline-20260927-150437.jsonl"
+    baseline_row = {"case_id": "case_01", "scores": {"no_fabrication": True}, "run_index": 0,
+                    "outputs": _record()["outputs"]}
+    baseline.write_text(json.dumps(baseline_row) + "\n", encoding="utf-8")
+    majority = tmp_path / "majority-20260927-141910.json"
+    majority.write_text(json.dumps([{"case_id": "case_01", "passed": 3}]), encoding="utf-8")
+    report = tmp_path / "eval-report-20260927-141910.md"
+    report.write_text("# Eval report\nLangSmith experiment: https://eu.smith.langchain.com/o/1/x\n", encoding="utf-8")
+    return [trajectories, baseline, majority, report]
+
+
+def _publish_runs(files, out, **kwargs):
+    return publish_module.publish_runs("step7-runs", files, "# summary\n", published_dir=out,
+                                       commit="abc1234", dirty=False, **kwargs)
+
+
+def test_a_runs_snapshot_carries_every_file_cleaned(run_files, tmp_path):
+    """Baseline rows carry outputs just like trajectories, and need the same
+    cleaning -- a path or a blob in either would publish the same leak."""
+    folder = _publish_runs(run_files, tmp_path / "published")
+
+    files = _all_text(folder)
+    assert set(files) == {p.name for p in run_files} | {"summary.md", "README.md"}
+    everything = "\n".join(files.values())
+    assert BLOB not in everything
+    # Checked on the data files only: the README names the field it removed.
+    assert not any('"measures_path"' in text for name, text in files.items() if name.endswith(".jsonl"))
+    assert HOME not in everything and json.dumps(HOME)[1:-1] not in everything
+    assert "smith.langchain.com" not in everything
+    assert "abc1234" in files["README.md"]
+
+
+def test_a_runs_snapshot_says_what_cannot_be_recounted_from_it(run_files, tmp_path):
+    """The lookup check re-reads each case's temp copy of the list, whose path
+    is stripped. Claiming a full recount from the published files would be
+    false."""
+    readme = (_publish_runs(run_files, tmp_path / "published") / "README.md").read_text(encoding="utf-8")
+
+    assert "expect_lookup_rows" in readme
+
+
+def test_a_runs_snapshot_refuses_what_it_cannot_clean(run_files, tmp_path):
+    """The user name outside any path: no sanitiser matches it, so the last
+    check has to."""
+    leaky = tmp_path / "notes.json"
+    leaky.write_text(json.dumps({"who": Path.home().name}), encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="personal data"):
+        _publish_runs([*run_files, leaky], tmp_path / "published")
+
+
 def test_an_uncommitted_tree_is_refused(workspace):
     """The README records a commit; a dirty tree means that commit is not
     the code that made the snapshot."""

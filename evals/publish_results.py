@@ -226,14 +226,123 @@ def publish(
     return folder
 
 
+def sanitise_result_file(path: Path) -> str:
+    """One eval-run result file, cleaned by kind.
+
+    Trajectories and baseline rows both carry `outputs` per line, so they go
+    through the same trajectory sanitiser; reports lose their LangSmith line;
+    anything else (a majority file) only has user names scrubbed. The final
+    personal-data check still runs over all of it.
+    """
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".jsonl":
+        return "".join(
+            json.dumps(sanitise_trajectory(json.loads(line)), ensure_ascii=False) + "\n"
+            for line in text.splitlines() if line.strip()
+        )
+    if path.suffix == ".md":
+        return _without_user_name(sanitise_report(text))
+    return _without_user_name(text)
+
+
+def _runs_readme(name: str, created: str, commit: str, files: list[Path], note: str) -> str:
+    lines = [
+        f"# Eval runs snapshot: {name}",
+        "",
+        f"Created {created} (UTC) from commit `{commit}`.",
+        "",
+        "Frozen copies of eval-run outputs from `evals/results/`, which is gitignored because every",
+        "run rewrites it. Nothing here is regenerated.",
+        "",
+        "## Contents",
+        "",
+        *[f"- `{f.name}`" for f in files],
+        "- `summary.md` -- every run recounted offline (`python -m evals.summarize_runs`); a run's own",
+        "  report covers its last run only",
+        "",
+        "## Re-check",
+        "",
+        "The recount in `summary.md` was made from the unsanitised local files at the commit above.",
+        "Running `python -m evals.summarize_runs` on the files here reproduces it except for",
+        "`expect_lookup_rows`: that check re-reads each case's own copy of the measure list, whose",
+        "path is removed below and which exists only on the machine that ran the case.",
+        "",
+        "## Removed before publication",
+        "",
+        "- `measures_path` in each trajectory: a local temp path containing the user name.",
+        "- The user name inside any other local path, replaced by `<user>`.",
+        "- OpenAI `encrypted_content` inside agent messages that call a tool: opaque reasoning",
+        "  blobs. No spoken reply carries one.",
+        "- LangSmith experiment links in reports.",
+    ]
+    if note:
+        lines += ["", "## Notes", "", note]
+    return "\n".join(lines) + "\n"
+
+
+def publish_runs(
+    name: str,
+    files: list[Path],
+    summary: str,
+    note: str = "",
+    *,
+    published_dir: Path = PUBLISHED_DIR,
+    commit: str | None = None,
+    dirty: bool | None = None,
+) -> Path:
+    """Freeze a set of eval runs -- trajectories, baseline rows, majority files, reports."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", name):
+        raise SystemExit("--name: lower-case letters, digits and hyphens only")
+    if (git_dirty() if dirty is None else dirty):
+        raise SystemExit("The working tree has uncommitted changes. Commit first: the README "
+                         "records the commit, and it has to be the code that made this.")
+    commit = commit or git_commit()
+    created = datetime.now(timezone.utc)
+    folder = published_dir / f"{created:%Y%m%d-%H%M%S}-{name}"
+
+    out: dict[str, str] = {path.name: sanitise_result_file(path) for path in files}
+    out["summary.md"] = summary
+    out["README.md"] = _runs_readme(folder.name, f"{created:%Y-%m-%d %H:%M:%S}", commit, files, note)
+
+    leaks = find_personal(out, personal_markers())
+    if leaks:
+        raise SystemExit("Refusing to publish -- personal data would be included:\n  " + "\n  ".join(leaks))
+
+    folder.mkdir(parents=True, exist_ok=False)
+    for filename, text in out.items():
+        with (folder / filename).open("x", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+    return folder
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Publish a judge-calibration snapshot")
+    parser = argparse.ArgumentParser(description="Publish a judge-calibration or eval-runs snapshot")
     parser.add_argument("--name", required=True, help="Short slug, e.g. grounding-calibration.")
     parser.add_argument("--report", type=Path, action="append", default=[],
                         help="A report of the run(s) behind the corpus. Repeatable.")
     parser.add_argument("--note", default="", help="Text for the README's Notes section.")
+    parser.add_argument("--note-file", type=Path, default=None,
+                        help="Read the Notes section from a file (PowerShell mangles multi-line "
+                             "arguments that contain quotes).")
+    parser.add_argument("--runs", action="store_true",
+                        help="Publish eval runs instead of a calibration: pass the files with --file, "
+                             "and --full/--n1 for the offline recount.")
+    parser.add_argument("--file", type=Path, action="append", default=[],
+                        help="An eval-run result file to publish (with --runs). Repeatable.")
+    parser.add_argument("--full", type=Path, default=None, help="The full agent's trajectories (with --runs).")
+    parser.add_argument("--n1", type=Path, default=None, help="An N-1 run's trajectories (with --runs).")
     args = parser.parse_args()
-    folder = publish(args.name, args.report, args.note)
+    note = args.note_file.read_text(encoding="utf-8").strip() if args.note_file else args.note
+    if args.runs:
+        if args.full is None:
+            parser.error("--runs needs --full, the trajectories the recount is made from")
+        from evals.summarize_runs import render
+
+        # The recount's own inputs are always part of the snapshot.
+        files = list(dict.fromkeys([args.full, *([args.n1] if args.n1 else []), *args.file]))
+        folder = publish_runs(args.name, files, render(args.full, args.n1), note)
+    else:
+        folder = publish(args.name, args.report, note)
     print(f"Published {folder}")
     for path in sorted(folder.iterdir()):
         print(f"  {path.name}  ({path.stat().st_size} bytes)")
