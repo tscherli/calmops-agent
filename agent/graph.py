@@ -218,10 +218,13 @@ def record_choices(
     goal: Goal | None = None,
     situation: str | None = None,
 ) -> Command:
-    """Record the user's energy, their goal, their situation, or any one alone.
+    """Keep the user's energy, their goal, their situation, or any one alone, for this conversation.
+
+    This writes nothing to the log -- only a logged check-in does. Never tell
+    the user it was logged, saved or recorded.
 
     Call this the moment the user gives you one of them. Do not wait for the
-    others: telling them you noted it records nothing, and the next turn will
+    others: telling them you noted it keeps nothing, and the next turn will
     have forgotten it.
 
     energy: how they feel right now - exhausted, calm or wired.
@@ -247,7 +250,17 @@ def record_choices(
             "record_choices",
         )
     noted = ", ".join(f"{name} {value}" for name, value in update.items())
-    return state_tool_reply(f"Noted: {noted}.", tool_call_id, "record_choices", **update)
+    # The absence is said in the receipt itself. "Noted: energy exhausted." was
+    # true and left the rest to the model, which in 3 of 156 case-runs of the
+    # Step 7 sweeps (2026-09-27) then told the user the state had been
+    # "logged" -- once answering "did it actually go into the log?" with "Yes".
+    # Zero rows had been written each time.
+    return state_tool_reply(
+        f"Noted for this conversation: {noted}. Nothing was written to the log.",
+        tool_call_id,
+        "record_choices",
+        **update,
+    )
 
 
 @tool

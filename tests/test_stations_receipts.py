@@ -293,6 +293,39 @@ def test_a_call_with_neither_value_records_nothing_and_says_so(measures_file, lo
     assert "Nothing recorded" in str(result["messages"][-2].content)
 
 
+def test_noting_the_state_says_nothing_reached_the_log(measures_file, log_file):
+    """The receipt the model reads before it replies. "Noted: energy exhausted."
+    was true and left the rest to the model, which then told users their state
+    had been "logged" in 3 of 156 case-runs (2026-09-27). The absence is now
+    stated where the model reads it -- and it is true: no row exists."""
+    graph = agent_that_calls(
+        measures_file, log_file, call("record_choices", {"energy": "exhausted", "situation": "long day"})
+    )
+    result = run(graph, {"messages": [HumanMessage(content="exhausted, long day")]})
+
+    receipt = str(result["messages"][-2].content)
+    assert "for this conversation" in receipt
+    assert "Nothing was written to the log" in receipt
+    assert not log_file.exists() or log_file.read_text(encoding="utf-8").strip() == ""
+
+
+def test_the_tool_the_model_sees_does_not_call_itself_a_record():
+    """The model's word for what this tool does came from its own description,
+    which began "Record the user's energy..."."""
+    from agent.graph import record_choices
+
+    description = record_choices.description
+    assert not description.lower().startswith("record")
+    assert "writes nothing to the log" in description
+
+
+def test_the_shared_prompt_names_this_exact_confusion():
+    from agent.prompts import STATION_BASE
+
+    assert "record_choices" in STATION_BASE
+    assert "never call that logged, saved or recorded" in STATION_BASE
+
+
 # -- a receipt names the call it answers -------------------------------------
 
 
