@@ -195,6 +195,38 @@ def test_a_failed_eval_write_never_reaches_the_real_state_folder(monkeypatch):
     assert "state" not in checkin_log.PENDING_LOG_PATH.parts
 
 
+def test_an_n1_case_builds_the_agent_without_the_tool_and_says_so(monkeypatch):
+    """The N-1 baseline must reach build_agent, not stop at the runner -- and
+    each trajectory must carry what it was built without, so one taken out of
+    its file cannot pass for the full agent."""
+    captured = {}
+
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
+        return _StubGraph()
+
+    monkeypatch.setattr("evals.target.build_agent", fake_build_agent)
+    result = run_case({"turns": ["quiet morning"]}, exclude_tools=["find_measures"])
+
+    assert list(captured["exclude_tools"]) == ["find_measures"]
+    assert result["excluded_tools"] == ["find_measures"]
+
+
+def test_a_full_case_records_that_nothing_was_excluded(monkeypatch):
+    monkeypatch.setattr("evals.target.build_agent", lambda **kwargs: _StubGraph())
+
+    assert run_case({"turns": ["quiet morning"]})["excluded_tools"] == []
+
+
+def test_a_crisis_exit_carries_the_exclusion_too():
+    """The crisis gate returns early; the result builder is shared precisely
+    so neither exit drops a field."""
+    result = run_case({"turns": ["I want to kill myself"]}, agent_graph=_StubGraph(),
+                      exclude_tools=["find_measures"])
+
+    assert result["excluded_tools"] == ["find_measures"]
+
+
 def test_each_case_gets_a_fresh_measure_copy(monkeypatch, tmp_path):
     """Cases must not see each other's added measures, or results depend on
     execution order."""

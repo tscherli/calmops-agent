@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -49,7 +51,19 @@ TRAJECTORIES_DIR = EVAL_RUNS_LOG.parent
 TRAJECTORIES_GLOB = "trajectories-*.jsonl"
 
 
-def trajectories_path(directory: Path, when: datetime | None = None) -> Path:
+def variant_suffix(exclude_tools: Sequence[str]) -> str:
+    """What a reduced agent's files are marked with: `-without-<tool>...`.
+
+    In the name, not only inside the file, because the name is what `export`
+    and a person scanning the folder go by. An N-1 corpus taken for a full one
+    would calibrate the judge on an agent nobody ships.
+    """
+    return "".join(f"-without-{name}" for name in sorted(exclude_tools))
+
+
+def trajectories_path(
+    directory: Path, when: datetime | None = None, exclude_tools: Sequence[str] = ()
+) -> Path:
     """The file a run written at `when` (UTC, default now) goes to.
 
     UTC rather than local time so two machines, or one machine across a
@@ -59,21 +73,28 @@ def trajectories_path(directory: Path, when: datetime | None = None) -> Path:
     the local offset.
     """
     stamp = (when or datetime.now(timezone.utc)).strftime("%Y%m%d-%H%M%S")
-    return directory / f"trajectories-{stamp}.jsonl"
+    return directory / f"trajectories-{stamp}{variant_suffix(exclude_tools)}.jsonl"
 
 
 def latest_trajectories(directory: Path) -> Path | None:
-    """The newest run's trajectories, by the stamp in the name.
+    """The newest *full-agent* run's trajectories, by the stamp in the name.
 
     By name, not by modification time: copying or touching a file changes
     its mtime and says nothing about when the run happened. The stamp sorts
     as text because it is fixed-width and most significant first.
+
+    Runs of a reduced agent are skipped: this is what `calibrate_judge
+    export` starts a labelling round from, and the judge is calibrated on the
+    agent that ships.
     """
-    found = sorted(directory.glob(TRAJECTORIES_GLOB), key=lambda p: p.name)
+    found = sorted(
+        (p for p in directory.glob(TRAJECTORIES_GLOB) if "-without-" not in p.name),
+        key=lambda p: p.name,
+    )
     return found[-1] if found else None
 
 
-def majority_path(directory: Path, when: datetime) -> Path:
+def majority_path(directory: Path, when: datetime, exclude_tools: Sequence[str] = ()) -> Path:
     """Per-case verdicts across several runs, named like the run's trajectories.
 
     The threshold is a pass in 2 of 3, so this rather than any single report
@@ -83,7 +104,8 @@ def majority_path(directory: Path, when: datetime) -> Path:
     recorded survives only in the development log. Same stamp as the
     trajectories file of the same run, so the two can be found as a pair.
     """
-    return directory / f"majority-{when.strftime('%Y%m%d-%H%M%S')}.json"
+    return directory / f"majority-{when.strftime('%Y%m%d-%H%M%S')}{variant_suffix(exclude_tools)}.json"
+
 
 EVALUATORS = (
     crisis_gate_evaluator,
@@ -122,7 +144,7 @@ def _feedback_items(result: dict) -> list[dict]:
     return list(inner) if isinstance(inner, list) else [result]
 
 
-def evaluate_case(case: dict) -> dict:
+def evaluate_case(case: dict, exclude_tools: Sequence[str] = ()) -> dict:
     """Run one case and score it. Never raises: a crashing evaluator records
     a None score for that key rather than taking down the whole run, which
     matters because the LLM judge is known to intermittently fail parsing
@@ -138,7 +160,7 @@ def evaluate_case(case: dict) -> dict:
         # Cost and latency per case, into the suite's own file: the app's
         # observability/runs.jsonl is its real per-turn record, and a suite run
         # would bury it.
-        outputs = run_case(case_inputs(case), runs_log=EVAL_RUNS_LOG)
+        outputs = run_case(case_inputs(case), runs_log=EVAL_RUNS_LOG, exclude_tools=exclude_tools)
     except Exception as exc:
         return {
             "case_id": case["id"],
@@ -253,9 +275,9 @@ def _print_majority(summary: list[dict]) -> None:
         )
 
 
-def _one_pass(cases: list[dict], workers: int) -> list[dict]:
+def _one_pass(cases: list[dict], workers: int, exclude_tools: Sequence[str] = ()) -> list[dict]:
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        rows = list(pool.map(evaluate_case, cases))
+        rows = list(pool.map(partial(evaluate_case, exclude_tools=exclude_tools), cases))
     # Preserve dataset order regardless of completion order, so two reports
     # are diffable line by line.
     order = {case["id"]: i for i, case in enumerate(cases)}
@@ -268,21 +290,27 @@ def run_local(
     workers: int = DEFAULT_WORKERS,
     trajectories_dir: Path | None = None,
     runs: int = 1,
+    exclude_tools: Sequence[str] = (),
 ) -> dict:
     cases = cases if cases is not None else load_cases()
-    print(f"Running {len(cases)} cases locally ({workers} workers, no LangSmith)...")
+    without = f", WITHOUT {', '.join(sorted(exclude_tools))}" if exclude_tools else ""
+    print(f"Running {len(cases)} cases locally ({workers} workers, no LangSmith{without})...")
 
     rows_by_run = []
     for index in range(runs):
         if runs > 1:
             print(f"\n-- run {index + 1} of {runs} --")
-        pass_rows = _one_pass(cases, workers)
+        pass_rows = _one_pass(cases, workers, exclude_tools)
         for row in pass_rows:
             row["run_index"] = index
         rows_by_run.append(pass_rows)
 
     rows = rows_by_run[-1]
-    report = _build_report(rows, experiment_url=None, experiment_name="local run (no LangSmith)")
+    # The report's own title says it, since its file name is stamped by a
+    # helper shared with the hosted runner and carries no variant.
+    report = _build_report(
+        rows, experiment_url=None, experiment_name=f"local run (no LangSmith{without})"
+    )
     report_path = _write_report(report)
     print(report)
     print(f"\nFull report written to {report_path}")
@@ -297,14 +325,14 @@ def run_local(
         # verdict and the single-run report is only the last sample of it.
         summary = majority(rows_by_run)
         _print_majority(summary)
-        path = majority_path(trajectories_dir or TRAJECTORIES_DIR, finished)
+        path = majority_path(trajectories_dir or TRAJECTORIES_DIR, finished, exclude_tools)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("x", encoding="utf-8") as handle:
             handle.write(json.dumps(summary, indent=2))
         print(f"\nPer-case verdicts written to {path}")
 
     if trajectories_dir is not None:
-        path = trajectories_path(trajectories_dir, finished)
+        path = trajectories_path(trajectories_dir, finished, exclude_tools)
         written = _save_trajectories(
             [row for pass_rows in rows_by_run for row in pass_rows], path
         )
@@ -322,6 +350,11 @@ if __name__ == "__main__":
              "The threshold is a pass in 2 of 3, so one run is a sample rather "
              "than a verdict.",
     )
+    parser.add_argument(
+        "--exclude-tool", action="append", default=[], dest="exclude_tools",
+        help="Build the agent without this tool (repeatable): the N-1 baseline, "
+             "e.g. --exclude-tool find_measures. Its files are marked -without-<tool>.",
+    )
     args = parser.parse_args()
 
     selected = load_cases()
@@ -337,4 +370,5 @@ if __name__ == "__main__":
         workers=args.workers,
         trajectories_dir=TRAJECTORIES_DIR,
         runs=max(1, args.runs),
+        exclude_tools=args.exclude_tools,
     )

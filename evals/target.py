@@ -15,6 +15,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
@@ -161,19 +162,25 @@ def seed_measures(rows: list[dict], measures_path: Path) -> None:
         append_measure(full, measures_path)
 
 
-def build_eval_graph(log_path: Path, measures_path: Path, *, model: Any = None):
+def build_eval_graph(
+    log_path: Path, measures_path: Path, *, model: Any = None, exclude_tools: Sequence[str] = ()
+):
     """The agent as the harness runs it.
 
     The checkpointer is the whole point: without one the graph cannot pause on
     an approval card, and `tools_node` refuses every write for lack of a
     decision. The suite would then grade an agent forbidden to add a measure
     or log a check-in -- half of what it exists to do.
+
+    `exclude_tools` builds the same agent minus those tools, for the N-1
+    baseline (agent/graph.py, build_agent).
     """
     return build_agent(
         model=model,
         log_path=log_path,
         measures_path=measures_path,
         checkpointer=InMemorySaver(),
+        exclude_tools=exclude_tools,
     )
 
 
@@ -226,6 +233,7 @@ def _result(
     measures_path: Path,
     measures_before: set[str],
     nodes_run: list[str] | None = None,
+    exclude_tools: Sequence[str] = (),
 ) -> dict:
     """What a case reports, whichever way the turn loop ended.
 
@@ -253,6 +261,10 @@ def _result(
         # to cover the graph; this is what turns that claim into something a
         # test can check, per case and across the dataset.
         "nodes_run": list(dict.fromkeys(nodes_run or [])),
+        # Which tools the agent was built without (the N-1 baseline). Carried
+        # on every trajectory, so one taken out of its file still says it came
+        # from a reduced agent and cannot be read as the full one.
+        "excluded_tools": sorted(exclude_tools),
     }
 
 
@@ -263,6 +275,7 @@ def run_case(
     log_path: Path | None = None,
     measures_path: Path | None = None,
     runs_log: Path | None = None,
+    exclude_tools: Sequence[str] = (),
 ) -> dict:
     """The function LangSmith's evaluate() calls once per Example (and the
     same logic run_baseline.py's no-tools comparison is built against).
@@ -298,7 +311,11 @@ def run_case(
         )
     if measures_path is None:
         measures_path = _isolated_measures_path()
-    graph = agent_graph if agent_graph is not None else build_eval_graph(log_path, measures_path)
+    graph = (
+        agent_graph
+        if agent_graph is not None
+        else build_eval_graph(log_path, measures_path, exclude_tools=exclude_tools)
+    )
 
     if inputs.get("seed_entries"):
         seed_log(inputs["seed_entries"], log_path)
@@ -347,7 +364,7 @@ def run_case(
             return {
                 **_result(
                     transcript, tool_events, approvals, log_path, measures_path,
-                    measures_before, nodes_run,
+                    measures_before, nodes_run, exclude_tools,
                 ),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
@@ -403,5 +420,5 @@ def run_case(
         state = next_turn_state(result)
 
     return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before,
-                      nodes_run),
+                      nodes_run, exclude_tools),
             "crisis_intercepted": False}

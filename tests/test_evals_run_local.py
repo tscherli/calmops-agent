@@ -373,6 +373,48 @@ def test_a_multi_run_leaves_its_majority_beside_its_trajectories(monkeypatch, tm
     assert not (tmp_path / "majority.json").exists()
 
 
+def test_an_n1_run_marks_every_file_and_reaches_every_case(monkeypatch, tmp_path):
+    """A reduced agent's corpus taken for a full one would calibrate the judge
+    on an agent nobody ships -- so the mark is in the file names, where export
+    and a person scanning the folder look, and the exclusion has to reach the
+    target for every case, not stop at the runner."""
+    seen = []
+
+    def spy_run_case(*args, **kwargs):
+        seen.append(tuple(kwargs.get("exclude_tools") or ()))
+        return _stub_outputs()
+
+    monkeypatch.setattr(run_local_module, "run_case", spy_run_case)
+    monkeypatch.setattr(
+        run_local_module,
+        "EVALUATORS",
+        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},),
+    )
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
+
+    run_local_module.run_local(
+        [_CASE, {**_CASE, "id": "case_02"}], workers=2, trajectories_dir=tmp_path, runs=2,
+        exclude_tools=["find_measures"],
+    )
+
+    assert seen and set(seen) == {("find_measures",)}
+    [trajectories_file] = tmp_path.glob("trajectories-*.jsonl")
+    [majority_file] = tmp_path.glob("majority-*.json")
+    assert trajectories_file.name.endswith("-without-find_measures.jsonl")
+    assert majority_file.name.endswith("-without-find_measures.json")
+
+
+def test_the_newest_full_run_is_found_past_a_newer_reduced_one(tmp_path):
+    """export starts a labelling round from the newest run; an N-1 run made
+    afterwards must not become that round's corpus."""
+    full = tmp_path / "trajectories-20260927-090000.jsonl"
+    reduced = tmp_path / "trajectories-20260927-120000-without-find_measures.jsonl"
+    for path in (full, reduced):
+        path.write_text("", encoding="utf-8")
+
+    assert run_local_module.latest_trajectories(tmp_path) == full
+
+
 def test_a_row_with_no_outputs_is_not_written(tmp_path):
     """A case whose target raised has nothing to label."""
     path = tmp_path / "trajectories.jsonl"
