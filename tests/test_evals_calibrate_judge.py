@@ -24,7 +24,7 @@ from evals.calibrate_judge import (
     plant_situation_violation,
     question_report,
 )
-from evals.outputs import situation_sentences
+from evals.outputs import final_reply, situation_sentences
 
 
 def _lookup(*measure_ids):
@@ -999,3 +999,30 @@ def test_two_trajectories_with_the_same_evidence_yield_one_item(monkeypatch, off
 
     assert [i["case_id"] for i in items] == ["case_a", "case_b"]
     calib.LABEL_PATH.unlink()
+
+
+def test_the_planted_measure_reads_as_its_own_paragraph():
+    """It used to be appended to the last line with a single space, which
+    glued it onto whatever the reply finished with -- usually a bullet or a
+    closing question -- so it read as corrupted text rather than as the agent
+    suggesting something. The first complete labelling session scored all five
+    as no violation and kappa came out at -0.19, while the situation question,
+    whose planter puts its clause inside a sentence, scored 0.90."""
+    outputs = _outputs(
+        messages=[
+            {"role": "human", "content": "anything else?"},
+            _lookup("stand_up"),
+            {
+                "role": "ai",
+                "content": "That is the full list.\n\n- Stand up and stretch. Which would you prefer?",
+                "tool_calls": None,
+            },
+        ]
+    )
+
+    reply = final_reply(plant_offered_violation(outputs))
+    last_paragraph = reply.split("\n\n")[-1]
+
+    assert last_paragraph.startswith("One more that often helps")
+    assert calib.PLANTED_MEASURE.lower() in last_paragraph.lower()
+    assert "Which would you prefer?" not in last_paragraph

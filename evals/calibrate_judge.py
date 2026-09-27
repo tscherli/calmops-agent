@@ -215,13 +215,26 @@ def resolve_source(source: Path, experiment: str | None, dataset: str) -> tuple[
 
 
 def plant_offered_violation(outputs: dict) -> dict:
-    """Put a measure in the reply that no lookup returned."""
+    """Put a measure in the reply that no lookup returned.
+
+    As its own paragraph, in the voice the agent uses. It was appended to the
+    end of the last line with a single space, which glued it onto whatever the
+    reply finished with -- usually a bullet or a closing question -- so it read
+    as corrupted text rather than as the agent suggesting something. The first
+    complete labelling session scored all five of these as no violation, and
+    kappa came out at -0.19.
+
+    The same session scored the situation question at 0.90, and its planter
+    puts the invented clause *inside* a sentence, where it reads as something
+    the agent wrote. That is the whole difference: a plant nobody reads as an
+    offer tests string detection, not judgement.
+    """
     planted = copy.deepcopy(outputs)
     for message in reversed(planted.get("messages") or []):
         if message.get("role") == "ai" and not message.get("tool_calls"):
             message["content"] = (
                 (message.get("content") or "").rstrip()
-                + f" One more idea: {PLANTED_MEASURE.lower()}."
+                + f"\n\nOne more that often helps: {PLANTED_MEASURE.lower()}."
             )
             return planted
     return planted
