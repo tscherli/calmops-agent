@@ -59,7 +59,7 @@ from agent.model import DEFAULT_MODEL, resolve_model
 from evals.create_dataset import load_cases
 from evals.evaluators import fabrication_evaluator
 from evals.judge import OFFERED_KEY, SITUATION_KEY, _format_measures, judge_evaluator
-from evals.run_local import DEFAULT_WORKERS, TRAJECTORIES_DIR, _feedback_items, case_inputs
+from evals.run_local import DEFAULT_WORKERS, TRAJECTORIES_DIR, _feedback_items, case_inputs, describe_error
 from evals.target import _isolated_measures_path, seed_measures, serialize_messages
 from tools.measures import read_measures
 
@@ -156,7 +156,7 @@ def evaluate_baseline_case(case: dict) -> dict:
     try:
         outputs = run_baseline_case(case_inputs(case))
     except Exception as exc:
-        return {"case_id": case["id"], "category": case["category"], "scores": {}, "error": str(exc)}
+        return {"case_id": case["id"], "category": case["category"], "scores": {}, **describe_error(exc)}
     scores: dict = {}
     for evaluator in EVALUATORS:
         try:

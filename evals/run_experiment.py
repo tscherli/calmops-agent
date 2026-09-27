@@ -212,6 +212,14 @@ def _build_report(rows: list[dict], *, experiment_url: str | None, experiment_na
         )
     lines.append("")
 
+    crashed = [r for r in rows if r.get("error")]
+    if crashed:
+        # A case that raised is not a case the agent got wrong, and a bare
+        # "target_error: fail" in the per-case table reads as if it were.
+        lines += ["## Cases that raised instead of finishing", ""]
+        lines += [f"- `{r['case_id']}`: {r['error']}" for r in crashed]
+        lines.append("")
+
     lines.extend(_completion_and_cost(rows))
 
     lines.append("## Advisory (not counted in Overall)")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import traceback
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
@@ -144,6 +145,41 @@ def _feedback_items(result: dict) -> list[dict]:
     return list(inner) if isinstance(inner, list) else [result]
 
 
+def describe_error(exc: BaseException) -> dict:
+    """What a crashed case leaves behind: the type, the message, and where.
+
+    `str(exc)` alone was all a crash kept, on a row the trajectories file then
+    dropped for having no outputs -- so on 2026-09-27 a case that raised in
+    run 10 of 10 left "target_error" in a report and nothing else anywhere.
+    A timeout and a bug in the harness look identical from a bare message; the
+    type and the last frames tell them apart.
+    """
+    frames = traceback.format_exception(type(exc), exc, exc.__traceback__)
+    return {
+        "error": f"{type(exc).__name__}: {exc}",
+        # The tail is where it happened; the head is always the same runner.
+        "traceback": "".join(frames[-4:]).strip(),
+    }
+
+
+def errors_path(directory: Path, when: datetime, exclude_tools: Sequence[str] = ()) -> Path:
+    """Every crash of an invocation, named like its trajectories and majority."""
+    return directory / f"errors-{when.strftime('%Y%m%d-%H%M%S')}{variant_suffix(exclude_tools)}.jsonl"
+
+
+def _save_errors(rows: list[dict], path: Path) -> int:
+    """Write the crashed case-runs, if there were any; the file exists only then."""
+    crashed = [r for r in rows if r.get("error")]
+    if not crashed:
+        return 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as handle:
+        for row in crashed:
+            record = {k: row.get(k) for k in ("case_id", "run_index", "error", "traceback")}
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return len(crashed)
+
+
 def evaluate_case(case: dict, exclude_tools: Sequence[str] = ()) -> dict:
     """Run one case and score it. Never raises: a crashing evaluator records
     a None score for that key rather than taking down the whole run, which
@@ -167,7 +203,7 @@ def evaluate_case(case: dict, exclude_tools: Sequence[str] = ()) -> dict:
             "difficulty": case["difficulty"],
             "category": case["category"],
             "scores": {"target_error": False},
-            "error": str(exc),
+            **describe_error(exc),
         }
 
     scores: dict = {}
@@ -339,12 +375,23 @@ def run_local(
             handle.write(json.dumps(summary, indent=2))
         print(f"\nPer-case verdicts written to {path}")
 
+    all_rows = [row for pass_rows in rows_by_run for row in pass_rows]
+    crashed = [r for r in all_rows if r.get("error")]
+    if crashed:
+        # Said in the terminal as well as written down: a crash that shows
+        # only as a failed check reads as the agent getting it wrong.
+        print(f"\n{len(crashed)} case-run(s) raised instead of finishing:")
+        for row in crashed:
+            print(f"  {row['case_id']} run {row.get('run_index', 0) + 1}: {row['error']}")
+
     if trajectories_dir is not None:
         path = trajectories_path(trajectories_dir, finished, exclude_tools)
-        written = _save_trajectories(
-            [row for pass_rows in rows_by_run for row in pass_rows], path
-        )
+        written = _save_trajectories(all_rows, path)
         print(f"{written} trajectories saved to {path}")
+        if crashed:
+            error_file = errors_path(trajectories_dir, finished, exclude_tools)
+            _save_errors(all_rows, error_file)
+            print(f"{len(crashed)} crash(es) saved to {error_file}")
     return {"rows": rows, "report_path": report_path, "majority": summary}
 
 

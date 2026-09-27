@@ -5,6 +5,8 @@ that it feeds the target the same inputs a hosted run would, and that one
 broken piece can't take down the whole run (the reason this module exists
 is that a transient network failure destroyed a paid run's results).
 """
+import json
+
 import pytest
 
 import evals.run_local as run_local_module
@@ -434,3 +436,75 @@ def test_the_row_carries_the_cases_usage_and_its_write_direction(monkeypatch):
 
     assert row["usage"] == usage
     assert row["should_write"] is True
+
+
+# -- a case that crashes leaves a record -----------------------------------------
+
+
+def test_a_crash_keeps_its_type_and_where_it_happened(monkeypatch):
+    """A timeout and a bug in the harness look alike as a bare message."""
+    def stalls(*args, **kwargs):
+        raise TimeoutError("Request timed out.")
+
+    monkeypatch.setattr(run_local_module, "run_case", stalls)
+
+    row = evaluate_case(_CASE)
+
+    assert row["error"] == "TimeoutError: Request timed out."
+    assert "stalls" in row["traceback"]
+
+
+def _crash_in_run(index_to_crash):
+    """A run_case that raises in one run of several, for one case."""
+    calls = {"n": 0}
+
+    def run_case_stub(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == index_to_crash:
+            raise TimeoutError("Request timed out.")
+        return _stub_outputs()
+
+    return run_case_stub
+
+
+def test_a_crash_in_any_run_is_written_down(monkeypatch, tmp_path, capsys):
+    """What happened on 2026-09-27: a case raised in the last of ten runs and
+    left only "target_error" in a report. Here it raises in the first of two,
+    which the report -- last run only -- cannot show at all."""
+    monkeypatch.setattr(run_local_module, "run_case", _crash_in_run(1))
+    monkeypatch.setattr(run_local_module, "EVALUATORS",
+                        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},))
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
+
+    run_local_module.run_local([_CASE], workers=1, trajectories_dir=tmp_path, runs=2)
+
+    [errors_file] = tmp_path.glob("errors-*.jsonl")
+    [trajectories_file] = tmp_path.glob("trajectories-*.jsonl")
+    assert errors_file.name.removeprefix("errors-") == trajectories_file.name.removeprefix("trajectories-")
+    [record] = [json.loads(line) for line in errors_file.read_text(encoding="utf-8").splitlines()]
+    assert record["case_id"] == "case_01" and record["run_index"] == 0
+    assert record["error"] == "TimeoutError: Request timed out."
+    assert "case_01 run 1: TimeoutError" in capsys.readouterr().out
+
+
+def test_no_crash_means_no_errors_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(run_local_module, "run_case", _stub_outputs)
+    monkeypatch.setattr(run_local_module, "EVALUATORS",
+                        (lambda outputs, reference_outputs: {"key": "alpha", "score": True},))
+    monkeypatch.setattr(run_local_module, "_write_report", lambda report: tmp_path / "report.md")
+
+    run_local_module.run_local([_CASE], workers=1, trajectories_dir=tmp_path)
+
+    assert list(tmp_path.glob("errors-*.jsonl")) == []
+
+
+def test_the_report_names_a_crash_rather_than_scoring_it(monkeypatch, tmp_path):
+    from evals.run_experiment import _build_report
+
+    row = {"case_id": "case_01", "difficulty": "simple", "category": "x",
+           "scores": {"target_error": False}, "error": "TimeoutError: Request timed out."}
+
+    report = _build_report([row], experiment_url=None, experiment_name="t")
+
+    assert "## Cases that raised instead of finishing" in report
+    assert "`case_01`: TimeoutError: Request timed out." in report
