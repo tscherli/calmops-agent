@@ -184,6 +184,14 @@ def evaluate_case(case: dict, exclude_tools: Sequence[str] = ()) -> dict:
         "difficulty": case["difficulty"],
         "category": case["category"],
         "scores": scores,
+        # Its own field, lifted out of the outputs: the report reads cost,
+        # latency and model calls from here and never from `outputs`, so a
+        # case with no outputs (a target error) cannot break it.
+        "usage": outputs.get("usage"),
+        # Which way the case's task completion points: True "should write",
+        # False "should not", None "does not say". The report counts the two
+        # directions apart.
+        "should_write": (case.get("expect") or {}).get("reached_write"),
         # Carried on the row so the runner can save it. The report never
         # reads it; evals/calibrate_judge.py does.
         "outputs": outputs,

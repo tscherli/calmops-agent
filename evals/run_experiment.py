@@ -117,6 +117,64 @@ def expect_verdict(scores: dict) -> bool | None:
     return all(graded) if graded else None
 
 
+def _completion_and_cost(rows: list[dict]) -> list[str]:
+    """Did the job get done, how much work did it take, what did it cost.
+
+    The headline says whether assertions held; this says whether the case
+    ended where it was meant to. Two different questions, and the second is
+    the one a reader asks first. Task completion is `expect_reached_write`:
+    a case that should write and did, or should not write and did not. Both
+    directions are counted and shown apart, because "should not" dominates the
+    dataset and would otherwise hide the few that are about finishing a job.
+
+    Cost and latency come from each row's `usage`, which only a local run
+    fills in (evals/target.py adds it up per case). A hosted run's rows have
+    none, and the section says so rather than printing zeros.
+    """
+    lines = ["## Task completion, effort and cost", ""]
+    completion = [r for r in rows if r["scores"].get("expect_reached_write") is not None]
+    if completion:
+        done = [r for r in completion if r["scores"]["expect_reached_write"]]
+        lines.append(
+            f"- Task completion: {len(done)}/{len(completion)} cases ended where they were meant "
+            f"to ({len(done) / len(completion) * 100:.0f}%) -- the {len(completion)} whose expect "
+            "block says whether a write should happen"
+        )
+        for direction, label in ((True, "should write, and did"), (False, "should not write, and did not")):
+            side = [r for r in completion if r.get("should_write") is direction]
+            if side:
+                side_done = sum(1 for r in side if r["scores"]["expect_reached_write"])
+                lines.append(f"  - {label}: {side_done}/{len(side)}")
+    else:
+        lines.append("- Task completion: no case in this run says whether it should write")
+
+    used = [r["usage"] for r in rows if r.get("usage")]
+    if not used:
+        lines += ["- Cost, latency and model calls: not recorded for this run (hosted runs "
+                  "carry no per-case usage; run evals/run_local.py)", ""]
+        return lines
+    calls = [u.get("model_calls", 0) for u in used]
+    cost = [u.get("cost_usd", 0.0) for u in used]
+    latency = [u.get("latency_seconds", 0.0) for u in used]
+    passed = sum(1 for r in rows if case_passed(r["scores"]))
+    lines += [
+        f"- Model calls per case: mean {sum(calls) / len(calls):.1f}, max {max(calls)} "
+        "(a case's user turns are fixed by its script; calls are what show looping or padding)",
+        f"- Cost per case: mean ${sum(cost) / len(cost):.4f}, total ${sum(cost):.4f} "
+        f"for {len(used)} cases",
+        f"- Cost per passing case: "
+        + (f"${sum(cost) / passed:.4f} (total cost / {passed} passing)" if passed else "n/a, none passed"),
+        f"- Latency per case: mean {sum(latency) / len(latency):.1f}s, max {max(latency):.1f}s "
+        "(agent turns only; the crisis gate and the graders are not timed)",
+        "- The judge's own calls (Gemini) are not in these figures.",
+    ]
+    unpriced = sorted({m for u in used for m in u.get("unpriced_models") or []})
+    if unpriced:
+        lines.append(f"- **Unpriced models, counted as $0:** {', '.join(unpriced)}")
+    lines.append("")
+    return lines
+
+
 def _build_report(rows: list[dict], *, experiment_url: str | None, experiment_name: str) -> str:
     lines = [
         f"# Eval report: {experiment_name}",
@@ -153,6 +211,8 @@ def _build_report(rows: list[dict], *, experiment_url: str | None, experiment_na
             "a case passes when every assertion it makes passes"
         )
     lines.append("")
+
+    lines.extend(_completion_and_cost(rows))
 
     lines.append("## Advisory (not counted in Overall)")
     lines.append("")

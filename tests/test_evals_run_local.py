@@ -421,3 +421,16 @@ def test_a_row_with_no_outputs_is_not_written(tmp_path):
 
     assert run_local_module._save_trajectories([{"case_id": "a", "category": "x"}], path) == 0
     assert path.read_text(encoding="utf-8") == ""
+
+
+def test_the_row_carries_the_cases_usage_and_its_write_direction(monkeypatch):
+    """The report reads cost from the row, never from the outputs -- so the
+    runner has to lift it across, or every local report says "not recorded"."""
+    usage = {"model_calls": 3, "cost_usd": 0.01, "latency_seconds": 2.0, "unpriced_models": []}
+    monkeypatch.setattr(run_local_module, "run_case", lambda *a, **k: {**_stub_outputs(), "usage": usage})
+    monkeypatch.setattr(run_local_module, "EVALUATORS", ())
+
+    row = evaluate_case({**_CASE, "expect": {"reached_write": True}})
+
+    assert row["usage"] == usage
+    assert row["should_write"] is True

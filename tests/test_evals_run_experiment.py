@@ -158,3 +158,67 @@ def test_every_judge_question_stays_out_of_the_headline():
 
     assert set(JUDGE_KEYS) <= set(ADVISORY_KEYS)
     assert {OFFERED_KEY, SITUATION_KEY} == set(JUDGE_KEYS)
+
+
+# -- task completion, effort and cost ----------------------------------------
+
+
+def _completion_row(case_id, *, should_write=None, reached=None, passed=True, usage=None):
+    scores = {"no_fabrication": passed}
+    if reached is not None:
+        scores["expect_reached_write"] = reached
+    return {"case_id": case_id, "difficulty": "simple", "category": "light_checkin",
+            "scores": scores, "should_write": should_write, "usage": usage}
+
+
+def _usage(calls, cost, seconds, unpriced=()):
+    return {"model_calls": calls, "cost_usd": cost, "latency_seconds": seconds,
+            "unpriced_models": list(unpriced)}
+
+
+def test_task_completion_counts_both_directions_apart():
+    """Most cases are about *not* writing; counted together they would hide
+    the few that are about finishing a job."""
+    rows = [
+        _completion_row("a", should_write=True, reached=True),
+        _completion_row("b", should_write=True, reached=False),
+        _completion_row("c", should_write=False, reached=True),
+        _completion_row("d", should_write=False, reached=True),
+        _completion_row("e"),  # says nothing about writing: not counted
+    ]
+
+    report = _build_report(rows, experiment_url=None, experiment_name="t")
+
+    assert "Task completion: 3/4 cases ended where they were meant to (75%)" in report
+    assert "should write, and did: 1/2" in report
+    assert "should not write, and did not: 2/2" in report
+
+
+def test_cost_latency_and_model_calls_are_reported_per_case():
+    rows = [
+        _completion_row("a", usage=_usage(2, 0.002, 3.0)),
+        _completion_row("b", usage=_usage(4, 0.004, 5.0), passed=False),
+    ]
+
+    report = _build_report(rows, experiment_url=None, experiment_name="t")
+
+    assert "Model calls per case: mean 3.0, max 4" in report
+    assert "Cost per case: mean $0.0030, total $0.0060 for 2 cases" in report
+    assert "Cost per passing case: $0.0060 (total cost / 1 passing)" in report
+    assert "Latency per case: mean 4.0s, max 5.0s" in report
+
+
+def test_a_model_with_no_price_is_named_not_hidden():
+    """It costs $0 in the sum, which would read as cheap."""
+    report = _build_report([_completion_row("a", usage=_usage(1, 0.0, 1.0, unpriced=["gpt-9"]))],
+                           experiment_url=None, experiment_name="t")
+
+    assert "Unpriced models, counted as $0:** gpt-9" in report
+
+
+def test_a_run_without_usage_says_so_instead_of_printing_zeros():
+    """Hosted runs carry no per-case usage. Zeros would read as free."""
+    report = _build_report([_completion_row("a")], experiment_url=None, experiment_name="t")
+
+    assert "not recorded for this run" in report
+    assert "$0.0000" not in report

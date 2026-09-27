@@ -26,7 +26,7 @@ from agent.common import message_text
 from agent.graph import EDITABLE_ARG, WRITE_TOOLS, build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
 from agent.safety import screen_for_crisis
-from observability.tracing import RunRecorder
+from observability.tracing import RunRecorder, summarize_turn
 from tools import checkin_log
 from tools.checkin_log import append_checkin_row, read_checkin_rows
 from tools.measures import MEASURE_COLUMNS, MEASURES_PATH, append_measure, measure_ids
@@ -225,6 +225,32 @@ def _nodes_run(graph: Any, config: dict) -> list[str]:
         return []
 
 
+def _new_usage() -> dict:
+    return {"cost_usd": 0.0, "latency_seconds": 0.0, "input_tokens": 0, "output_tokens": 0,
+            "web_searches": 0, "unpriced_models": set()}
+
+
+def _add_turn(usage: dict, turn: Any) -> None:
+    """Fold one turn's record (observability/tracing.py, TurnRecord) into the case."""
+    usage["cost_usd"] += turn.estimated_cost_usd
+    usage["latency_seconds"] += turn.latency_seconds
+    usage["input_tokens"] += turn.input_tokens
+    usage["output_tokens"] += turn.output_tokens
+    usage["web_searches"] += turn.web_searches
+    usage["unpriced_models"].update(turn.unpriced_models)
+
+
+def _usage_dict(usage: dict) -> dict:
+    """JSON-safe, and rounded like the per-turn records are."""
+    return {
+        **usage,
+        "cost_usd": round(usage["cost_usd"], 6),
+        "latency_seconds": round(usage["latency_seconds"], 3),
+        # A model with no price costs nothing in the sum; said, not hidden.
+        "unpriced_models": sorted(usage["unpriced_models"]),
+    }
+
+
 def _result(
     transcript: list[BaseMessage],
     tool_events: list[dict],
@@ -234,6 +260,7 @@ def _result(
     measures_before: set[str],
     nodes_run: list[str] | None = None,
     exclude_tools: Sequence[str] = (),
+    usage: dict | None = None,
 ) -> dict:
     """What a case reports, whichever way the turn loop ended.
 
@@ -242,6 +269,18 @@ def _result(
     after a write reported no rows, no cards and no write at all.
     """
     return {
+        # What the case cost and how much work it took, added up while it ran.
+        # eval-runs.jsonl keeps the same figures per turn but carries no case
+        # id, so nothing could ever read them back per case -- which is why
+        # the report had cost tracking for the app and none for the evals.
+        # Model calls, not user turns: a case's user turns are fixed by its
+        # script, so only the calls the agent made can show it looping or
+        # padding. The judge's own (Gemini) calls are not in here.
+        "usage": {
+            **(usage or {}),
+            "user_turns": sum(1 for m in transcript if isinstance(m, HumanMessage)),
+            "model_calls": sum(1 for m in transcript if isinstance(m, AIMessage)),
+        },
         "messages": serialize_messages(transcript),
         "tool_events": tool_events,
         "approvals": approvals,
@@ -344,6 +383,7 @@ def run_case(
     # that drives a case append a record to the repo, which is how this was
     # first written and what the untracked file it left behind showed.
     recorder = RunRecorder(log_path=runs_log) if runs_log else None
+    usage = _new_usage()
     # Which nodes ran, accumulated across turns. A case reaching `debate` on
     # its third turn has reached it, and the union over the dataset is what
     # tests/test_evals_dataset.py checks the graph against.
@@ -364,7 +404,7 @@ def run_case(
             return {
                 **_result(
                     transcript, tool_events, approvals, log_path, measures_path,
-                    measures_before, nodes_run, exclude_tools,
+                    measures_before, nodes_run, exclude_tools, _usage_dict(usage),
                 ),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
@@ -409,16 +449,17 @@ def run_case(
 
         nodes_run.extend(_nodes_run(graph, config))
         tool_events.extend(result.get("tool_events") or [])
-        if recorder is not None:
-            try:
-                recorder.record_turn(
-                    messages_before, result.get("messages") or [],
-                    model=DEFAULT_MODEL, latency_seconds=time.monotonic() - started,
-                )
-            except Exception:  # a cost record must never fail a case
-                pass
+        try:
+            # Summarised whether or not a runs_log was given, so the case's
+            # own usage is always there; appended to the file only when asked.
+            args = (messages_before, result.get("messages") or [])
+            kwargs = {"model": DEFAULT_MODEL, "latency_seconds": time.monotonic() - started}
+            turn = recorder.record_turn(*args, **kwargs) if recorder else summarize_turn(*args, **kwargs)
+            _add_turn(usage, turn)
+        except Exception:  # a cost record must never fail a case
+            pass
         state = next_turn_state(result)
 
     return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before,
-                      nodes_run, exclude_tools),
+                      nodes_run, exclude_tools, _usage_dict(usage)),
             "crisis_intercepted": False}

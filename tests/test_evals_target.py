@@ -592,3 +592,66 @@ def test_a_crisis_on_the_first_turn_reports_empty_rows_not_missing_ones(tmp_path
     assert result["reached_write"] is False
     assert result["approvals"] == []
     assert "measures_path" in result
+
+
+# -- what a case cost ----------------------------------------------------------
+
+
+class _PricedGraph(_StubGraph):
+    """Replies the way a real model call does: with token usage and a model name."""
+
+    def invoke(self, payload, config=None):
+        self.calls.append(payload)
+        reply = AIMessage(
+            content="ok",
+            usage_metadata={"input_tokens": 1000, "output_tokens": 100, "total_tokens": 1100},
+            response_metadata={"model_name": self.reply_content},
+        )
+        return {**self.final_state, "messages": [*payload["messages"], reply]}
+
+
+def test_a_case_adds_up_its_own_cost_and_work():
+    """eval-runs.jsonl has the same figures per turn but no case id, so they
+    could never be read back per case. The case carries its own total."""
+    from observability.tracing import summarize_turn
+
+    one_turn = summarize_turn(
+        [], [AIMessage(content="ok", usage_metadata={"input_tokens": 1000, "output_tokens": 100,
+                                                      "total_tokens": 1100},
+                       response_metadata={"model_name": "gpt-5-mini"})],
+        model="gpt-5-mini", latency_seconds=0.0,
+    ).estimated_cost_usd
+
+    result = run_case({"turns": ["first", "second"]}, agent_graph=_PricedGraph(reply_content="gpt-5-mini"))
+
+    usage = result["usage"]
+    assert usage["user_turns"] == 2 and usage["model_calls"] == 2
+    assert usage["input_tokens"] == 2000 and usage["output_tokens"] == 200
+    assert one_turn > 0 and usage["cost_usd"] == round(2 * one_turn, 6)
+    assert usage["unpriced_models"] == []
+
+
+def test_usage_is_there_without_a_runs_log(tmp_path):
+    """The per-turn file is opt-in; the case's own total is not."""
+    result = run_case({"turns": ["hi"]}, agent_graph=_PricedGraph(reply_content="gpt-5-mini"))
+
+    assert result["usage"]["model_calls"] == 1
+    assert not (tmp_path / "runs.jsonl").exists()
+
+
+def test_an_unpriced_model_is_named_in_the_usage():
+    result = run_case({"turns": ["hi"]}, agent_graph=_PricedGraph(reply_content="gpt-9-unknown"))
+
+    assert result["usage"]["unpriced_models"] == ["gpt-9-unknown"]
+    assert result["usage"]["cost_usd"] == 0.0
+
+
+def test_a_crisis_exit_carries_usage_too():
+    result = run_case({"turns": ["busy week", "I want to end my life"]},
+                      agent_graph=_PricedGraph(reply_content="gpt-5-mini"))
+
+    assert result["crisis_intercepted"] is True
+    assert result["usage"]["model_calls"] == 1 and result["usage"]["user_turns"] == 1
+    # The cost of the turn before the crisis, not just the counts: the counts
+    # come from the transcript and would survive the crisis exit dropping usage.
+    assert result["usage"]["cost_usd"] > 0 and result["usage"]["input_tokens"] == 1000
