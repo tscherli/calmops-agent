@@ -38,7 +38,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 | `tools/log_query.py` | `analyze_stress_patterns` — deterministic, read-only aggregation for the weekly digest. |
 | `scheduler.py` + `scheduler_config.py` | Config-driven check-in times and the weekly digest. |
 | `observability/tracing.py` | Per-turn token/cost/latency/tool-call JSONL, independent of LangSmith. |
-| `evals/` | LangSmith-based eval suite. **Currently describes the previous architecture — see "Results & limitations".** |
+| `evals/` | The eval suite. Runs locally; its conversations are traced to LangSmith like the app's — see [Where the evals run, and where tracing goes](#where-the-evals-run-and-where-tracing-goes). |
 
 ### The station graph
 
@@ -218,27 +218,35 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **The dataset is rebuilt but not yet measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 22 in the regression tier, which must pass, and 4 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. The four name two root causes between them, not four faults. The commands below work; what is missing before these are quality numbers is the baseline comparison, which has not been run at all.
+> **The dataset is rebuilt but not yet measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 22 in the regression tier, which must pass, and 4 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. The four name two root causes between them, not four faults. The full agent, the agent without its measure lookup and the no-tools baseline have all been run; the published results are in `evals/published/`, and this section's results write-up is being rewritten.
 
-**With LangSmith:**
+### Where the evals run, and where tracing goes
+
+**Tracing goes to LangSmith; the eval runner runs locally.** They answer different questions, and they are allowed to fail differently.
+
+- **Tracing is for looking at one conversation**: every model call, tool call and state change of a turn, in LangSmith's UI. It is on whenever `LANGSMITH_TRACING=true` — including during local eval runs, so every eval conversation can still be opened there. If LangSmith is unreachable, a trace is lost and nothing else is.
+- **The eval runner produces the numbers, so it runs locally** (`evals/run_local.py`). A number must not depend on a third-party service being up: on 2026-09-11 a DNS failure reaching LangSmith crashed a hosted run *after* every OpenAI call had been paid for, and it produced no results at all. Local also means anyone can reproduce the numbers without a LangSmith account.
+- **Everything the published results rest on exists only in the local runner:** three runs per case with a majority vote, the run without a tool (`--exclude-tool`), cost, latency and model calls per case, saved trajectories for calibrating the judge, and the offline recount of every run (`evals/summarize_runs.py`).
+- **The hosted path still works**, for LangSmith's experiment view — scores next to each trace, experiments side by side. It runs once, with no majority, no run without a tool and no per-case cost, so it is a way to *look* at results, not the source of the published ones.
+
+**Locally** — the numbers this project publishes:
+
+```
+python -m evals.run_local --runs 3                                  # the full agent, majority of 3
+python -m evals.run_local --runs 3 --exclude-tool find_measures     # the same agent without its lookup (N-1)
+python -m evals.run_baseline --runs 3                               # a no-tools model call, same cases
+python -m evals.run_local --case hard_tool_failure_write_39         # one case
+python -m evals.summarize_runs <trajectories.jsonl> --n1 <...>     # every run recounted, offline
+```
+
+A single run is a sample, not a verdict: the agent is stochastic and the threshold is a pass in at least 2 of 3 runs. `--runs 3` prints a per-case majority table and names any case that did not agree with itself, which are the ones to re-run with `--case` before calling them stable. A report covers its last run only; `summarize_runs` recounts all of them.
+
+**In LangSmith** — one run, as an experiment in the UI:
 
 ```
 python -m evals.create_dataset   # idempotent upsert of the dataset
 python -m evals.run_experiment   # runs the real agent through every case
-python -m evals.run_baseline     # same cases through a no-tools plain GPT call
 ```
-
-**Without LangSmith** — same cases, same evaluators, no network dependency beyond the model:
-
-```
-python -m evals.run_local
-python -m evals.run_local --case hard_tool_failure_write_39   # one case
-python -m evals.run_local --runs 3                            # the majority verdict
-```
-
-A single run is a sample, not a verdict: the agent is stochastic and the threshold is a pass in at least 2 of 3 runs. `--runs 3` prints a per-case majority table and names any case that did not agree with itself, which are the ones to re-run with `--case` before calling them stable.
-
-This exists because a transient DNS failure once crashed a run *after* every OpenAI call had been paid for. It also covers reviewers with no LangSmith account. It gives up the trace UI and run-to-run diffing.
 
 **Reading results without the UI:**
 
