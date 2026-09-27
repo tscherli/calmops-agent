@@ -46,6 +46,7 @@ and deliberately outside the headline (evals/run_experiment.py).
 from __future__ import annotations
 
 import os
+import threading
 
 from agentevals.trajectory.llm import create_trajectory_llm_as_judge
 
@@ -163,12 +164,48 @@ something of its own. Do not write any other score format, and do not leave a pl
 </Full trajectory, for context>
 """
 
-_offered_judge = create_trajectory_llm_as_judge(
-    prompt=OFFERED_PROMPT, feedback_key=OFFERED_KEY, model=JUDGE_MODEL
-)
-_situation_judge = create_trajectory_llm_as_judge(
-    prompt=SITUATION_PROMPT, feedback_key=SITUATION_KEY, model=JUDGE_MODEL
-)
+# The same reason as agent/model.py's request timeout: ChatGoogleGenerativeAI
+# defaults to `timeout=None` with six retries, so a judge call that never
+# answers would hold a whole eval run the way a stalled agent call did on
+# 2026-09-27. Given a model *name*, openevals builds the judge with
+# `init_chat_model(model=...)` and nothing else (openevals/llm.py), so building
+# it the same way plus a timeout and a retry limit changes nothing the judge
+# answers -- the calibration stands.
+JUDGE_TIMEOUT_SECONDS = float(os.environ.get("EVAL_JUDGE_TIMEOUT", "60"))
+JUDGE_MAX_RETRIES = 2
+
+
+def judge_model():
+    """The judge's chat model, with a limit on how long one call may take."""
+    from langchain.chat_models import init_chat_model
+
+    return init_chat_model(model=JUDGE_MODEL, timeout=JUDGE_TIMEOUT_SECONDS, max_retries=JUDGE_MAX_RETRIES)
+
+
+def _lazy_judge(prompt: str, feedback_key: str):
+    """A judge built on its first call, not at import.
+
+    openevals builds its model on first call too, which is what lets this
+    module be imported -- by every test that touches the evals -- with no
+    Google API key present. Building the model here at import would end that.
+    """
+    built = None
+    lock = threading.Lock()
+
+    def call(**kwargs):
+        nonlocal built
+        with lock:
+            if built is None:
+                built = create_trajectory_llm_as_judge(
+                    prompt=prompt, feedback_key=feedback_key, judge=judge_model()
+                )
+        return built(**kwargs)
+
+    return call
+
+
+_offered_judge = _lazy_judge(OFFERED_PROMPT, OFFERED_KEY)
+_situation_judge = _lazy_judge(SITUATION_PROMPT, SITUATION_KEY)
 
 
 def _skipped(key: str, reason: str) -> dict:

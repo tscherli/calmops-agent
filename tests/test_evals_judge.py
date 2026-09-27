@@ -192,6 +192,40 @@ def test_the_offered_question_allows_ideas_found_on_the_web():
     assert "expected behaviour" in OFFERED_PROMPT
 
 
+# -- a judge call that never answers -----------------------------------------
+
+
+def test_the_judge_model_gives_up_on_a_call_that_never_answers(monkeypatch):
+    """ChatGoogleGenerativeAI defaults to no timeout and six retries; a stalled
+    judge call would hold an eval run the way a stalled agent call did."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-not-a-real-key")
+
+    model = judge_module.judge_model()
+
+    assert model.timeout == judge_module.JUDGE_TIMEOUT_SECONDS
+    assert model.max_retries == judge_module.JUDGE_MAX_RETRIES
+
+
+def test_the_judge_is_built_on_first_use_and_only_once(monkeypatch):
+    """Built at import, every test touching the evals would need a Google
+    key; built per call, every call would pay for a new client."""
+    builds = []
+
+    def fake_create(**kwargs):
+        builds.append(kwargs)
+        return lambda **call_kwargs: {"key": "k", "score": 1, "comment": ""}
+
+    monkeypatch.setattr(judge_module, "create_trajectory_llm_as_judge", fake_create)
+    monkeypatch.setattr(judge_module, "judge_model", lambda: "a model with limits")
+    judge = judge_module._lazy_judge("prompt", "k")
+
+    assert builds == []
+    judge(outputs=[])
+    judge(outputs=[])
+    assert len(builds) == 1
+    assert builds[0]["judge"] == "a model with limits"
+
+
 # -- the N-1 baseline: an agent built without the lookup ---------------------
 
 

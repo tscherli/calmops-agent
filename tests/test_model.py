@@ -49,6 +49,34 @@ def test_effort_can_be_overridden_per_node():
     assert build_chat_model("gpt-5-mini", reasoning_effort="medium").reasoning_effort == "medium"
 
 
+# -- a call that never answers ------------------------------------------------
+
+
+def test_the_client_itself_gives_up_on_a_call_that_never_answers():
+    """Checked on the OpenAI client, not on the langchain setting: the setting
+    was None and the client passed it to httpx as "no limit". One eval call
+    waited an hour on its response headers before the run was killed."""
+    from agent.model import MAX_RETRIES, REQUEST_TIMEOUT_SECONDS
+
+    model = build_chat_model("gpt-5-mini")
+
+    assert model.root_client.timeout == REQUEST_TIMEOUT_SECONDS
+    assert model.root_client.max_retries == MAX_RETRIES
+    assert 0 < REQUEST_TIMEOUT_SECONDS <= 120
+    # The client's own default is also 2, so the line above cannot tell an
+    # explicit setting from none. Set explicitly, a library default changing
+    # later cannot change how long a failing call is retried.
+    assert model.max_retries == MAX_RETRIES
+
+
+def test_the_debate_model_gets_the_same_limit():
+    """It is built separately, and a limit on one builder only is how the
+    next hang would happen."""
+    from agent.model import REQUEST_TIMEOUT_SECONDS
+
+    assert resolve_debate_model(None).root_client.timeout == REQUEST_TIMEOUT_SECONDS
+
+
 # -- resolving ---------------------------------------------------------------
 
 

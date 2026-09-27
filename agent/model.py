@@ -66,6 +66,21 @@ DEBATE_MODEL = os.environ.get("OPENAI_DEBATE_MODEL", "gpt-5-mini")
 
 DEFAULT_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "low")
 
+# A model call that never answers must fail, not wait forever. Left unset,
+# langchain-openai hands the client `timeout=None` explicitly, and the OpenAI
+# client only falls back to its own 600 s default when *no* value is given --
+# None goes through to httpx as "no limit". On 2026-09-27 one follow_up call
+# of the N-1 eval sweep waited on its response headers for an hour; the other
+# 25 cases had finished, and the run could only be killed. The app runs the
+# same models, so a real user's turn would have frozen the same way.
+#
+# 60 s per call: across 1062 recorded eval turns the slowest whole turn --
+# several calls, one of them a web search -- took 24.4 s. Two retries, so a
+# call that fails for good does so within about three minutes, and the turn
+# reports an error (app.py and cli.py already catch it) instead of hanging.
+REQUEST_TIMEOUT_SECONDS = float(os.environ.get("OPENAI_REQUEST_TIMEOUT", "60"))
+MAX_RETRIES = 2
+
 # Only reasoning-model families accept `reasoning_effort` at all; sending it to
 # e.g. gpt-4o-mini fails the call.
 REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
@@ -84,7 +99,12 @@ def build_chat_model(model_name: str, *, reasoning_effort: str | None = None) ->
     from langchain_openai import ChatOpenAI
 
     effort = DEFAULT_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
-    kwargs: dict[str, object] = {"model": model_name, "use_responses_api": True}
+    kwargs: dict[str, object] = {
+        "model": model_name,
+        "use_responses_api": True,
+        "request_timeout": REQUEST_TIMEOUT_SECONDS,
+        "max_retries": MAX_RETRIES,
+    }
     if effort and supports_reasoning_effort(model_name):
         kwargs["reasoning_effort"] = effort
     return ChatOpenAI(**kwargs)
