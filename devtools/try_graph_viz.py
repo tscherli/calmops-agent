@@ -1,7 +1,6 @@
-"""Scratch script: render the real compiled agent graph for review.
+"""Developer tool: render the real compiled agent graph for review.
 
-Same `try_*.py` convention as try_safety.py / try_agent.py -- ad-hoc, not a
-pytest file, meant to be run by hand.
+Ad-hoc, not a pytest file, meant to be run by hand from the project root.
 
 Why this beats a hand-drawn diagram: it renders what `build_agent()` actually
 compiled, so it can't drift from the code the way notes/sequence-diagrams.md
@@ -9,16 +8,22 @@ can. If an edge is missing here, it's missing in the app.
 
 Uses a stub model, so it needs no API key and makes no network call.
 
-    .venv\\Scripts\\python.exe try_graph_viz.py              # print mermaid
-    .venv\\Scripts\\python.exe try_graph_viz.py --write      # refresh notes/graph-visual.md
-    .venv\\Scripts\\python.exe try_graph_viz.py --ascii      # ASCII (needs grandalf)
-    .venv\\Scripts\\python.exe try_graph_viz.py --png out.png  # PNG via mermaid.ink (network)
+    .venv\\Scripts\\python.exe devtools\\try_graph_viz.py              # print mermaid
+    .venv\\Scripts\\python.exe devtools\\try_graph_viz.py --write      # refresh notes/graph-visual.md
+    .venv\\Scripts\\python.exe devtools\\try_graph_viz.py --ascii      # ASCII (needs grandalf)
+    .venv\\Scripts\\python.exe devtools\\try_graph_viz.py --png out.png  # PNG via mermaid.ink (network)
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any, Optional
+
+# The project root, one level up: this file lives in devtools/, and the
+# agent it renders is imported from the root.
+PROJECT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT))
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
@@ -26,7 +31,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 
 from agent.graph import build_agent
 
-NOTES_PATH = Path(__file__).resolve().parent / "notes" / "graph-visual.md"
+NOTES_PATH = PROJECT / "notes" / "graph-visual.md"
 
 
 class StubChatModel(BaseChatModel):

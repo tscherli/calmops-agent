@@ -2,8 +2,8 @@
 this project's own code. Not part of the app -- it starts app.py or cli.py and
 watches them from the outside.
 
-    .venv/Scripts/python.exe try_trace.py cli     # the terminal client
-    .venv/Scripts/python.exe try_trace.py app     # the Tk window
+    .venv/Scripts/python.exe devtools/try_trace.py cli     # the terminal client
+    .venv/Scripts/python.exe devtools/try_trace.py app     # the Tk window
 
 Only functions defined under agent/, tools/ and observability/ are printed,
 indented by depth, so a turn reads as the station path and the tools it used
@@ -28,7 +28,10 @@ import sys
 import threading
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent
+# The project root, one level up from devtools/. It goes on the import path
+# because the client this runs (app.py, cli.py) imports `agent` from there.
+PROJECT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT))
 WATCHED = tuple(str(PROJECT / part) for part in ("agent", "tools", "observability"))
 SKIP = {"<lambda>", "<genexpr>", "<listcomp>", "<dictcomp>", "<setcomp>", "<module>"}
 CLIENTS = ("app", "cli")

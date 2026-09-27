@@ -1057,7 +1057,7 @@ def build_agent(
     compiled = graph.compile(checkpointer=checkpointer).with_config(
         {"recursion_limit": recursion_limit}
     )
-    # Handy for tests and for try_graph_viz.py, which render the shape.
+    # Handy for tests and for devtools/try_graph_viz.py, which render the shape.
     # The same lists the stations were bound with, not a second copy of them.
     compiled.station_tools = {  # type: ignore[attr-defined]
         "ask": [t.name for t in ask_tools],

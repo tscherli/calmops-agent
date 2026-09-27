@@ -1,7 +1,7 @@
 """Ad-hoc, non-pytest scratch script: watch the agent work while you use it.
 
-    python try_inspect.py            # the Tk window, with the inspector beside it
-    python try_inspect.py cli        # the terminal client instead
+    python devtools/try_inspect.py            # the Tk window, with the inspector beside it
+    python devtools/try_inspect.py cli        # the terminal client instead
 
 Two windows open. One is the normal client; the other lights up the part of
 the graph that is running right now and lists the calls underneath, with the
@@ -24,7 +24,9 @@ import tempfile
 import tkinter as tk
 from pathlib import Path
 
-PROJECT = Path(__file__).resolve().parent
+# This file lives in devtools/; the clients it starts live in the project root.
+HERE = Path(__file__).resolve().parent
+PROJECT = HERE.parent
 POLL_MS = 120
 RECENT_CALLS = 14
 
@@ -179,7 +181,7 @@ def main(argv: list[str]) -> int:
     events_path = Path(tempfile.gettempdir()) / "job_load_agent_trace.jsonl"
     events_path.unlink(missing_ok=True)
     client = subprocess.Popen(
-        [sys.executable, str(PROJECT / "try_trace.py"), target, "--events", str(events_path)],
+        [sys.executable, str(HERE / "try_trace.py"), target, "--events", str(events_path)],
         cwd=str(PROJECT),
         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0) if target == "cli" else 0,
     )

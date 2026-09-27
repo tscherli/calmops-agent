@@ -1,6 +1,6 @@
 """Ad-hoc, non-pytest scratch script: the real window, a fake agent.
 
-    python try_ui.py
+    python devtools/try_ui.py
 
 For working on the UI itself -- layout, wording, when a button appears -- and
 for seeing which handler a click reaches. The window is the real `ChatApp`; only
@@ -24,6 +24,11 @@ import tempfile
 import tkinter as tk
 from pathlib import Path
 
+# The project root, one level up: this file lives in devtools/, and the
+# window and agent it drives are imported from the root.
+PROJECT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT))
+
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -31,7 +36,6 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from agent.graph import build_agent
 from app import ChatApp
 
-PROJECT = Path(__file__).resolve().parent
 SANDBOX = Path(tempfile.gettempdir()) / "job_load_agent_ui_sandbox"
 
 # Which handler each button reaches, printed at startup: the fastest way to

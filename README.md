@@ -291,9 +291,9 @@ When the gate fails, the disagreements come first and the fault is often the que
 ### Inspecting the agent graph
 
 ```
-python try_graph_viz.py            # mermaid
-python try_graph_viz.py --write    # refresh notes/graph-visual.md
-python try_graph_viz.py --png g.png
+python devtools/try_graph_viz.py            # mermaid
+python devtools/try_graph_viz.py --write    # refresh notes/graph-visual.md
+python devtools/try_graph_viz.py --png g.png
 ```
 
 Renders what `build_agent()` **actually compiled**, so it cannot drift from the code. Uses a stub model — no API key, no network (except `--png`).
@@ -301,8 +301,8 @@ Renders what `build_agent()` **actually compiled**, so it cannot drift from the 
 ### Watching a turn while you use it
 
 ```
-python try_inspect.py              # the app, with an inspector window beside it
-python try_inspect.py cli          # the terminal client instead
+python devtools/try_inspect.py              # the app, with an inspector window beside it
+python devtools/try_inspect.py cli          # the terminal client instead
 ```
 
 Opens a second window in which each box is a function in `agent/graph.py` — `route_start`, the four stations, `tools_node`, `review`, `close_idea` — and lights up while it runs, with a tool row and the last calls underneath as `file:line`. A good way to read the code while using the app: whatever lights up is where to put a breakpoint.
@@ -312,14 +312,14 @@ Under the hood the client runs as a separate process under the tracer below, whi
 For the plain text version, without a second window:
 
 ```
-python try_trace.py cli            # the terminal client
-python try_trace.py app            # the Tk window
+python devtools/try_trace.py cli            # the terminal client
+python devtools/try_trace.py app            # the Tk window
 ```
 
 ### Working on the window itself
 
 ```
-python try_ui.py
+python devtools/try_ui.py
 ```
 
 The real window with a scripted agent behind it: no API key, no cost, no waiting. It works on a copy of the measure list and a fresh log in the temp directory, so clicking Approve touches nothing real, and it prints which handler each button reaches. **F5 inside the window restarts it** with your edited code — Tkinter has no hot reload, so that is the loop: edit, F5, look.
