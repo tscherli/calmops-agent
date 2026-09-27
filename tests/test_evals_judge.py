@@ -192,6 +192,85 @@ def test_the_offered_question_allows_ideas_found_on_the_web():
     assert "expected behaviour" in OFFERED_PROMPT
 
 
+# -- the N-1 baseline: an agent built without the lookup ---------------------
+
+
+def _users_list(tmp_path, *rows):
+    import csv
+
+    from tools.measures import MEASURE_COLUMNS
+
+    path = tmp_path / "measures.csv"
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(MEASURE_COLUMNS)
+        for measure_id in rows:
+            writer.writerow((measure_id, "recover", f"Do {measure_id}.", "wired", "minutes", "user"))
+    return path
+
+
+def _without_lookup(**overrides):
+    """No lookup and no approval card, so only the grounding question is in
+    play -- the card would legitimately bring the situation question in."""
+    return _outputs(
+        **{
+            "messages": [
+                {"role": "human", "content": "wired after a long call"},
+                {"role": "ai", "content": "Try a cold swim.", "tool_calls": None},
+            ],
+            "approvals": [],
+            "excluded_tools": ["find_measures"],
+            **overrides,
+        }
+    )
+
+
+def test_without_the_lookup_the_reply_is_judged_against_the_users_whole_list(asked, tmp_path):
+    """Otherwise the question skips every case of the N-1 run -- no lookup,
+    no list -- and the baseline reports no groundedness at all, which is the
+    one thing it exists to measure."""
+    path = _users_list(tmp_path, "stand_up", "breathe", "cold_face_splash")
+
+    result = judge_evaluator(outputs=_without_lookup(measures_path=str(path)), reference_outputs={})
+
+    shown = asked["offered"]["available_measures"].splitlines()
+    assert len(shown) == 3
+    assert any(line.startswith("- cold_face_splash:") for line in shown)
+    assert _scores(result)[OFFERED_KEY] == 1
+
+
+def test_a_full_agent_that_never_looked_anything_up_is_still_skipped(never_asked, tmp_path):
+    """The whole list is for the reduced agent only. A full agent with no
+    lookup has not suggested anything from a list, and grading it against
+    one would fail cases that never got that far."""
+    path = _users_list(tmp_path, "stand_up")
+    outputs = _without_lookup(measures_path=str(path), excluded_tools=[])
+
+    assert _scores(judge_evaluator(outputs=outputs, reference_outputs={}))[OFFERED_KEY] is None
+
+
+def test_without_a_path_the_real_list_is_never_read(never_asked):
+    """read_measures with no path reads the user's own measures.csv -- a list
+    the case never saw. No path means no list, and the question skips."""
+    outputs = _without_lookup()
+    outputs.pop("measures_path", None)
+
+    assert _scores(judge_evaluator(outputs=outputs, reference_outputs={}))[OFFERED_KEY] is None
+
+
+def test_the_labelling_file_shows_the_same_whole_list(asked, tmp_path):
+    """If N-1 items are ever labelled, the human must be comparing against
+    the same list the judge was."""
+    from evals.calibrate_judge import evidence_for
+
+    outputs = _without_lookup(measures_path=str(_users_list(tmp_path, "stand_up", "breathe")))
+    judge_evaluator(outputs=outputs, reference_outputs={})
+
+    judge_list = asked["offered"]["available_measures"].splitlines()
+    labeller_list = evidence_for(OFFERED_KEY, outputs)["measures_the_agent_was_given"]
+    assert [line.removeprefix("- ") for line in judge_list] == labeller_list
+
+
 def test_a_search_does_not_excuse_an_idea_with_no_source():
     """Told only "a web search ran", the judge excused any off-list measure
     at all -- including a planted one with no link, in a conversation whose

@@ -12,6 +12,7 @@ Nothing here judges anything. These functions only say what happened.
 from __future__ import annotations
 
 from agent.graph import SITUATION_DECLINED
+from tools.measures import read_measures
 
 import json
 
@@ -47,6 +48,40 @@ def offered_measures(outputs: dict) -> list[dict]:
             if isinstance(row, dict) and row.get("measure_id"):
                 seen.setdefault(row["measure_id"], row)
     return list(seen.values())
+
+
+LOOKUP_TOOL = "find_measures"
+
+
+def measures_to_judge_against(outputs: dict) -> list[dict]:
+    """The list the grounding question compares a reply with.
+
+    Normally what the lookups returned: "did the reply offer something not
+    in the list it was given". An agent built without the lookup (the N-1
+    baseline, `excluded_tools`) was given no list, so that question would
+    skip every case and the baseline would report no groundedness at all.
+    For that agent it is the user's whole list instead -- "did it offer
+    something that is not one of the user's own measures" -- which is the
+    question the baseline exists to answer.
+
+    Two things to say next to any number this produces (decided 2026-09-27,
+    option A in notes/BEST_PRACTICES.md): the whole list is longer (62 rows
+    shipped) than any list the judge was calibrated on (4-40); and it is a
+    slightly easier yardstick, since a measure from the user's list but
+    outside the fitting slice passes here and would fail in a normal run.
+    That bias favours the reduced agent, so it cannot make the list look
+    more valuable than it is.
+
+    Read from the case's own copy (`measures_path`), never the shipped file:
+    reading with no path would grade the run against the user's real list,
+    which the case never saw. No path, no list -- skipped, not guessed.
+    """
+    looked_up = offered_measures(outputs)
+    if looked_up:
+        return looked_up
+    if LOOKUP_TOOL in (outputs.get("excluded_tools") or []) and outputs.get("measures_path"):
+        return read_measures(outputs["measures_path"])
+    return []
 
 
 def card_sentences(outputs: dict) -> list[str]:
@@ -171,6 +206,7 @@ __all__ = [
     "card_sentences",
     "final_reply",
     "lookup_results",
+    "measures_to_judge_against",
     "offered_measures",
     "searched_the_web",
     "user_turns",

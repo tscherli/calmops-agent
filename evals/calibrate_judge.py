@@ -76,7 +76,7 @@ from evals.judge import JUDGE_KEYS, OFFERED_KEY, QUESTIONS, SITUATION_KEY
 from evals.outputs import (
     conversation,
     final_reply,
-    offered_measures,
+    measures_to_judge_against,
     searched_the_web,
     situation_sentences,
     user_turns,
@@ -326,7 +326,7 @@ def _planting_took(key: str, outputs: dict) -> bool:
     if key == OFFERED_KEY:
         if PLANTED_MEASURE.lower() not in final_reply(outputs).lower():
             return False
-        listed = " ".join(str(row.get("measure", "")) for row in offered_measures(outputs)).lower()
+        listed = " ".join(str(row.get("measure", "")) for row in measures_to_judge_against(outputs)).lower()
         return not any(word in listed for word in PLANTED_MEASURE_WORDS)
     if not any(PLANTED_SITUATION_CLAUSE in s for s in situation_sentences(outputs)):
         return False
@@ -352,7 +352,7 @@ def evidence_for(key: str, outputs: dict) -> dict:
     if key == OFFERED_KEY:
         return {
             "measures_the_agent_was_given": [
-                f"{row.get('measure_id')}: {row.get('measure', '')}" for row in offered_measures(outputs)
+                f"{row.get('measure_id')}: {row.get('measure', '')}" for row in measures_to_judge_against(outputs)
             ],
             # The exchange, not extracts from it. Two of the judge's
             # allowances need it -- a measure *the user* brought up is not a
@@ -385,7 +385,7 @@ def evidence_for(key: str, outputs: dict) -> dict:
 def _would_ask(key: str, outputs: dict) -> bool:
     """Whether the question has its evidence, without calling the model."""
     if key == OFFERED_KEY:
-        return bool(offered_measures(outputs)) and bool(final_reply(outputs).strip())
+        return bool(measures_to_judge_against(outputs)) and bool(final_reply(outputs).strip())
     return bool(situation_sentences(outputs)) and bool(user_turns(outputs))
 
 

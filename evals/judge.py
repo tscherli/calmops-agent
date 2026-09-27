@@ -51,7 +51,7 @@ from agentevals.trajectory.llm import create_trajectory_llm_as_judge
 
 from evals.outputs import (
     final_reply,
-    offered_measures,
+    measures_to_judge_against,
     searched_the_web,
     situation_sentences,
     user_turns,
@@ -182,13 +182,19 @@ def _format_measures(rows: list[dict]) -> str:
 def grade_offered_from_the_list(outputs: dict) -> dict:
     """Did the reply put forward something that was not in the user's list?
 
-    Skipped when no lookup happened. Without one there is no list to have
-    departed from, and grading against an empty one would fail every case
+    Skipped when there is no list to compare with: normally that means no
+    lookup happened, and grading against an empty list would fail every case
     that never got as far as suggesting anything -- which is how the old
     judge came to report 0/6 on the crisis category while the gate was
-    100% correct.
+    100% correct. An agent built without the lookup is compared with the
+    user's whole list instead (evals/outputs.py, measures_to_judge_against).
+
+    The prompt is the calibrated one, unchanged, in both cases. Its heading
+    says "the measures the agent was given", which for the reduced agent is
+    the list it was *not* given; the question underneath -- is this measure
+    one of those above -- reads the same either way.
     """
-    available = offered_measures(outputs)
+    available = measures_to_judge_against(outputs)
     if not available:
         return _skipped(OFFERED_KEY, "no lookup in this case -- no list to depart from")
     reply = final_reply(outputs)
