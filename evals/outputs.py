@@ -79,9 +79,21 @@ def measures_to_judge_against(outputs: dict) -> list[dict]:
     looked_up = offered_measures(outputs)
     if looked_up:
         return looked_up
-    if LOOKUP_TOOL in (outputs.get("excluded_tools") or []) and outputs.get("measures_path"):
+    if lookup_unavailable(outputs) and outputs.get("measures_path"):
         return read_measures(outputs["measures_path"])
     return []
+
+
+def lookup_unavailable(outputs: dict) -> bool:
+    """Was this run unable to look the list up at all?
+
+    Two ways: an agent built without the lookup (the N-1 baseline), or the
+    no-tools baseline, which has no tools and is shown the user's whole list
+    in its prompt instead (evals/run_baseline.py). For the latter the whole
+    list is exactly what it was given, so there the yardstick is not even
+    the slightly easier one it is for N-1.
+    """
+    return LOOKUP_TOOL in (outputs.get("excluded_tools") or []) or outputs.get("no_tools_baseline") is True
 
 
 def card_sentences(outputs: dict) -> list[str]:
@@ -206,6 +218,7 @@ __all__ = [
     "card_sentences",
     "final_reply",
     "lookup_results",
+    "lookup_unavailable",
     "measures_to_judge_against",
     "offered_measures",
     "searched_the_web",
