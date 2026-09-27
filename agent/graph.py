@@ -556,12 +556,21 @@ def build_agent(
     measures_path: Path | str | None = None,
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
     checkpointer: BaseCheckpointSaver | None = None,
+    exclude_tools: Sequence[str] = (),
 ):
     """Build the station graph.
 
     model/tools/log_path/measures_path are injectable so tests and eval runs
     exercise the real wiring without OpenAI, the real log or the real measure
     list.
+
+    `exclude_tools` removes named tools from every station while leaving the
+    per-station split as it is -- the same agent minus one capability, which
+    is what the N-1 baseline measures. `tools=` cannot do that: an injected
+    set is handed to *every* station (a convenience for tests), so stripping
+    one tool that way would also give `ask` the write tools and measure two
+    changes at once. An unknown name is an error rather than a no-op, because
+    a typo would otherwise run the full agent under the baseline's name.
 
     `checkpointer` is what lets a turn pause for the user's approval and be
     resumed. Without one there is nobody to ask, so a write is refused rather
@@ -595,6 +604,10 @@ def build_agent(
         discuss_idea,
         idea_decided,
     ]
+    unknown = set(exclude_tools) - {t.name for t in all_tools}
+    if unknown:
+        raise ValueError(f"exclude_tools names no such tool: {sorted(unknown)}")
+    all_tools = [t for t in all_tools if t.name not in set(exclude_tools)]
     by_name: dict[str, BaseTool] = {t.name: t for t in all_tools}
 
     def pick(*names: str) -> list[Any]:
@@ -634,7 +647,13 @@ def build_agent(
     ask_must_act = bind("ask", ask_tools, force="required")
     suggest_tools = pick("find_measures", "record_choices", "discuss_idea")
     suggest_model = bind("suggest", suggest_tools + web)
-    lookup_model = bind("suggest", suggest_tools + web, force="find_measures")
+    # Forcing a tool that is not bound is a 400, the same as for web search
+    # below, so an agent built without the lookup is not forced to call it.
+    lookup_model = bind(
+        "suggest",
+        suggest_tools + web,
+        force="find_measures" if "find_measures" in by_name else None,
+    )
     follow_up_tools = pick(
         "record_choices",
         "find_measures",

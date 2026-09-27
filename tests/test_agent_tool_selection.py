@@ -129,6 +129,61 @@ def test_the_kill_switch_also_stops_the_search_station_forcing_it(monkeypatch, m
     assert "here is another idea" in str(result["messages"][-1].content)
 
 
+# -- the same agent minus one tool (the N-1 baseline) -------------------------
+
+
+def _default_station_tools(measures_file):
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    return build_agent(model=model, measures_path=measures_file).station_tools
+
+
+def test_an_excluded_tool_is_gone_from_every_station(measures_file):
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    graph = build_agent(model=model, measures_path=measures_file, exclude_tools=["find_measures"])
+
+    assert all("find_measures" not in tools for tools in graph.station_tools.values())
+
+
+def test_excluding_one_tool_leaves_the_station_split_alone(measures_file):
+    """The reason `tools=` is not used for this: an injected set goes to every
+    station, so `ask` would gain the write tools and the run would measure two
+    changes at once. Every station must keep exactly what it had, minus one."""
+    before = _default_station_tools(measures_file)
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+    after = build_agent(
+        model=model, measures_path=measures_file, exclude_tools=["find_measures"]
+    ).station_tools
+
+    assert after == {
+        station: [name for name in names if name != "find_measures"]
+        for station, names in before.items()
+    }
+    assert "log_checkin" not in after["ask"]
+
+
+def test_without_the_lookup_nothing_forces_it(measures_file):
+    """Forcing a tool that is not bound is a 400 from the provider -- the first
+    turn that reached `suggest` in the N-1 run would break instead of showing
+    what the agent does without the user's list."""
+    model = StubChatModel(responses=[AIMessage(content="try something")])
+    graph = build_agent(model=model, measures_path=measures_file, exclude_tools=["find_measures"])
+
+    result = graph.invoke({**_ready(), "messages": [user("what should I do")]})
+
+    assert "find_measures" not in model.tool_choices
+    assert "try something" in str(result["messages"][-1].content)
+
+
+def test_a_misspelt_tool_name_is_refused(measures_file):
+    """A typo that excluded nothing would run the full agent under the
+    baseline's name, and the comparison would show no difference -- a
+    finding, and a false one."""
+    model = StubChatModel(responses=[AIMessage(content="ok")])
+
+    with pytest.raises(ValueError, match="find_measure"):
+        build_agent(model=model, measures_path=measures_file, exclude_tools=["find_measure"])
+
+
 # -- how often the model is called -------------------------------------------
 
 
