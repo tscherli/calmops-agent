@@ -611,7 +611,7 @@ def parse_reading(result: Any) -> Reading | None:
     return None
 
 
-def route_for_reading(state: State) -> str | None:
+def route_for_reading(state: State, waiting: str = "") -> str | None:
     """Where a reading sends the turn, or None to route as v1.0.0 did.
 
     The reader lists what the user wants in the order it should happen, so the
@@ -619,13 +619,23 @@ def route_for_reading(state: State) -> str | None:
     has one place:
 
     - just chat -> `listen`, which has nothing to suggest with;
-    - log the check-in -> `follow_up`, the only station with log_checkin;
-    - rate a measure -> `follow_up`, unless an idea is open;
+    - log the check-in -> `follow_up`, the only station with log_checkin --
+      but only when the user is answering the app's log question, the one
+      moment a measure is known to be settled;
+    - rate a measure -> `follow_up`, but only when a row is waiting for a
+      rating and no idea is open;
     - different suggestions -> `count_rejection`, while something is on screen
       and no idea is open (with nothing offered there is nothing to count);
     - go with their own idea -> `follow_up`, where discuss_idea is forced and
       the turn goes on to `debate`; with an idea already open, the state
       already points there.
+
+    A want steers the route only when its preconditions are known in code. The
+    two wants that lead to a write go to the station that can write only when
+    the write can rightly happen; otherwise the turn goes where v1.0.0 would
+    have sent it. Sending a log request there early handed the model the tool:
+    in case 36 it called log_checkin before any measure was chosen, where
+    v1.0.0 had kept the case in `ask`, which cannot log (dev log stage 83).
 
     A check-in answer, a pick from the offer and anything unclear go where the
     state points, as before.
@@ -635,9 +645,9 @@ def route_for_reading(state: State) -> str | None:
     idea_open = bool(state.get("idea"))
     if first == "just_chat":
         return "listen"
-    if first == "log_checkin":
+    if first == "log_checkin" and asked_to_log(state.get("messages") or []):
         return "follow_up"
-    if first == "rate_measure" and not idea_open:
+    if first == "rate_measure" and waiting and not idea_open:
         return "follow_up"
     if first == "other_suggestions" and state.get("offered") and not idea_open:
         return "count_rejection"
@@ -1265,11 +1275,12 @@ def build_agent(
             "reading": wants,
             "side_calls": [raw] if isinstance(raw, AIMessage) else [],
         }
-        # A log request while the user's own idea is open counts the idea as
+        # A log request that goes to follow_up -- the user answering the log
+        # question -- while the user's own idea is open counts the idea as
         # tried and closes it. Left open, the turn reaches follow_up, logs --
         # and `after_tools` sends it straight back to `debate`, which has no
         # log_checkin: the log request of case 41 that was never carried out.
-        if state.get("idea") and wants and wants[0] == "log_checkin":
+        if state.get("idea") and wants and wants[0] == "log_checkin" and asked_to_log(messages):
             update.update(idea=None, debate_turns=0)
         return update
 
@@ -1280,7 +1291,11 @@ def build_agent(
     def route_start(state: State) -> str:
         """Before any station: what code decides, then what the reading says,
         then where the state points -- which is all v1.0.0 had."""
-        return decided_in_code(state) or route_for_reading(state) or station_for(state)
+        return (
+            decided_in_code(state)
+            or route_for_reading(state, measure_awaiting_rating(log_path))
+            or station_for(state)
+        )
 
     def after_tools(state: State) -> str:
         """Back to the station that asked, unless the tool changed the plan."""

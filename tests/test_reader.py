@@ -185,33 +185,41 @@ def test_the_reading_is_found_in_every_shape_the_call_returns(result, expected):
 
 ON_SCREEN = {"offered": ["breathe"]}
 IDEA = {"idea": "block the first hour for no meetings"}
+LOG_QUESTION = "Would you like to check in the current situation into the circumstances log?"
+ANSWER = [AIMessage(content=LOG_QUESTION), HumanMessage(content="yes")]
+UNPROMPTED = [HumanMessage(content="just record how today went please")]
 
 
 @pytest.mark.parametrize(
-    "state,expected",
+    "state,waiting,expected",
     [
-        ({"reading": ["just_chat"]}, "listen"),
-        ({"reading": ["log_checkin"]}, "follow_up"),
-        # A log request goes to the station that can log, even with an idea open.
-        ({**IDEA, "reading": ["log_checkin"]}, "follow_up"),
-        ({"reading": ["rate_measure"]}, "follow_up"),
-        ({**IDEA, "reading": ["rate_measure"]}, None),
-        ({**ON_SCREEN, "reading": ["other_suggestions"]}, "count_rejection"),
+        ({"reading": ["just_chat"]}, "", "listen"),
+        # A log request reaches the station that can log only while the user is
+        # answering the log question -- then a measure is settled.
+        ({"messages": ANSWER, "reading": ["log_checkin"]}, "", "follow_up"),
+        ({"messages": ANSWER, **IDEA, "reading": ["log_checkin"]}, "", "follow_up"),
+        # Case 36: asked before any measure was chosen -- where v1.0.0 sent it.
+        ({"messages": UNPROMPTED, "reading": ["log_checkin"]}, "", None),
+        # A rating reaches it only when a row is waiting for one.
+        ({"reading": ["rate_measure"]}, "breathe", "follow_up"),
+        ({"reading": ["rate_measure"]}, "", None),
+        ({**IDEA, "reading": ["rate_measure"]}, "breathe", None),
+        ({**ON_SCREEN, "reading": ["other_suggestions"]}, "", "count_rejection"),
         # Nothing on screen: nothing to count.
-        ({"reading": ["other_suggestions"]}, None),
-        ({**ON_SCREEN, **IDEA, "reading": ["other_suggestions"]}, None),
-        ({"reading": ["own_idea"]}, "follow_up"),
+        ({"reading": ["other_suggestions"]}, "", None),
+        ({**ON_SCREEN, **IDEA, "reading": ["other_suggestions"]}, "", None),
+        ({"reading": ["own_idea"]}, "", "follow_up"),
         # With the idea already open, the state already points to `debate`.
-        ({**IDEA, "reading": ["own_idea"]}, None),
-        ({"reading": ["checkin_answer"]}, None),
-        ({"reading": ["pick_offered"]}, None),
-        ({"reading": ["unclear"]}, None),
-        ({"reading": None}, None),
-        ({"reading": []}, None),
+        ({**IDEA, "reading": ["own_idea"]}, "", None),
+        ({"reading": ["checkin_answer"]}, "", None),
+        ({"reading": ["pick_offered"]}, "", None),
+        ({"reading": ["unclear"]}, "", None),
+        ({"reading": None}, "", None),
+        ({"reading": []}, "", None),
     ],
 )
-def test_each_want_goes_where_the_table_says(state, expected):
-    assert route_for_reading(state) == expected
+def test_each_want_goes_where_the_table_says(state, waiting, expected):
+    assert route_for_reading(state, waiting) == expected
 
 
 @pytest.mark.parametrize(
@@ -226,14 +234,13 @@ def test_each_want_goes_where_the_table_says(state, expected):
     ],
 )
 def test_the_first_want_decides(wants, expected):
-    assert route_for_reading({**ON_SCREEN, "reading": wants}) == expected
+    assert route_for_reading({**ON_SCREEN, "messages": ANSWER, "reading": wants}) == expected
 
 
 # -- the tool a want forces --------------------------------------------------
 
 KNOWN = {"energy": "exhausted", "situation": "long day, want to switch off before bed"}
 ASKED = {"messages": [HumanMessage(content="yes, log it")]}
-LOG_QUESTION = "Would you like to check in the current situation into the circumstances log?"
 ANSWERED = {"messages": [AIMessage(content=LOG_QUESTION), HumanMessage(content="yes, log it")]}
 
 
@@ -370,7 +377,11 @@ def test_just_chat_reaches_a_station_with_nothing_to_suggest_with(tmp_path, meas
 
 def test_a_rating_reaches_the_station_that_can_log_it(tmp_path, measures_file):
     """Case 34's opening: too long for the keyword shortcut, so v1.0.0 sent it
-    to `ask`, which has no log_checkin."""
+    to `ask`, which has no log_checkin. A row is waiting for the rating."""
+    from tools.checkin_log import append_checkin_row
+
+    append_checkin_row(energy="wired", circumstances="back to back calls", measure_id="breathe",
+                       path=tmp_path / "log.csv")
     graph, _ = graph_with(reads("rate_measure"), tmp_path, measures_file)
 
     result = graph.invoke({"messages": [HumanMessage(content="that breathing thing i tried earlier actually helped")]})
@@ -384,12 +395,43 @@ def test_a_log_request_closes_an_open_idea_and_reaches_follow_up(tmp_path, measu
     graph, _ = graph_with(reads("log_checkin"), tmp_path, measures_file)
 
     result = graph.invoke(
-        {"messages": [HumanMessage(content="yeah log it. calendar is full from 9 to 6")], **IDEA, "debate_turns": 2}
+        {"messages": [AIMessage(content=LOG_QUESTION), HumanMessage(content="yeah log it")], **IDEA, "debate_turns": 2}
     )
 
     assert result["step"] == "follow_up"
     assert result["idea"] is None
     assert result["debate_turns"] == 0
+
+
+def test_a_log_request_before_any_measure_stays_where_it_cannot_log(tmp_path, measures_file):
+    """Case 36: "just record how today went" before anything was chosen. Sent to
+    follow_up, the model called log_checkin itself and the case failed; v1.0.0
+    kept it in `ask`, which has no log_checkin -- and so does this."""
+    graph, _ = graph_with(reads("log_checkin"), tmp_path, measures_file)
+
+    result = graph.invoke({"messages": [HumanMessage(content="just record how today went please")]})
+
+    assert result["step"] == "ask"
+    assert "log_checkin" not in graph.station_tools["ask"]
+
+
+def test_a_rating_with_nothing_waiting_goes_where_the_state_points(tmp_path, measures_file):
+    graph, _ = graph_with(reads("rate_measure"), tmp_path, measures_file)
+
+    result = graph.invoke({"messages": [HumanMessage(content="it helped")]})
+
+    assert result["step"] == "ask"
+
+
+def test_an_unprompted_log_request_leaves_an_open_idea_open(tmp_path, measures_file):
+    """Only a log request that answers the log question closes the idea; one
+    that comes earlier goes where the state points -- the debate."""
+    graph, _ = graph_with(reads("log_checkin"), tmp_path, measures_file)
+
+    result = graph.invoke({"messages": [HumanMessage(content="yeah log it")], **IDEA, "debate_turns": 2})
+
+    assert result["idea"] == IDEA["idea"]
+    assert result["step"] == "debate"
 
 
 def test_a_rating_leaves_an_open_idea_alone(tmp_path, measures_file):
