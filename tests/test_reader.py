@@ -10,15 +10,17 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.graph import (
+    LOG_QUESTION_MARKER,
     SITUATION_DECLINED,
     Reading,
+    asked_to_log,
     build_agent,
     forced_tool,
     parse_reading,
     reading_input,
     route_for_reading,
 )
-from agent.prompts import READ_PROMPT
+from agent.prompts import LOG_PROMPT, READ_PROMPT
 from tests.conftest import StubChatModel
 from tools.measures import MEASURE_COLUMNS
 
@@ -231,17 +233,22 @@ def test_the_first_want_decides(wants, expected):
 
 KNOWN = {"energy": "exhausted", "situation": "long day, want to switch off before bed"}
 ASKED = {"messages": [HumanMessage(content="yes, log it")]}
+LOG_QUESTION = "Would you like to check in the current situation into the circumstances log?"
+ANSWERED = {"messages": [AIMessage(content=LOG_QUESTION), HumanMessage(content="yes, log it")]}
 
 
 @pytest.mark.parametrize(
     "state,waiting,expected",
     [
-        ({**ASKED, **KNOWN, "reading": ["log_checkin"]}, "", "log_checkin"),
+        ({**ANSWERED, **KNOWN, "reading": ["log_checkin"]}, "", "log_checkin"),
+        # Case 36: a log request before any measure was chosen. The app has not
+        # asked the log question, so nothing guarantees a settled measure.
+        ({**ASKED, **KNOWN, "reading": ["log_checkin"]}, "", None),
         # The log sentence is built from what the user said: without a real
         # situation the station asks for it instead of writing one.
-        ({**ASKED, "energy": "exhausted", "reading": ["log_checkin"]}, "", None),
-        ({**ASKED, "energy": "exhausted", "situation": SITUATION_DECLINED, "reading": ["log_checkin"]}, "", None),
-        ({**ASKED, "situation": "long day", "reading": ["log_checkin"]}, "", None),
+        ({**ANSWERED, "energy": "exhausted", "reading": ["log_checkin"]}, "", None),
+        ({**ANSWERED, "energy": "exhausted", "situation": SITUATION_DECLINED, "reading": ["log_checkin"]}, "", None),
+        ({**ANSWERED, "situation": "long day", "reading": ["log_checkin"]}, "", None),
         ({**ASKED, "reading": ["rate_measure"]}, "breathe", "log_checkin"),
         ({**ASKED, "reading": ["rate_measure"]}, "", None),
         ({**ASKED, "reading": ["own_idea"]}, "", "discuss_idea"),
@@ -252,6 +259,44 @@ ASKED = {"messages": [HumanMessage(content="yes, log it")]}
 )
 def test_a_want_forces_its_tool_only_when_its_inputs_are_known(state, waiting, expected):
     assert forced_tool(state, waiting) == expected
+
+
+@pytest.mark.parametrize(
+    "app_said,expected",
+    [
+        (LOG_QUESTION, True),
+        # The model's own rephrasings, as recorded in the runs.
+        ("Would you like to check this current situation into the circumstances log?", True),
+        ("Great -- I'll note that you chose both. Would you like to check in the current situation "
+         "into the circumstances log?", True),
+        ("Two from your list that fit: box breathing and a short walk.", False),
+    ],
+)
+def test_the_log_question_is_recognised_in_the_apps_last_words(app_said, expected):
+    messages = [AIMessage(content=app_said), HumanMessage(content="yes")]
+    assert asked_to_log(messages) is expected
+
+
+def test_only_the_apps_message_right_before_the_answer_counts():
+    """A log question two turns back does not settle anything now; a tool call
+    without words in between is skipped, not read as the app's last message."""
+    earlier = [AIMessage(content=LOG_QUESTION), HumanMessage(content="not yet"),
+               AIMessage(content="Okay."), HumanMessage(content="log it")]
+    assert asked_to_log(earlier) is False
+    tool_call = AIMessage(content=[], tool_calls=[{"name": "find_measures", "args": {}, "id": "c1"}])
+    between = [AIMessage(content=LOG_QUESTION), tool_call, HumanMessage(content="yes")]
+    assert asked_to_log(between) is True
+    assert asked_to_log([HumanMessage(content="log it")]) is False
+    # Two user messages in a row -- a turn that failed and left no reply: the
+    # question further back was not what the latest message answered.
+    unanswered = [AIMessage(content=LOG_QUESTION), HumanMessage(content="hmm"), HumanMessage(content="log it")]
+    assert asked_to_log(unanswered) is False
+
+
+def test_the_marker_is_in_the_question_the_log_prompt_prescribes():
+    """The marker and the prompt's wording must not drift apart."""
+    assert LOG_QUESTION in LOG_PROMPT
+    assert LOG_QUESTION_MARKER in LOG_QUESTION.lower()
 
 
 def test_only_the_first_call_of_a_turn_is_forced():
@@ -277,7 +322,7 @@ def test_a_forced_log_is_shown_the_recorded_situation(tmp_path, measures_file):
     log, it would have to invent it -- so it is shown what was recorded."""
     graph, stations = graph_with(reads("log_checkin"), tmp_path, measures_file)
 
-    graph.invoke({**KNOWN, "messages": [HumanMessage(content="yes, note them both down")]})
+    graph.invoke({**KNOWN, "messages": [AIMessage(content=LOG_QUESTION), HumanMessage(content="yes, note them")]})
 
     last = stations.received_messages[-1][-1]
     assert isinstance(last, SystemMessage)

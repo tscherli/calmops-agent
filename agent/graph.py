@@ -538,6 +538,30 @@ def _said(message: BaseMessage) -> str:
     return text.strip() if isinstance(text, str) else ""
 
 
+# The part of the log question the model keeps when it rephrases it. The log
+# prompt prescribes the question word for word (agent/prompts.py, LOG_PROMPT)
+# and asks it only once the user has settled on a measure; the recorded runs
+# vary the start ("check in" / "check this") but keep this phrase.
+LOG_QUESTION_MARKER = "circumstances log"
+
+
+def asked_to_log(messages: Sequence[BaseMessage]) -> bool:
+    """Did the app's last spoken message, before the user's latest one, ask the
+    log question?
+
+    It is the one moment the app itself guarantees a measure is settled: the
+    log prompt asks it "the moment" one is. A log request anywhere else may
+    come before any measure was chosen -- case 36, where a forced log_checkin
+    was refused by the tool and still broke the case's rule.
+    """
+    for message in reversed(messages[:-1]):
+        if isinstance(message, HumanMessage):
+            return False
+        if isinstance(message, AIMessage) and _said(message):
+            return LOG_QUESTION_MARKER in _said(message).lower()
+    return False
+
+
 def reading_input(state: State, waiting: str) -> list[BaseMessage]:
     """The reader's whole input: its prompt, a few facts from the state, the
     last few spoken turns, and the message to read.
@@ -633,9 +657,13 @@ def forced_tool(state: State, waiting: str) -> str | None:
     not a tool result -- the guard `ask` already uses. Otherwise a forced call
     would be forced again after its own answer, and the turn would loop.
 
-    `log_checkin` for a log request only when the energy and a real situation
-    are known. The log sentence has to be built from what the user said; with
-    the situation missing the station asks for it, as its prompt says.
+    `log_checkin` for a log request only when all three of its preconditions
+    are known in code: a settled measure -- the user is answering the app's
+    log question -- and the energy and a real situation. The state lags the
+    conversation (a chosen measure is never recorded in it), so the first
+    version forced the log from energy and situation alone and called it
+    before any measure was chosen (dev log stage 82). With a precondition
+    missing the station decides, under its prompt's own rules.
     """
     messages = state.get("messages") or []
     wants = state.get("reading") or []
@@ -643,7 +671,13 @@ def forced_tool(state: State, waiting: str) -> str | None:
         return None
     first = wants[0]
     situation = state.get("situation")
-    if first == "log_checkin" and state.get("energy") and situation and situation != SITUATION_DECLINED:
+    if (
+        first == "log_checkin"
+        and asked_to_log(messages)
+        and state.get("energy")
+        and situation
+        and situation != SITUATION_DECLINED
+    ):
         return "log_checkin"
     if first == "rate_measure" and waiting:
         return "log_checkin"
