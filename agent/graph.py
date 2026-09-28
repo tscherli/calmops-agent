@@ -174,13 +174,19 @@ RATING_MAX_CHARS = 40
 
 Station = Literal["ask", "suggest", "follow_up", "debate", "listen"]
 
-# What a typed message can do, as the understand node reads it. The routing
-# defect of v1.0.0 was that nothing read the message before a station was
-# chosen: in the release sweep the station model often said what a message
+# What the user wants to happen next, as the understand node reads it. The
+# routing defect of v1.0.0 was that nothing read the message before a station
+# was chosen: in the release sweep the station model often said what a message
 # meant ("I noted you said the ritual helped and the muscle one didn't") and
 # then did what its station allowed. The reading happens before any station, in
 # a call whose only job is reading.
-Act = Literal["rejection", "verdict", "log_request", "not_now", "own_idea", "checkin_info", "other"]
+#
+# Wants, not kinds of message: the first reader returned kinds, which overlap,
+# and a fixed priority chose between them without the context (stage 79).
+Want = Literal[
+    "log_checkin", "rate_measure", "other_suggestions", "own_idea",
+    "just_chat", "checkin_answer", "pick_offered", "unclear",
+]
 
 # How much of the conversation the reader sees: enough for "yes" to have the
 # question it answers, short enough to stay a cheap call.
@@ -189,9 +195,9 @@ READ_TEXT_LIMIT = 500
 
 
 class Reading(BaseModel):
-    """What one user message does, in the order it says it."""
+    """What the user wants to happen next, in the order it should happen."""
 
-    acts: list[Act] = Field(description="Every act the message contains, in order.")
+    wants: list[Want] = Field(description="What the user wants next, most urgent first.")
 
 
 class State(TypedDict, total=False):
@@ -211,7 +217,7 @@ class State(TypedDict, total=False):
     checkin_logged: bool        # a check-in row was written this turn
     last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
-    reading: list[str] | None   # the acts the understand node read in this turn's message
+    reading: list[str] | None   # what the understand node read the user to want, this turn
     side_calls: list[AIMessage]  # model calls of this turn that left no message: the reader's
     approvals: dict[str, dict[str, Any]]  # the user's card decisions, by tool call id
     tool_events: Annotated[list[dict[str, Any]], merge_tool_events]
@@ -536,9 +542,9 @@ def reading_input(state: State, waiting: str) -> list[BaseMessage]:
     """The reader's whole input: its prompt, a few facts from the state, the
     last few spoken turns, and the message to read.
 
-    The facts are what a message is read against. "didn't help" is a verdict
-    when a row is waiting for one and a rejection when suggestions are on
-    screen; "yes" answers whatever the app asked last.
+    The facts are what a message is read against. "didn't help" is a rating
+    when a row is waiting for one and a request for other suggestions when
+    suggestions are on screen; "yes" answers whatever the app asked last.
     """
     messages = state.get("messages") or []
     spoken = [
@@ -584,29 +590,65 @@ def parse_reading(result: Any) -> Reading | None:
 def route_for_reading(state: State) -> str | None:
     """Where a reading sends the turn, or None to route as v1.0.0 did.
 
-    One priority, fixed in advance, for a message that does several things:
+    The reader lists what the user wants in the order it should happen, so the
+    first want decides; there is no priority table to overrule it. Each want
+    has one place:
 
-    - "not now" first: a wish about the whole conversation outranks anything
-      it came with;
-    - a log request before a rejection, so a reader that half-mistakes "the
-      muscle one didnt" for a rejection still lands next to the "yes";
-    - a rejection before a verdict while something is on screen -- the rule
-      the keyword shortcut already follows. With nothing offered there is
-      nothing to count, and with an idea open the "no" belongs to `debate`;
-    - a verdict to the only station with log_checkin, unless an idea is open.
+    - just chat -> `listen`, which has nothing to suggest with;
+    - log the check-in -> `follow_up`, the only station with log_checkin;
+    - rate a measure -> `follow_up`, unless an idea is open;
+    - different suggestions -> `count_rejection`, while something is on screen
+      and no idea is open (with nothing offered there is nothing to count);
+    - go with their own idea -> `follow_up`, where discuss_idea is forced and
+      the turn goes on to `debate`; with an idea already open, the state
+      already points there.
 
-    Everything else -- an own idea, energy or goal, a question -- goes where
-    the state points, as before. Routing only; no tool is forced.
+    A check-in answer, a pick from the offer and anything unclear go where the
+    state points, as before.
     """
-    acts = state.get("reading") or []
-    if "not_now" in acts:
+    wants = state.get("reading") or []
+    first = wants[0] if wants else None
+    idea_open = bool(state.get("idea"))
+    if first == "just_chat":
         return "listen"
-    if "log_request" in acts:
+    if first == "log_checkin":
         return "follow_up"
-    if "rejection" in acts and state.get("offered") and not state.get("idea"):
+    if first == "rate_measure" and not idea_open:
+        return "follow_up"
+    if first == "other_suggestions" and state.get("offered") and not idea_open:
         return "count_rejection"
-    if "verdict" in acts and not state.get("idea"):
+    if first == "own_idea" and not idea_open:
         return "follow_up"
+    return None
+
+
+def forced_tool(state: State, waiting: str) -> str | None:
+    """The tool `follow_up` must call first this turn, or None.
+
+    A want decides the action, not only the station: in the focused check the
+    turn reached `follow_up` as intended and the model still picked a tool of
+    its own -- a rejection on two verdicts, a lookup on "note them both down".
+
+    Only on the turn's first call, while the station is answering the user and
+    not a tool result -- the guard `ask` already uses. Otherwise a forced call
+    would be forced again after its own answer, and the turn would loop.
+
+    `log_checkin` for a log request only when the energy and a real situation
+    are known. The log sentence has to be built from what the user said; with
+    the situation missing the station asks for it, as its prompt says.
+    """
+    messages = state.get("messages") or []
+    wants = state.get("reading") or []
+    if not wants or not messages or not isinstance(messages[-1], HumanMessage):
+        return None
+    first = wants[0]
+    situation = state.get("situation")
+    if first == "log_checkin" and state.get("energy") and situation and situation != SITUATION_DECLINED:
+        return "log_checkin"
+    if first == "rate_measure" and waiting:
+        return "log_checkin"
+    if first == "own_idea" and not state.get("idea"):
+        return "discuss_idea"
     return None
 
 
@@ -805,6 +847,14 @@ def build_agent(
         "discuss_idea",
     )
     follow_up_model = bind("follow_up", follow_up_tools + web)
+    # The same station with its first call forced, one binding per tool a
+    # reading can require (see forced_tool). A tool left out of the agent is
+    # not forced: forcing a tool that is not bound is a 400.
+    follow_up_forced = {
+        name: bind("follow_up", follow_up_tools + web, force=name)
+        for name in ("log_checkin", "discuss_idea")
+        if name in by_name
+    }
     debate_tools = pick("add_measure", "record_choices", "idea_decided", "find_measures", "search_measures")
     debate_station_model = bind("debate", debate_tools, use_debate=True)
     # This station reads untrusted web pages, so it gets no write tool at all:
@@ -888,14 +938,26 @@ def build_agent(
         waiting = measure_awaiting_rating(log_path)
         # Which measure a "helped" is about is a fact in the log, not something
         # to infer from a transcript the reset conversation no longer has.
-        trailing = (
-            f'The situation logged for measure_id "{waiting}" has no rating yet. If the user says how it '
-            "went, call log_checkin with that measure_id and the helpfulness only. If they have "
-            "not said yet, ask them in one short sentence whether it helped."
-            if waiting
-            else None
-        )
-        response = _reply(follow_up_model, STATION_PROMPTS["follow_up"], state, trailing=trailing)
+        notes = []
+        if waiting:
+            notes.append(
+                f'The situation logged for measure_id "{waiting}" has no rating yet. If the user says how it '
+                "went, call log_checkin with that measure_id and the helpfulness only. If they have "
+                "not said yet, ask them in one short sentence whether it helped."
+            )
+        force = forced_tool(state, waiting)
+        if force == "log_checkin" and (state.get("reading") or [None])[0] == "log_checkin":
+            # What the log sentence is built from, put in front of the model.
+            # Energy and situation can come from a button or a payload into
+            # the state without ever appearing in the conversation, and a
+            # model forced to log what it cannot see would have to invent it.
+            notes.append(
+                f"Recorded for this conversation -- energy: {state.get('energy')}; what is going on, "
+                f'in the user\'s words: "{state.get("situation")}". The user asked to log the check-in: '
+                "call log_checkin now, with the circumstances built only from this and the conversation."
+            )
+        chosen = follow_up_forced.get(force, follow_up_model) if force else follow_up_model
+        response = _reply(chosen, STATION_PROMPTS["follow_up"], state, trailing="\n\n".join(notes) or None)
         update: dict[str, Any] = {"messages": [response], "step": "follow_up"}
         if web_search_ran(response):
             update["tool_events"] = [tool_event("web_search", "ok", "provider-reported", verified=False)]
@@ -1164,16 +1226,16 @@ def build_agent(
         # (observability/tracing.py). An answer outside the schema was still
         # a paid call; a call that raised left no usage to count.
         raw = result.get("raw") if isinstance(result, dict) else result
-        acts = list(reading.acts) if reading else None
+        wants = list(reading.wants) if reading else None
         update: dict[str, Any] = {
-            "reading": acts,
+            "reading": wants,
             "side_calls": [raw] if isinstance(raw, AIMessage) else [],
         }
         # A log request while the user's own idea is open counts the idea as
         # tried and closes it. Left open, the turn reaches follow_up, logs --
         # and `after_tools` sends it straight back to `debate`, which has no
         # log_checkin: the log request of case 41 that was never carried out.
-        if state.get("idea") and route_for_reading({**state, "reading": acts}) == "follow_up":
+        if state.get("idea") and wants and wants[0] == "log_checkin":
             update.update(idea=None, debate_turns=0)
         return update
 
@@ -1281,6 +1343,7 @@ __all__ = [
     "WRITE_TOOLS",
     "action_request",
     "build_agent",
+    "forced_tool",
     "discuss_idea",
     "idea_decided",
     "next_turn_state",

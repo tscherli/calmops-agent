@@ -664,7 +664,7 @@ class _ReadGraph(_PricedGraph):
     def invoke(self, payload, config=None):
         result = super().invoke(payload, config)
         reader_call = AIMessage(
-            content='{"acts": ["other"]}',
+            content='{"wants": ["unclear"]}',
             usage_metadata={"input_tokens": 400, "output_tokens": 20, "total_tokens": 420},
             response_metadata={"model_name": self.reply_content},
         )
@@ -688,7 +688,7 @@ def test_the_real_graph_hands_the_readers_call_to_the_case(tmp_path):
     from tests.conftest import StubChatModel
 
     stations = StubChatModel(responses=[AIMessage(content="ok")] * 5)
-    reader = StubChatModel(responses=[AIMessage(content='{"acts": ["other"]}')])
+    reader = StubChatModel(responses=[AIMessage(content='{"wants": ["unclear"]}')])
     graph = build_eval_graph(tmp_path / "log.csv", tmp_path / "measures.csv", model=stations, reader_model=reader)
 
     result = run_case({"turns": ["what is this app for"]}, agent_graph=graph,
@@ -697,3 +697,29 @@ def test_the_real_graph_hands_the_readers_call_to_the_case(tmp_path):
     assert reader.call_count == 1
     assert result["usage"]["side_calls"] == 1
     assert result["usage"]["model_calls"] == stations.call_count + 1
+
+
+def test_each_turns_reading_is_saved_with_the_case(tmp_path):
+    """Without it an error analysis can only infer the reading from the
+    nodes and tools that followed it -- which is how stage 79's was done."""
+    from tests.conftest import StubChatModel
+
+    stations = StubChatModel(responses=[AIMessage(content="ok")] * 5)
+    reader = StubChatModel(responses=[AIMessage(content='{"wants": ["just_chat"]}')])
+    graph = build_eval_graph(tmp_path / "log.csv", tmp_path / "measures.csv", model=stations, reader_model=reader)
+
+    result = run_case(
+        {"turns": ["just chatting", {"text": "I'm feeling wired.", "energy": "wired", "choices_clicked": True}]},
+        agent_graph=graph, log_path=tmp_path / "log.csv", measures_path=tmp_path / "measures.csv",
+    )
+
+    # One entry per turn: read, then a button click nobody had to read.
+    assert result["readings"] == [["just_chat"], None]
+
+
+def test_a_crisis_exit_keeps_the_readings_so_far():
+    result = run_case({"turns": ["busy week", "I want to end my life"]},
+                      agent_graph=_PricedGraph(reply_content="gpt-5-mini"))
+
+    assert result["crisis_intercepted"] is True
+    assert result["readings"] == [None]

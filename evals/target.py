@@ -268,6 +268,7 @@ def _result(
     nodes_run: list[str] | None = None,
     exclude_tools: Sequence[str] = (),
     usage: dict | None = None,
+    readings: list | None = None,
 ) -> dict:
     """What a case reports, whichever way the turn loop ended.
 
@@ -315,6 +316,11 @@ def _result(
         # on every trajectory, so one taken out of its file still says it came
         # from a reduced agent and cannot be read as the full one.
         "excluded_tools": sorted(exclude_tools),
+        # What the reader read the user to want, one entry per user turn that
+        # reached the graph -- None where no model read it (a button, a
+        # shortcut, a failed call). Without it an error analysis can only
+        # infer the reading from the nodes and tools that followed it.
+        "readings": list(readings or []),
     }
 
 
@@ -399,6 +405,7 @@ def run_case(
     # its third turn has reached it, and the union over the dataset is what
     # tests/test_evals_dataset.py checks the graph against.
     nodes_run: list[str] = []
+    readings: list = []
 
     for turn in inputs["turns"]:
         turn_text, extra = (turn, {}) if isinstance(turn, str) else (turn["text"], dict(turn))
@@ -415,7 +422,7 @@ def run_case(
             return {
                 **_result(
                     transcript, tool_events, approvals, log_path, measures_path,
-                    measures_before, nodes_run, exclude_tools, _usage_dict(usage),
+                    measures_before, nodes_run, exclude_tools, _usage_dict(usage), readings,
                 ),
                 "crisis_intercepted": True,
                 "matched_pattern": crisis.matched_pattern,
@@ -460,6 +467,7 @@ def run_case(
 
         nodes_run.extend(_nodes_run(graph, config))
         tool_events.extend(result.get("tool_events") or [])
+        readings.append(result.get("reading"))
         try:
             # Summarised whether or not a runs_log was given, so the case's
             # own usage is always there; appended to the file only when asked.
@@ -473,5 +481,5 @@ def run_case(
         state = next_turn_state(result)
 
     return {**_result(transcript, tool_events, approvals, log_path, measures_path, measures_before,
-                      nodes_run, exclude_tools, _usage_dict(usage)),
+                      nodes_run, exclude_tools, _usage_dict(usage), readings),
             "crisis_intercepted": False}
