@@ -507,13 +507,23 @@ def test_four_typed_cases_satisfy_the_floor():
 
 
 def _graph_nodes() -> set[str]:
+    """Every node a case could fail to reach.
+
+    A node on a plain edge out of START is entered by every run -- today that
+    is `understand`, which reads the message before routing. Reaching it
+    proves nothing, and a `reaches` naming it would pass in every case: the
+    guard would be satisfied without anything being tested. Derived from the
+    graph, not listed by hand, so a second always-entered node is exempt for
+    the same reason and a conditional one never is.
+    """
     from langchain_core.messages import AIMessage
 
     from agent.graph import build_agent
     from tests.conftest import StubChatModel
 
-    graph = build_agent(model=StubChatModel(responses=[AIMessage(content="")]))
-    return {node for node in graph.get_graph().nodes if not node.startswith("__")}
+    graph = build_agent(model=StubChatModel(responses=[AIMessage(content="")])).get_graph()
+    always_entered = {e.target for e in graph.edges if e.source == "__start__" and not e.conditional}
+    return {node for node in graph.nodes if not node.startswith("__")} - always_entered
 
 
 def assert_every_graph_node_is_reached(cases: list[dict]) -> None:

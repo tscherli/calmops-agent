@@ -168,6 +168,14 @@ def _completion_and_cost(rows: list[dict]) -> list[str]:
         "(agent turns only; the crisis gate and the graders are not timed)",
         "- The judge's own calls (Gemini) are not in these figures.",
     ]
+    # Runs from before the reader have no such field, and their report reads
+    # as it always did.
+    side = [u.get("side_calls", 0) for u in used]
+    if any(side):
+        lines.append(
+            f"- Of those, reader calls per case: mean {sum(side) / len(side):.1f} (the understand "
+            "node; they leave no message in the transcript and are counted from the turn records)"
+        )
     unpriced = sorted({m for u in used for m in u.get("unpriced_models") or []})
     if unpriced:
         lines.append(f"- **Unpriced models, counted as $0:** {', '.join(unpriced)}")

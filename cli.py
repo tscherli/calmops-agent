@@ -213,7 +213,9 @@ class Session:
 
         messages = result["messages"]
         if self.recorder is not None:
-            self.recorder.record_turn(messages_before, messages, DEFAULT_MODEL, latency)
+            self.recorder.record_turn(
+                messages_before, messages, DEFAULT_MODEL, latency, side_calls=result.get("side_calls") or []
+            )
         self.out(f"\nAgent: {message_text(messages[-1])}")
         self.out(
             f"  [station: {result.get('step') or '-'}"

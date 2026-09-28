@@ -655,3 +655,45 @@ def test_a_crisis_exit_carries_usage_too():
     # The cost of the turn before the crisis, not just the counts: the counts
     # come from the transcript and would survive the crisis exit dropping usage.
     assert result["usage"]["cost_usd"] > 0 and result["usage"]["input_tokens"] == 1000
+
+
+class _ReadGraph(_PricedGraph):
+    """A turn that was read first: the reader's call leaves no message in the
+    conversation, only a side call in the state."""
+
+    def invoke(self, payload, config=None):
+        result = super().invoke(payload, config)
+        reader_call = AIMessage(
+            content='{"acts": ["other"]}',
+            usage_metadata={"input_tokens": 400, "output_tokens": 20, "total_tokens": 420},
+            response_metadata={"model_name": self.reply_content},
+        )
+        return {**result, "side_calls": [reader_call]}
+
+
+def test_the_readers_call_is_counted_in_the_case(monkeypatch):
+    """Without it a read turn looks one call and 420 tokens cheaper than it was:
+    the transcript only holds the station's reply."""
+    result = run_case({"turns": ["hi"]}, agent_graph=_ReadGraph(reply_content="gpt-5-mini"))
+
+    usage = result["usage"]
+    assert usage["model_calls"] == 2 and usage["side_calls"] == 1
+    assert usage["input_tokens"] == 1400 and usage["output_tokens"] == 120
+    unread = run_case({"turns": ["hi"]}, agent_graph=_PricedGraph(reply_content="gpt-5-mini"))["usage"]
+    assert usage["cost_usd"] > unread["cost_usd"]
+
+
+def test_the_real_graph_hands_the_readers_call_to_the_case(tmp_path):
+    """End to end through build_eval_graph: the node keeps the call, the case counts it."""
+    from tests.conftest import StubChatModel
+
+    stations = StubChatModel(responses=[AIMessage(content="ok")] * 5)
+    reader = StubChatModel(responses=[AIMessage(content='{"acts": ["other"]}')])
+    graph = build_eval_graph(tmp_path / "log.csv", tmp_path / "measures.csv", model=stations, reader_model=reader)
+
+    result = run_case({"turns": ["what is this app for"]}, agent_graph=graph,
+                      log_path=tmp_path / "log.csv", measures_path=tmp_path / "measures.csv")
+
+    assert reader.call_count == 1
+    assert result["usage"]["side_calls"] == 1
+    assert result["usage"]["model_calls"] == stations.call_count + 1

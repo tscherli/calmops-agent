@@ -2,9 +2,13 @@ r"""The station graph: small nodes, each with its own short prompt and only its
 own tools.
 
     START
+      understand (one model call, only for a typed message code cannot place)
       route_start (plain function, no model call)
         |- the user rejected a suggestion            -> count_rejection
         |- a short verdict, a measure awaiting one   -> follow_up
+        |- read as "not now"                         -> listen -> END
+        |- read as a log request or a verdict        -> follow_up
+        |- read as a rejection, something on screen  -> count_rejection
         |- an idea of theirs is open                 -> debate
         |- the conversation already reached follow_up-> follow_up
         |- energy or goal missing                    -> ask
@@ -53,6 +57,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import InjectedState
 from langgraph.types import Command, interrupt
+from pydantic import BaseModel, Field
 
 from agent.common import (
     as_tool_content,
@@ -82,6 +87,7 @@ from agent.prompts import (
     IDEA_NOT_SAVED_LINE,
     IDEA_TRY,
     IDEA_TRY_WHAT_WAS_ADDED,
+    READ_PROMPT,
     STATION_PROMPTS,
     debate_prompt,
     search_instruction,
@@ -122,6 +128,7 @@ STATION_REASONING_EFFORT: dict[str, str | None] = {
     "follow_up": "low",
     "debate": "low",
     "web_search_ideas": "low",
+    "listen": "low",
 }
 
 # Short, unambiguous rejections are recognised in code, before any model call.
@@ -165,7 +172,26 @@ RATING_PHRASES: dict[str, tuple[str, ...]] = {
 }
 RATING_MAX_CHARS = 40
 
-Station = Literal["ask", "suggest", "follow_up", "debate"]
+Station = Literal["ask", "suggest", "follow_up", "debate", "listen"]
+
+# What a typed message can do, as the understand node reads it. The routing
+# defect of v1.0.0 was that nothing read the message before a station was
+# chosen: in the release sweep the station model often said what a message
+# meant ("I noted you said the ritual helped and the muscle one didn't") and
+# then did what its station allowed. The reading happens before any station, in
+# a call whose only job is reading.
+Act = Literal["rejection", "verdict", "log_request", "not_now", "own_idea", "checkin_info", "other"]
+
+# How much of the conversation the reader sees: enough for "yes" to have the
+# question it answers, short enough to stay a cheap call.
+READ_CONTEXT_MESSAGES = 6
+READ_TEXT_LIMIT = 500
+
+
+class Reading(BaseModel):
+    """What one user message does, in the order it says it."""
+
+    acts: list[Act] = Field(description="Every act the message contains, in order.")
 
 
 class State(TypedDict, total=False):
@@ -185,6 +211,8 @@ class State(TypedDict, total=False):
     checkin_logged: bool        # a check-in row was written this turn
     last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
+    reading: list[str] | None   # the acts the understand node read in this turn's message
+    side_calls: list[AIMessage]  # model calls of this turn that left no message: the reader's
     approvals: dict[str, dict[str, Any]]  # the user's card decisions, by tool call id
     tool_events: Annotated[list[dict[str, Any]], merge_tool_events]
 
@@ -492,6 +520,96 @@ def last_human_text(messages: Sequence[BaseMessage]) -> str:
     return ""
 
 
+def _said(message: BaseMessage) -> str:
+    """What a message says out loud; empty for a tool call with no text.
+
+    Not `message_text`: that falls back to printing the content blocks, and a
+    tool-calling turn would reach the reader as a dump of dicts.
+    """
+    text = getattr(message, "text", "")
+    if not isinstance(text, str) and callable(text):
+        text = text()
+    return text.strip() if isinstance(text, str) else ""
+
+
+def reading_input(state: State, waiting: str) -> list[BaseMessage]:
+    """The reader's whole input: its prompt, a few facts from the state, the
+    last few spoken turns, and the message to read.
+
+    The facts are what a message is read against. "didn't help" is a verdict
+    when a row is waiting for one and a rejection when suggestions are on
+    screen; "yes" answers whatever the app asked last.
+    """
+    messages = state.get("messages") or []
+    spoken = [
+        (("user" if isinstance(m, HumanMessage) else "app"), _said(m))
+        for m in messages[:-1]
+        if isinstance(m, (HumanMessage, AIMessage)) and _said(m)
+    ][-READ_CONTEXT_MESSAGES:]
+    idea = state.get("idea")
+    facts = [
+        f"- measures offered in this conversation: {'yes' if state.get('offered') else 'none yet'}",
+        f"- a logged measure waiting for a rating: {waiting or 'none'}",
+        f"- an idea of the user's under discussion: {idea if idea else 'none'}",
+    ]
+    history = "\n".join(f"{who}: {text[:READ_TEXT_LIMIT]}" for who, text in spoken) or "(none)"
+    body = (
+        "Facts from the app:\n" + "\n".join(facts)
+        + "\n\nThe conversation so far, oldest first:\n" + history
+        + "\n\nThe message to read:\n" + last_human_text(messages)[:READ_TEXT_LIMIT]
+    )
+    return [SystemMessage(content=READ_PROMPT), HumanMessage(content=body)]
+
+
+def parse_reading(result: Any) -> Reading | None:
+    """The reading inside whatever the structured call returned.
+
+    With `include_raw=True` that is a dict whose `parsed` is None when the
+    model's answer did not fit the schema; a scripted test model returns the
+    JSON as a plain message. A reading that does not validate raises, and the
+    caller falls back to the routing of v1.0.0.
+    """
+    if isinstance(result, dict):
+        parsed = result.get("parsed")
+        if isinstance(parsed, Reading):
+            return parsed
+        return Reading.model_validate(parsed) if isinstance(parsed, dict) else None
+    if isinstance(result, Reading):
+        return result
+    if isinstance(result, BaseMessage):
+        return Reading.model_validate_json(message_text(result))
+    return None
+
+
+def route_for_reading(state: State) -> str | None:
+    """Where a reading sends the turn, or None to route as v1.0.0 did.
+
+    One priority, fixed in advance, for a message that does several things:
+
+    - "not now" first: a wish about the whole conversation outranks anything
+      it came with;
+    - a log request before a rejection, so a reader that half-mistakes "the
+      muscle one didnt" for a rejection still lands next to the "yes";
+    - a rejection before a verdict while something is on screen -- the rule
+      the keyword shortcut already follows. With nothing offered there is
+      nothing to count, and with an idea open the "no" belongs to `debate`;
+    - a verdict to the only station with log_checkin, unless an idea is open.
+
+    Everything else -- an own idea, energy or goal, a question -- goes where
+    the state points, as before. Routing only; no tool is forced.
+    """
+    acts = state.get("reading") or []
+    if "not_now" in acts:
+        return "listen"
+    if "log_request" in acts:
+        return "follow_up"
+    if "rejection" in acts and state.get("offered") and not state.get("idea"):
+        return "count_rejection"
+    if "verdict" in acts and not state.get("idea"):
+        return "follow_up"
+    return None
+
+
 def action_request(call: dict[str, Any]) -> dict[str, Any]:
     """What the approval card shows for one pending write call.
 
@@ -565,6 +683,7 @@ def build_agent(
     tools: Sequence[BaseTool] | None = None,
     *,
     debate_model: str | BaseChatModel | None = None,
+    reader_model: str | BaseChatModel | None = None,
     log_path: Path | str | None = None,
     measures_path: Path | str | None = None,
     recursion_limit: int = DEFAULT_RECURSION_LIMIT,
@@ -600,6 +719,15 @@ def build_agent(
         debate_base = resolve_debate_model(None)
     else:
         debate_base = None
+    # The same rule for the reader. An injected model with no reader keeps the
+    # routing of v1.0.0, so a test scripting a station's replies is not handed
+    # an extra call it never scripted.
+    if reader_model is not None:
+        reader_base: BaseChatModel | None = resolve_model(reader_model)
+    elif model is None:
+        reader_base = resolve_model(None)
+    else:
+        reader_base = None
     search_on = web_search_enabled()
 
     find_measures = make_find_measures(measures_path)
@@ -697,6 +825,17 @@ def build_agent(
         # turns the forcing off.
         force=WEB_SEARCH_TOOL if search_on else None,
     )
+
+    # No tools at all: someone who said "not now" cannot be handed a suggestion
+    # or a check-in, whatever the model makes of its prompt.
+    listen_tools: list[BaseTool] = []
+    listen_model = bind("listen", listen_tools)
+
+    if reader_base is not None:
+        station_models["understand"] = model_name_of(reader_base) or getattr(reader_base, "_llm_type", "")
+        reader = reader_base.with_structured_output(Reading, include_raw=True)
+    else:
+        reader = None
 
     # -- stations ------------------------------------------------------------
 
@@ -954,9 +1093,10 @@ def build_agent(
         """The first rejection buys a web search, the second a step back."""
         return "web_search_ideas" if int(state.get("rejections") or 0) == 1 else "ask_goal_again"
 
-    def route_start(state: State) -> str:
-        """Before any model call. A button click is a fact; a short "not
-        helpful" is close enough to one; everything else goes to a station.
+    def decided_in_code(state: State) -> str | None:
+        """The routes code takes without reading the message, or None.
+
+        A button click is a fact; a short "not helpful" is close enough to one.
 
         An energy/goal click with both values set means a fresh lookup in the
         user's own list, however much was offered before -- the same rule
@@ -971,10 +1111,9 @@ def build_agent(
         screen, where "didn't help" is about the suggestion, not a measure.
         """
         messages = state.get("messages") or []
-        offered = state.get("offered")
         if state.get("rejected"):
             return "count_rejection"
-        if offered and not state.get("idea") and says_not_helpful(last_human_text(messages)):
+        if state.get("offered") and not state.get("idea") and says_not_helpful(last_human_text(messages)):
             return "count_rejection"
         if (
             not state.get("idea")
@@ -990,7 +1129,62 @@ def build_agent(
             and not state.get("idea")
         ):
             return "suggest"
-        return station_for(state)
+        return None
+
+    def understand(state: State) -> dict[str, Any]:
+        """Read the user's message before any station, once per turn.
+
+        No model call when there is nothing to read or code already knows: a
+        button click, a flag set by the harness, the two keyword shortcuts. A
+        rating button and an approval never get here at all -- the first runs
+        no graph, the second resumes at `review`.
+
+        A reading that fails -- a timeout, an answer outside the schema -- is
+        None, and the turn is routed as v1.0.0 routed it. A reader that is
+        down must cost accuracy, not the turn.
+        """
+        messages = state.get("messages") or []
+        if (
+            reader is None
+            or not messages
+            or not isinstance(messages[-1], HumanMessage)
+            or state.get("choices_clicked")
+            or decided_in_code(state)
+        ):
+            return {"reading": None, "side_calls": []}
+        try:
+            result = reader.invoke(reading_input(state, measure_awaiting_rating(log_path)))
+        except Exception:  # noqa: BLE001 - a failed reading falls back, it does not end the turn
+            result = None
+        try:
+            reading = parse_reading(result)
+        except Exception:  # noqa: BLE001 - an answer outside the schema, the same fallback
+            reading = None
+        # The reader's own message, kept aside so the turn's cost includes it
+        # (observability/tracing.py). An answer outside the schema was still
+        # a paid call; a call that raised left no usage to count.
+        raw = result.get("raw") if isinstance(result, dict) else result
+        acts = list(reading.acts) if reading else None
+        update: dict[str, Any] = {
+            "reading": acts,
+            "side_calls": [raw] if isinstance(raw, AIMessage) else [],
+        }
+        # A log request while the user's own idea is open counts the idea as
+        # tried and closes it. Left open, the turn reaches follow_up, logs --
+        # and `after_tools` sends it straight back to `debate`, which has no
+        # log_checkin: the log request of case 41 that was never carried out.
+        if state.get("idea") and route_for_reading({**state, "reading": acts}) == "follow_up":
+            update.update(idea=None, debate_turns=0)
+        return update
+
+    def listen(state: State) -> dict[str, Any]:
+        """For "not now": answer like a person, with nothing to suggest with."""
+        return {"messages": [_reply(listen_model, STATION_PROMPTS["listen"], state)], "step": "listen"}
+
+    def route_start(state: State) -> str:
+        """Before any station: what code decides, then what the reading says,
+        then where the state points -- which is all v1.0.0 had."""
+        return decided_in_code(state) or route_for_reading(state) or station_for(state)
 
     def after_tools(state: State) -> str:
         """Back to the station that asked, unless the tool changed the plan."""
@@ -1023,6 +1217,8 @@ def build_agent(
         return END
 
     graph = StateGraph(State)
+    graph.add_node("understand", understand)
+    graph.add_node("listen", listen)
     graph.add_node("ask", ask)
     graph.add_node("suggest", suggest)
     graph.add_node("follow_up", follow_up)
@@ -1035,9 +1231,11 @@ def build_agent(
     graph.add_node("review", review)
     graph.add_node("close_idea", close_idea)
 
+    graph.add_edge(START, "understand")
     graph.add_conditional_edges(
-        START, route_start, ["count_rejection", "ask", "suggest", "follow_up", "debate"]
+        "understand", route_start, ["count_rejection", "ask", "suggest", "follow_up", "debate", "listen"]
     )
+    graph.add_edge("listen", END)
     for name in ("ask", "suggest", "follow_up", "debate"):
         graph.add_conditional_edges(name, after_station, ["review", "tools", "checkin_done", END])
     graph.add_edge("review", "tools")
@@ -1065,6 +1263,7 @@ def build_agent(
         "follow_up": [t.name for t in follow_up_tools],
         "debate": [t.name for t in debate_tools],
         "web_search_ideas": [t.name for t in search_tools],
+        "listen": [t.name for t in listen_tools],
     }
     # Which model each station was built with, so a test can check the graph
     # the clients actually get rather than the resolver in isolation.
@@ -1077,6 +1276,7 @@ __all__ = [
     "DEFAULT_RECURSION_LIMIT",
     "NOT_HELPFUL_PHRASES",
     "REJECTED_TEXT",
+    "Reading",
     "State",
     "WRITE_TOOLS",
     "action_request",
@@ -1085,6 +1285,7 @@ __all__ = [
     "idea_decided",
     "next_turn_state",
     "record_choices",
+    "route_for_reading",
     "says_not_helpful",
     "station_for",
     "suggestion_not_helpful",

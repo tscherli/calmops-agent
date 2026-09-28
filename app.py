@@ -558,7 +558,9 @@ class ChatApp:
                                      "detail": "not called this turn"})
 
         messages = result["messages"]
-        self.recorder.record_turn(messages_before, messages, DEFAULT_MODEL, latency)
+        self.recorder.record_turn(
+            messages_before, messages, DEFAULT_MODEL, latency, side_calls=result.get("side_calls") or []
+        )
         # message_text, not .content: with the built-in web_search bound the
         # model speaks Responses-API content blocks.
         self._append_message("Agent", message_text(messages[-1]))

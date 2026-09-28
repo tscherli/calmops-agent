@@ -9,6 +9,7 @@ again, offline, over all runs -- which is what this does. The judge's two
 questions are left out: they need a model call.
 
     python -m evals.summarize_runs <trajectories.jsonl> [--n1 <trajectories-without-...jsonl>]
+                                   [--dataset-at <commit>]
 
 For an N-1 corpus it also reports the pass rate with the checks that fail by
 construction once `find_measures` is gone left out (option A in
@@ -17,11 +18,19 @@ find_measures. They measure the removal, not its effect.
 
 The recount is checked against the majority file the run wrote, when one
 sits beside it: a recount that disagrees with the run is reported, not used.
+
+A result belongs to the dataset it was scored with. A published snapshot is
+recounted against the dataset at the commit its README records, so a later
+change to a case -- v1.1 added `reaches: listen` to case 35 -- cannot quietly
+move a published number. Anything else is scored against the current dataset,
+and the summary says which.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
+import subprocess
 from collections import defaultdict
 from pathlib import Path
 
@@ -34,6 +43,31 @@ from evals.run_local import _feedback_items
 
 DETERMINISTIC = (crisis_gate_evaluator, trajectory_evaluator, fabrication_evaluator, write_had_card,
                  expectation_evaluator)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def recorded_commit(trajectories: Path) -> str | None:
+    """The commit a published snapshot says it was made from, or None.
+
+    `publish_results` writes it into the snapshot's README and refuses to
+    publish from a dirty tree, so the dataset at that commit is exactly the one
+    the snapshot's numbers were scored with.
+    """
+    readme = trajectories.with_name("README.md")
+    if not readme.exists():
+        return None
+    match = re.search(r"from commit `([0-9a-f]{7,40})`", readme.read_text(encoding="utf-8"))
+    return match.group(1) if match else None
+
+
+def cases_at(commit: str) -> dict[str, dict]:
+    """The dataset as it was at a commit, read from git."""
+    text = subprocess.run(
+        ["git", "show", f"{commit}:evals/dataset.jsonl"],
+        capture_output=True, check=True, cwd=REPO_ROOT,
+    ).stdout.decode("utf-8")
+    return {c["id"]: c for c in (json.loads(line) for line in text.splitlines() if line.strip())}
 
 
 def tautological_keys(case: dict) -> set[str]:
@@ -120,8 +154,9 @@ def zero_tolerance_misses(path: Path, scores: dict[str, list[dict]]) -> list[str
     return lines
 
 
-def render(full: Path, n1: Path | None = None) -> str:
-    cases = {c["id"]: c for c in load_cases()}
+def render(full: Path, n1: Path | None = None, *, dataset_at: str | None = None) -> str:
+    commit = dataset_at or recorded_commit(full)
+    cases = cases_at(commit) if commit else {c["id"]: c for c in load_cases()}
     full_scores = rescore(full, cases)
     rows = [("full agent", full, full_scores, summarize(full_scores, cases))]
     if n1 is not None:
@@ -133,7 +168,9 @@ def render(full: Path, n1: Path | None = None) -> str:
     lines = ["# All runs, recounted offline", "",
              "Deterministic checks only, recomputed from the saved trajectories -- the judge's",
              "questions need a model call and are not in here. A run's own report covers its last",
-             "run only.", ""]
+             "run only.", "",
+             f"Scored against the dataset at commit `{commit[:7]}`." if commit
+             else "Scored against the current dataset.", ""]
     for label, path, scores, _ in rows[:2]:
         agrees = majority_file_agrees(path, scores)
         lines.append(f"- `{path.name}`: recount "
@@ -173,8 +210,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Recount every run of a sweep, offline")
     parser.add_argument("trajectories", type=Path)
     parser.add_argument("--n1", type=Path, default=None, help="An N-1 run's trajectories to compare.")
+    parser.add_argument("--dataset-at", default=None,
+                        help="Score against the dataset at this commit (default: the one a published "
+                             "snapshot's README records, else the current dataset).")
     args = parser.parse_args()
-    print(render(args.trajectories, args.n1))
+    print(render(args.trajectories, args.n1, dataset_at=args.dataset_at))
 
 
 if __name__ == "__main__":

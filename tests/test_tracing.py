@@ -219,3 +219,24 @@ def test_a_default_recorder_never_points_at_the_real_runs_log():
     real = Path(__file__).resolve().parent.parent / "observability" / "runs.jsonl"
 
     assert RunRecorder().log_path != real
+
+
+def test_a_side_call_is_counted_and_priced_like_any_other_call():
+    """The reader answers in a structured reading, not a reply, so its call
+    leaves no message in the conversation. It still costs tokens."""
+    before = [HumanMessage(content="yes. the ritual helped")]
+    after = before + [AIMessage(content="Noted.", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})]
+    reader_call = AIMessage(
+        content='{"acts": ["log_request"]}',
+        usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+        response_metadata={"model_name": "test-model"},
+    )
+
+    record = summarize_turn(before, after, "test-model", 0.1, pricing=PRICING, side_calls=[reader_call])
+    without = summarize_turn(before, after, "test-model", 0.1, pricing=PRICING)
+
+    assert record.input_tokens == 110 and record.output_tokens == 15
+    assert record.side_calls == 1 and without.side_calls == 0
+    assert record.estimated_cost_usd == pytest.approx(without.estimated_cost_usd + (100 * 1.0 + 10 * 2.0) / 1_000_000)
+    assert record.tool_calls == []  # a side call is a model call, not a tool call
+    assert record.to_json_dict()["side_calls"] == 1

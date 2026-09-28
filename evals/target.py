@@ -163,7 +163,12 @@ def seed_measures(rows: list[dict], measures_path: Path) -> None:
 
 
 def build_eval_graph(
-    log_path: Path, measures_path: Path, *, model: Any = None, exclude_tools: Sequence[str] = ()
+    log_path: Path,
+    measures_path: Path,
+    *,
+    model: Any = None,
+    reader_model: Any = None,
+    exclude_tools: Sequence[str] = (),
 ):
     """The agent as the harness runs it.
 
@@ -177,6 +182,7 @@ def build_eval_graph(
     """
     return build_agent(
         model=model,
+        reader_model=reader_model,
         log_path=log_path,
         measures_path=measures_path,
         checkpointer=InMemorySaver(),
@@ -227,7 +233,7 @@ def _nodes_run(graph: Any, config: dict) -> list[str]:
 
 def _new_usage() -> dict:
     return {"cost_usd": 0.0, "latency_seconds": 0.0, "input_tokens": 0, "output_tokens": 0,
-            "web_searches": 0, "unpriced_models": set()}
+            "web_searches": 0, "unpriced_models": set(), "side_calls": 0}
 
 
 def _add_turn(usage: dict, turn: Any) -> None:
@@ -237,6 +243,7 @@ def _add_turn(usage: dict, turn: Any) -> None:
     usage["input_tokens"] += turn.input_tokens
     usage["output_tokens"] += turn.output_tokens
     usage["web_searches"] += turn.web_searches
+    usage["side_calls"] += turn.side_calls
     usage["unpriced_models"].update(turn.unpriced_models)
 
 
@@ -279,7 +286,11 @@ def _result(
         "usage": {
             **(usage or {}),
             "user_turns": sum(1 for m in transcript if isinstance(m, HumanMessage)),
-            "model_calls": sum(1 for m in transcript if isinstance(m, AIMessage)),
+            # The reader's calls leave no message in the transcript, so they
+            # are added from the per-turn records; without them a turn that
+            # was read would look one call cheaper than it was.
+            "model_calls": sum(1 for m in transcript if isinstance(m, AIMessage))
+            + (usage or {}).get("side_calls", 0),
         },
         "messages": serialize_messages(transcript),
         "tool_events": tool_events,
@@ -453,7 +464,8 @@ def run_case(
             # Summarised whether or not a runs_log was given, so the case's
             # own usage is always there; appended to the file only when asked.
             args = (messages_before, result.get("messages") or [])
-            kwargs = {"model": DEFAULT_MODEL, "latency_seconds": time.monotonic() - started}
+            kwargs = {"model": DEFAULT_MODEL, "latency_seconds": time.monotonic() - started,
+                      "side_calls": result.get("side_calls") or []}
             turn = recorder.record_turn(*args, **kwargs) if recorder else summarize_turn(*args, **kwargs)
             _add_turn(usage, turn)
         except Exception:  # a cost record must never fail a case

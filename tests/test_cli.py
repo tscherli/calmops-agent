@@ -554,3 +554,21 @@ def test_free_text_is_never_marked_as_a_click():
     s.handle("that sounds good")
 
     assert not s.graph.payloads[-1].get("choices_clicked")
+
+
+def test_the_readers_call_is_in_the_turns_record(tmp_path):
+    """The same guarantee as the window's: the reader's call is logged with the turn."""
+    import json
+
+    from observability.tracing import RunRecorder
+
+    reader_call = AIMessage(content='{"acts": ["other"]}',
+                            usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110})
+    s = session(StubGraph(final_state={"side_calls": [reader_call]}),
+                recorder=RunRecorder(log_path=tmp_path / "runs.jsonl"))
+
+    s.run_turn("what is this app for")
+
+    record = json.loads((tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["side_calls"] == 1
+    assert record["input_tokens"] == 100

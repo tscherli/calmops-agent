@@ -222,3 +222,24 @@ def test_a_run_without_usage_says_so_instead_of_printing_zeros():
 
     assert "not recorded for this run" in report
     assert "$0.0000" not in report
+
+
+def test_the_readers_share_of_the_model_calls_is_named():
+    """v1.1 adds a reader call to most typed turns. Compared with v1.0.0, the
+    model calls per case rise by exactly those; the report says how many."""
+    rows = [
+        _completion_row("a", usage={**_usage(3, 0.003, 3.0), "side_calls": 1}),
+        _completion_row("b", usage={**_usage(5, 0.005, 5.0), "side_calls": 2}),
+    ]
+
+    report = _build_report(rows, experiment_url=None, experiment_name="t")
+
+    assert "Model calls per case: mean 4.0, max 5" in report
+    assert "Of those, reader calls per case: mean 1.5" in report
+
+
+def test_a_run_from_before_the_reader_reads_as_it_always_did():
+    report = _build_report([_completion_row("a", usage=_usage(2, 0.002, 3.0))],
+                           experiment_url=None, experiment_name="t")
+
+    assert "reader calls" not in report

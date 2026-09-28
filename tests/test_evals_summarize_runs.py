@@ -90,3 +90,58 @@ def test_the_rendered_summary_names_every_zero_tolerance_miss(monkeypatch, tmp_p
 
     assert "writes run 2: no_fabrication" in text
     assert "| `no_fabrication` | 5/6 |" in text
+
+
+# -- a result is recounted against the dataset it was scored with ------------
+
+
+def _snapshot(tmp_path, readme: str | None):
+    path = tmp_path / "trajectories-20260927-141910.jsonl"
+    path.write_text("", encoding="utf-8")
+    if readme is not None:
+        (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+    return path
+
+
+def test_a_published_snapshot_names_the_commit_it_was_made_from(tmp_path):
+    path = _snapshot(tmp_path, "# Eval runs snapshot\n\nCreated 2026-09-27 (UTC) from commit `0d81185d3086`.\n")
+    assert summary_module.recorded_commit(path) == "0d81185d3086"
+
+
+def test_a_file_without_a_snapshot_readme_has_no_recorded_commit(tmp_path):
+    assert summary_module.recorded_commit(_snapshot(tmp_path, None)) is None
+    assert summary_module.recorded_commit(_snapshot(tmp_path, "# some other readme\n")) is None
+
+
+def _render_recording(monkeypatch, path, **kwargs):
+    """Render with the dataset sources stubbed; return the text and which one was used."""
+    used = []
+    monkeypatch.setattr(summary_module, "cases_at", lambda commit: used.append(commit) or dict(CASES))
+    monkeypatch.setattr(summary_module, "load_cases", lambda: used.append("current") or list(CASES.values()))
+    monkeypatch.setattr(summary_module, "rescore", lambda p, cases: {"writes": [_run()] * 3})
+    return summary_module.render(path, **kwargs), used
+
+
+def test_a_snapshot_is_recounted_against_the_dataset_at_its_commit(monkeypatch, tmp_path):
+    """v1.1 added `reaches: listen` to case 35. Recounted against the current
+    dataset, the published Step 7 comparison would move from 20/26 to 19/26 for
+    the agent without the lookup -- a number that was right for the dataset it
+    was scored with."""
+    path = _snapshot(tmp_path, "Created 2026-09-27 (UTC) from commit `0d81185d3086`.\n")
+
+    text, used = _render_recording(monkeypatch, path)
+
+    assert used == ["0d81185d3086"]
+    assert "Scored against the dataset at commit `0d81185`." in text
+
+
+def test_an_explicit_commit_wins_and_no_readme_means_the_current_dataset(monkeypatch, tmp_path):
+    path = _snapshot(tmp_path, "Created 2026-09-27 (UTC) from commit `0d81185d3086`.\n")
+    _, used = _render_recording(monkeypatch, path, dataset_at="8ae43f5")
+    assert used == ["8ae43f5"]
+
+    other = tmp_path / "local"
+    other.mkdir()
+    text, used = _render_recording(monkeypatch, _snapshot(other, None))
+    assert used == ["current"]
+    assert "Scored against the current dataset." in text

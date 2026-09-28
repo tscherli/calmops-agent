@@ -719,3 +719,23 @@ def test_free_text_is_never_marked_as_a_click(tk_root):
     settle(tk_root, app)
 
     assert not stub.invoked_with.get("choices_clicked")
+
+
+def test_the_readers_call_is_in_the_turns_record(tk_root, tmp_path):
+    """The reader's call leaves no message in the conversation; the window has
+    to hand it to the recorder or the turn is logged as cheaper than it was."""
+    import json
+
+    reader_call = AIMessage(content='{"acts": ["other"]}',
+                            usage_metadata={"input_tokens": 100, "output_tokens": 10, "total_tokens": 110})
+    stub_graph = _StubGraph(final_state={"side_calls": [reader_call]})
+    recorder = RunRecorder(log_path=tmp_path / "runs.jsonl")
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=stub_graph, recorder=recorder)
+
+    app.entry.insert(0, "what is this app for")
+    app._on_send()
+    settle(tk_root, app)
+
+    record = json.loads((tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert record["side_calls"] == 1
+    assert record["input_tokens"] == 105  # the reply's 5 and the reader's 100

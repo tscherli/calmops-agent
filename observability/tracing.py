@@ -12,11 +12,17 @@ own independent usage_metadata. Reading only the last message would
 undercount tokens/cost on every tool-calling turn. summarize_turn sums
 usage_metadata across every new AIMessage produced during one
 graph.invoke() call instead.
+
+Not every model call leaves a message in the conversation. The reader
+(agent/graph.py, `understand`) answers in a structured reading, not a reply,
+so its AIMessage is kept aside in the state as a "side call" and counted here
+with the rest. Counting only the conversation would report the reader as free.
 """
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -61,6 +67,7 @@ class TurnRecord:
     models_used: list[str] = field(default_factory=list)
     unpriced_models: list[str] = field(default_factory=list)
     web_searches: int = 0
+    side_calls: int = 0
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +78,7 @@ class TurnRecord:
             "output_tokens": self.output_tokens,
             "total_tokens": self.total_tokens,
             "web_searches": self.web_searches,
+            "side_calls": self.side_calls,
             "estimated_cost_usd": round(self.estimated_cost_usd, 6),
             "latency_seconds": round(self.latency_seconds, 3),
             "tool_calls": [{"name": t.name, "status": t.status} for t in self.tool_calls],
@@ -142,6 +150,7 @@ def summarize_turn(
     *,
     pricing: dict[str, dict[str, float]] | None = None,
     web_search_usd_per_call: float = WEB_SEARCH_USD_PER_CALL,
+    side_calls: Sequence[AIMessage] = (),
 ) -> TurnRecord:
     """Summarize one agent turn's token usage, cost, and tool calls.
 
@@ -155,6 +164,9 @@ def summarize_turn(
     Tokens are attributed per message to the model that produced them, and a
     model with no price entry is listed in `unpriced_models` rather than
     quietly costing nothing.
+
+    `side_calls` are model calls of the turn that left no message in the
+    conversation -- the reader's. They cost the same as any other call.
     """
     pricing = pricing if pricing is not None else PRICING_PER_MILLION_TOKENS
     new_messages = messages_after[len(messages_before):]
@@ -166,7 +178,7 @@ def summarize_turn(
     per_model: dict[str, list[int]] = {}
     tool_calls: list[ToolCallSummary] = []
 
-    for message in new_messages:
+    for message in [*new_messages, *side_calls]:
         if isinstance(message, AIMessage):
             web_searches += _web_search_calls(message)
             if message.usage_metadata:
@@ -198,6 +210,7 @@ def summarize_turn(
         models_used=sorted(per_model),
         unpriced_models=sorted(name for name in per_model if _price_key(name, pricing) is None),
         web_searches=web_searches,
+        side_calls=len(side_calls),
     )
 
 
@@ -219,9 +232,11 @@ class RunRecorder:
         messages_after: list[BaseMessage],
         model: str,
         latency_seconds: float,
+        side_calls: Sequence[AIMessage] = (),
     ) -> TurnRecord:
         record = summarize_turn(
-            messages_before, messages_after, model, latency_seconds, pricing=self.pricing
+            messages_before, messages_after, model, latency_seconds, pricing=self.pricing,
+            side_calls=side_calls,
         )
         self._append(record)
         return record
