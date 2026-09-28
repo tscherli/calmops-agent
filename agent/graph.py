@@ -9,6 +9,8 @@ own tools.
         |- read as "not now"                         -> listen -> END
         |- read as a log request or a verdict        -> follow_up
         |- read as a rejection, something on screen  -> count_rejection
+        |- read as save/rate, no measure known yet   -> nothing_to_save, then
+        |                                               the station below
         |- an idea of theirs is open                 -> debate
         |- the conversation already reached follow_up-> follow_up
         |- energy or goal missing                    -> ask
@@ -87,6 +89,7 @@ from agent.prompts import (
     IDEA_NOT_SAVED_LINE,
     IDEA_TRY,
     IDEA_TRY_WHAT_WAS_ADDED,
+    NOTHING_TO_SAVE_YET,
     READ_PROMPT,
     STATION_PROMPTS,
     debate_prompt,
@@ -218,6 +221,7 @@ class State(TypedDict, total=False):
     last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
     reading: list[str] | None   # what the understand node read the user to want, this turn
+    say_nothing_saved: bool     # this turn's reply opens with NOTHING_TO_SAVE_YET
     side_calls: list[AIMessage]  # model calls of this turn that left no message: the reader's
     approvals: dict[str, dict[str, Any]]  # the user's card decisions, by tool call id
     tool_events: Annotated[list[dict[str, Any]], merge_tool_events]
@@ -716,6 +720,57 @@ def forced_tool(state: State, waiting: str) -> str | None:
     return None
 
 
+def idea_kept(messages: Sequence[BaseMessage]) -> bool:
+    """Did the user decide, in this conversation, to try or add an idea of theirs?
+
+    `idea_decided` clears the idea from the state, so the transcript is where
+    a decided one is still known. "yeah log it" right after deciding to try it
+    is a log request about that idea (case 41).
+    """
+    return any(
+        call.get("name") == "idea_decided" and (call.get("args") or {}).get("outcome") in ("try", "add")
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls or []
+    )
+
+
+def measure_known(state: State, waiting: str) -> bool:
+    """Does the app know of any measure a save could be about?
+
+    Measures offered from the user's list, an idea of theirs open or decided
+    to try or add, a logged measure waiting for a rating, or the log question
+    just asked -- the log prompt asks it only once a measure is settled.
+    """
+    messages = state.get("messages") or []
+    return bool(
+        state.get("offered")
+        or state.get("idea")
+        or waiting
+        or asked_to_log(messages)
+        or idea_kept(messages)
+    )
+
+
+def save_without_measure(state: State, waiting: str) -> bool:
+    """Does the user want something saved -- a check-in or a rating -- that
+    has nothing to be about yet?
+
+    Then the turn opens with NOTHING_TO_SAVE_YET, said by code, and goes on to
+    the station the state points to. Left to itself, a station answered this
+    with a wrong reason ("there's no way for me to write it to your account
+    from here", case 40), and a node that only explained would stop the
+    conversation where a station goes on to offer measures (case 39's "ill do
+    the first one. save that" before anything was offered).
+
+    Only what code knows counts: a measure the user names in their own words
+    in this same message is not seen, so the sentence says what the app has,
+    not what the user did.
+    """
+    wants = effective_wants(state)
+    return bool(wants) and wants[0] in ("log_checkin", "rate_measure") and not measure_known(state, waiting)
+
+
 def action_request(call: dict[str, Any]) -> dict[str, Any]:
     """What the approval card shows for one pending write call.
 
@@ -958,7 +1013,16 @@ def build_agent(
         messages: list[BaseMessage] = [SystemMessage(content=prompt), *state["messages"]]
         if trailing:
             messages.append(SystemMessage(content=trailing))
-        return chosen.invoke(messages)
+        response = chosen.invoke(messages)
+        if state.get("say_nothing_saved") and not response.tool_calls:
+            # Part of the reply, not a message of its own: the clients show
+            # only the last message of a turn. A new id, because the words are
+            # no longer what the provider returned; the usage stays, so the
+            # turn's cost still counts the call.
+            said = _said(response)
+            text = f"{NOTHING_TO_SAVE_YET}\n\n{said}" if said else NOTHING_TO_SAVE_YET
+            response = response.model_copy(update={"content": text, "id": None})
+        return response
 
     def ask(state: State) -> dict[str, Any]:
         """Find out energy and goal. It may look measures up in the user's list
@@ -1278,7 +1342,7 @@ def build_agent(
             or state.get("choices_clicked")
             or decided_in_code(state)
         ):
-            return {"reading": None, "side_calls": []}
+            return {"reading": None, "side_calls": [], "say_nothing_saved": False}
         try:
             result = reader.invoke(reading_input(state, measure_awaiting_rating(log_path)))
         except Exception:  # noqa: BLE001 - a failed reading falls back, it does not end the turn
@@ -1295,6 +1359,8 @@ def build_agent(
         update: dict[str, Any] = {
             "reading": wants,
             "side_calls": [raw] if isinstance(raw, AIMessage) else [],
+            # Set again only by nothing_to_save, for this turn alone.
+            "say_nothing_saved": False,
         }
         # A log request that goes to follow_up -- the user answering the log
         # question -- while the user's own idea is open counts the idea as
@@ -1310,12 +1376,25 @@ def build_agent(
         """For "not now": answer like a person, with nothing to suggest with."""
         return {"messages": [_reply(listen_model, STATION_PROMPTS["listen"], state)], "step": "listen"}
 
+    def nothing_to_save(state: State) -> dict[str, Any]:
+        """The user wants something saved and there is nothing to save it with.
+
+        No model call and no message of its own: it marks the turn, and the
+        station the state points to opens its reply with the fixed sentence
+        (`_reply`) and goes on with its own job -- asking what is missing or
+        offering measures -- so the conversation does not stop here.
+        """
+        return {"say_nothing_saved": True}
+
     def route_start(state: State) -> str:
         """Before any station: what code decides, then what the reading says,
-        then where the state points -- which is all v1.0.0 had."""
+        then where the state points -- which is all v1.0.0 had. A save with no
+        measure known passes nothing_to_save on its way to that station."""
+        waiting = measure_awaiting_rating(log_path)
         return (
             decided_in_code(state)
-            or route_for_reading(state, measure_awaiting_rating(log_path))
+            or route_for_reading(state, waiting)
+            or ("nothing_to_save" if save_without_measure(state, waiting) else None)
             or station_for(state)
         )
 
@@ -1352,6 +1431,7 @@ def build_agent(
     graph = StateGraph(State)
     graph.add_node("understand", understand)
     graph.add_node("listen", listen)
+    graph.add_node("nothing_to_save", nothing_to_save)
     graph.add_node("ask", ask)
     graph.add_node("suggest", suggest)
     graph.add_node("follow_up", follow_up)
@@ -1366,8 +1446,11 @@ def build_agent(
 
     graph.add_edge(START, "understand")
     graph.add_conditional_edges(
-        "understand", route_start, ["count_rejection", "ask", "suggest", "follow_up", "debate", "listen"]
+        "understand",
+        route_start,
+        ["count_rejection", "ask", "suggest", "follow_up", "debate", "listen", "nothing_to_save"],
     )
+    graph.add_conditional_edges("nothing_to_save", station_for, ["ask", "suggest", "follow_up", "debate"])
     graph.add_edge("listen", END)
     for name in ("ask", "suggest", "follow_up", "debate"):
         graph.add_conditional_edges(name, after_station, ["review", "tools", "checkin_done", END])
@@ -1418,9 +1501,12 @@ __all__ = [
     "forced_tool",
     "discuss_idea",
     "idea_decided",
+    "idea_kept",
+    "measure_known",
     "next_turn_state",
     "record_choices",
     "route_for_reading",
+    "save_without_measure",
     "says_not_helpful",
     "station_for",
     "suggestion_not_helpful",

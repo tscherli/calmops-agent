@@ -20,8 +20,9 @@ from agent.graph import (
     parse_reading,
     reading_input,
     route_for_reading,
+    save_without_measure,
 )
-from agent.prompts import LOG_PROMPT, READ_PROMPT
+from agent.prompts import LOG_PROMPT, NOTHING_TO_SAVE_YET, READ_PROMPT
 from tests.conftest import StubChatModel
 from tools.measures import MEASURE_COLUMNS
 
@@ -540,3 +541,117 @@ def test_no_call_means_nothing_to_count(tmp_path, measures_file):
     graph, _ = graph_with(reads("unclear"), tmp_path, measures_file)
     clicked = {"messages": [HumanMessage(content="I'm feeling wired.")], "energy": "wired", "choices_clicked": True}
     assert graph.invoke(clicked)["side_calls"] == []
+
+
+# -- a save with nothing to save it with --------------------------------------
+
+
+def _decided(outcome):
+    """The user decided on their own idea; idea_decided cleared it from the state."""
+    return [
+        HumanMessage(content="i could block the first hour"),
+        AIMessage(content="", tool_calls=[{"name": "idea_decided", "args": {"outcome": outcome}, "id": "d1"}]),
+        ToolMessage(content=f"Decided: {outcome}.", tool_call_id="d1", name="idea_decided"),
+        AIMessage(content="Good -- give it a try, and tell me afterwards how it went."),
+        HumanMessage(content="yeah log it"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "state,waiting,expected",
+    [
+        # Case 36: a log request, and the app knows of no measure at all.
+        ({**ASKED, "reading": ["log_checkin"]}, "", True),
+        ({**ASKED, "reading": ["rate_measure"]}, "", True),
+        # Anything a save could be about takes it out.
+        ({**ASKED, **ON_SCREEN, "reading": ["log_checkin"]}, "", False),
+        ({**ASKED, **IDEA, "reading": ["log_checkin"]}, "", False),
+        ({**ASKED, "reading": ["rate_measure"]}, "breathe", False),
+        ({**ANSWERED, "reading": ["log_checkin"]}, "", False),
+        # Case 41: the decided idea left the state; the transcript still has it.
+        ({"messages": _decided("try"), "reading": ["log_checkin"]}, "", False),
+        ({"messages": _decided("add"), "reading": ["log_checkin"]}, "", False),
+        ({"messages": _decided("drop"), "reading": ["log_checkin"]}, "", True),
+        # Only a save: every other want goes on as before.
+        ({**ASKED, "reading": ["checkin_answer", "log_checkin"]}, "", False),
+        ({**ASKED, "reading": ["just_chat"]}, "", False),
+        ({**ASKED, "reading": ["own_idea"]}, "", False),
+        ({**ASKED, "reading": ["unclear"]}, "", False),
+        ({**ASKED, "reading": None}, "", False),
+    ],
+)
+def test_a_save_with_no_measure_known_is_told_so(state, waiting, expected):
+    assert save_without_measure(state, waiting) is expected
+
+
+def test_the_turn_passes_the_node_on_its_way_to_the_station(tmp_path, measures_file):
+    graph, _ = graph_with(reads("log_checkin"), tmp_path, measures_file)
+
+    nodes = [node for update in graph.stream({"messages": UNPROMPTED}, stream_mode="updates") for node in update]
+
+    assert nodes[:3] == ["understand", "nothing_to_save", "ask"]
+
+
+def test_the_reply_opens_with_the_fixed_sentence_and_the_station_carries_on(tmp_path, measures_file):
+    """Case 36's first turn. Code says what is not saved; the station does its
+    own job in the same reply. One message: the clients show only the last."""
+    graph, stations = graph_with(
+        reads("log_checkin"), tmp_path, measures_file, replies=[AIMessage(content="How is your energy right now?")]
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="just write down that everything ran over today")]})
+
+    replies = [m.content for m in result["messages"] if isinstance(m, AIMessage)]
+    assert replies == [f"{NOTHING_TO_SAVE_YET}\n\nHow is your energy right now?"]
+    assert stations.call_count == 1
+    assert result["step"] == "ask"
+
+
+def test_only_the_final_reply_opens_with_it(tmp_path, measures_file):
+    """A station that looks something up first: the call stays as the model
+    made it, and the answer after the lookup carries the sentence."""
+    lookup = AIMessage(content="", tool_calls=[{"name": "find_measures", "args": {}, "id": "f1"}])
+    graph, _ = graph_with(
+        reads("rate_measure"), tmp_path, measures_file,
+        replies=[lookup, AIMessage(content="Two quick ones: take a few slow breaths.")],
+    )
+
+    result = graph.invoke({"messages": [HumanMessage(content="it helped")],
+                           "energy": "calm", "goal": "calm down now", "situation": "a busy day"})
+
+    replies = [m for m in result["messages"] if isinstance(m, AIMessage)]
+    assert replies[0].tool_calls and replies[0].content == ""
+    assert replies[-1].content == f"{NOTHING_TO_SAVE_YET}\n\nTwo quick ones: take a few slow breaths."
+
+
+def test_the_opened_reply_keeps_its_usage_and_gets_its_own_id(tmp_path, measures_file):
+    """The words are no longer the provider's, so the id is not either; the
+    tokens are still the call's, so the turn's cost still counts them."""
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    reply = AIMessage(content="How is your energy?", id="msg_provider", usage_metadata=usage)
+    graph, _ = graph_with(reads("log_checkin"), tmp_path, measures_file, replies=[reply])
+
+    last = graph.invoke({"messages": UNPROMPTED})["messages"][-1]
+
+    assert last.content.startswith(NOTHING_TO_SAVE_YET)
+    assert last.usage_metadata["total_tokens"] == 15
+    assert last.id != "msg_provider"
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        # A turn the reader reads...
+        {"messages": [HumanMessage(content="exhausted")]},
+        # ... and one code decides without reading.
+        {"messages": [HumanMessage(content="no")], "rejected": True, "offered": ["breathe"]},
+    ],
+)
+def test_the_sentence_belongs_to_the_turn_that_needed_it(state, tmp_path, measures_file):
+    """The mark is cleared at the start of every turn, so a later reply does not
+    open with it too."""
+    graph, _ = graph_with(reads("checkin_answer"), tmp_path, measures_file, replies=[AIMessage(content="Got it.")])
+
+    result = graph.invoke({**state, "say_nothing_saved": True})
+
+    assert result["messages"][-1].content == "Got it."

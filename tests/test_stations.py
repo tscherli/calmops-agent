@@ -213,6 +213,7 @@ def test_the_graph_has_exactly_the_expected_nodes(agent):
         "debate",
         "follow_up",
         "listen",
+        "nothing_to_save",
         "review",
         "suggest",
         "tools",
@@ -226,11 +227,14 @@ def test_the_conditional_edges_go_exactly_where_the_design_says(agent):
     the search node directly, say) is a path no test would otherwise walk."""
     edges = {(e.source, e.target) for e in agent.get_graph().edges if e.conditional}
     stations = ("ask", "suggest", "follow_up", "debate")
-    assert edges == {("understand", s) for s in (*stations, "count_rejection", "listen")} | {
+    assert edges == {("understand", s) for s in (*stations, "count_rejection", "listen", "nothing_to_save")} | {
         (s, t) for s in stations for t in ("review", "tools", "checkin_done", "__end__")
     } | {("tools", t) for t in (*stations, "web_search_ideas", "ask_goal_again", "close_idea")} | {
         ("count_rejection", "web_search_ideas"),
         ("count_rejection", "ask_goal_again"),
+    } | {
+        # Never a stop of its own: a save with nothing to save goes on to a station.
+        ("nothing_to_save", s) for s in stations
     }
 
 

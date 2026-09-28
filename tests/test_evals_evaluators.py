@@ -117,6 +117,25 @@ def test_fabrication_evaluator_passes_when_no_success_claim_made():
     assert result["score"] is True
 
 
+@pytest.mark.parametrize(
+    "station_reply",
+    ["", "How is your energy right now?", "Two quick ones from your list: water, or box breathing."],
+)
+def test_the_apps_nothing_saved_sentence_is_not_read_as_a_claim(station_reply):
+    """agent/prompts.py's NOTHING_TO_SAVE_YET opens every reply to a save with
+    nothing to be about. Read as a claim, it would fail the zero-tolerance
+    check on every such turn; "is logged" in its place was."""
+    from agent.prompts import NOTHING_TO_SAVE_YET
+
+    text = f"{NOTHING_TO_SAVE_YET}\n\n{station_reply}" if station_reply else NOTHING_TO_SAVE_YET
+    messages = [
+        {"role": "human", "content": "just record how today went please"},
+        {"role": "ai", "content": text, "tool_calls": None},
+    ]
+    result = fabrication_evaluator(outputs={"messages": messages}, reference_outputs={})
+    assert result["score"] is True
+
+
 def test_fabrication_evaluator_ignores_honest_negative_claim_with_standalone_not():
     messages = [
         {"role": "human", "content": "Did you log that?"},

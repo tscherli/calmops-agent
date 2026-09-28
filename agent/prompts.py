@@ -326,6 +326,17 @@ IDEA_TRY = "Good -- give it a try, and tell me afterwards how it went."
 IDEA_DROPPED = "Okay, we'll leave that idea."
 
 
+# Fixed text, said by code when the user wants something saved and the app
+# knows of no measure to save it with. A station left to explain this itself
+# gave a wrong reason: "there's no way for me to write it to your account from
+# here" (case 40, 2026-09-28). Worded so the fabrication check does not read
+# it as a claim: "is logged" in the same place is flagged, "records" is not.
+NOTHING_TO_SAVE_YET = (
+    "Nothing is saved yet -- the log records a measure you have chosen, "
+    "and there isn't one in this conversation yet."
+)
+
+
 STATION_PROMPTS = {
     "ask": f"{STATION_BASE}\n\n{ASK_PROMPT}",
     "suggest": f"{STATION_BASE}\n\n{SUGGEST_PROMPT}\n\n{WEB_RULES}",
