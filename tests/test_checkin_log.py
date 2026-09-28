@@ -167,6 +167,87 @@ def test_a_checkin_without_a_measure_is_not_written(log_file):
     assert not log_file.exists()
 
 
+def test_a_rating_without_a_measure_is_not_written(log_file):
+    """A verdict about nothing cannot be read back: no digest, no button and
+    no person can tell what "helped" was about."""
+    result = append_checkin_row(helpfulness="helped", path=log_file)
+    assert result["status"] == "skipped"
+    assert "rating" in result["reason"]
+    assert not log_file.exists()
+
+
+def test_a_rating_in_the_users_own_words_keeps_them(log_file):
+    """A measure that is not in the list has no id. Its rating row kept only
+    the verdict, so "helped" was logged about nothing -- eight such rows in
+    the v1.1 eval runs of 2026-09-28."""
+    append_checkin_row(energy="calm", circumstances="Long day.", measure_taken="Tea outside.",
+                       path=log_file)
+    append_checkin_row(measure_taken="Tea outside.", helpfulness="helped", path=log_file)
+    row = read_checkin_rows(log_file)[-1]
+    assert row["measure_taken"] == "Tea outside." and row["helpfulness"] == "helped"
+    assert row["energy"] == "" and row["circumstances"] == ""
+
+
+def test_a_rating_with_an_id_still_carries_only_the_id(log_file):
+    """The id names the measure; words next to it would be a second name that
+    can drift from the list."""
+    append_checkin_row(measure_id="short_walk", measure_taken="a walk", helpfulness="helped",
+                       path=log_file)
+    row = read_checkin_rows(log_file)[-1]
+    assert row["measure_id"] == "short_walk" and row["measure_taken"] == ""
+
+
+def test_a_verdict_in_own_words_that_arrives_with_the_situation_writes_both_rows(log_file):
+    """Case 44 of the evals: nothing waiting, the verdict and the situation in
+    one call, the measure in the user's words. "" (no id) equalled "" (nothing
+    waiting), so the check-in was skipped and the situation lost."""
+    result = append_checkin_row(
+        energy="exhausted",
+        circumstances="Long day.",
+        measure_taken="Evening ritual",
+        helpfulness="helped",
+        path=log_file,
+    )
+    situation, verdict = read_checkin_rows(log_file)
+    assert situation["circumstances"] == "Long day." and situation["helpfulness"] == ""
+    assert situation["measure_taken"] == "Evening ritual"
+    assert verdict["measure_taken"] == "Evening ritual" and verdict["helpfulness"] == "helped"
+    assert result["checkin_row_id"] == situation["row_id"]
+
+
+def test_a_verdict_in_own_words_for_a_waiting_check_in_adds_no_second_one(log_file):
+    """Matched by the words, whatever case and spacing the model retypes them in."""
+    append_checkin_row(energy="wired", circumstances="Deadlines.", measure_taken="Evening ritual",
+                       path=log_file)
+    append_checkin_row(energy="wired", circumstances="Deadlines.", measure_taken="evening  Ritual ",
+                       helpfulness="helped", path=log_file)
+    assert len(read_checkin_rows(log_file)) == 2
+
+
+def test_a_verdict_for_the_second_waiting_measure_adds_no_second_check_in(log_file):
+    """Two measures logged in one turn, the second rated first with the
+    situation repeated: only the first waiting measure was compared, so the
+    second got its check-in twice."""
+    append_checkin_row(energy="wired", circumstances="Bad sleep.", measure_id="first_one",
+                       path=log_file)
+    append_checkin_row(energy="wired", circumstances="Bad sleep.", measure_id="second_one",
+                       path=log_file)
+    append_checkin_row(energy="wired", circumstances="Bad sleep.", measure_id="second_one",
+                       helpfulness="helped", path=log_file)
+    assert len(read_checkin_rows(log_file)) == 3
+    assert measures_awaiting_rating(log_file) == ["first_one"]
+
+
+def test_the_same_verdict_twice_in_own_words_is_refused(log_file):
+    """Now that the words are kept, the digest would count the repeat."""
+    append_checkin_row(energy="calm", circumstances="Long day.", measure_taken="Tea outside.",
+                       path=log_file)
+    append_checkin_row(measure_taken="Tea outside.", helpfulness="helped", path=log_file)
+    again = append_checkin_row(measure_taken="tea outside.", helpfulness="helped", path=log_file)
+    assert again["status"] == "skipped"
+    assert len(read_checkin_rows(log_file)) == 2
+
+
 def test_rows_are_only_ever_appended(log_file):
     append_checkin_row(energy="calm", circumstances="One.", measure_id="short_walk", path=log_file)
     append_checkin_row(measure_id="short_walk", helpfulness="somewhat", path=log_file)
@@ -246,6 +327,20 @@ def test_a_verdict_that_wrote_the_situation_counts_as_a_check_in(log_file, measu
     )
     assert command.update["checkin_logged"] is True
     assert command.update["last_measure_id"] == "short_walk"
+
+
+def test_a_refused_id_retried_in_own_words_still_ends_the_check_in(log_file, measures_file):
+    """Case 44 of the evals: a made-up id was refused, the retry used the
+    user's words. No check-in row was written, checkin_logged stayed unset,
+    and the conversation never reached its end."""
+    log_checkin = make_log_checkin(log_file, measures_file)
+    refused = _call(log_checkin, energy="exhausted", circumstances="Long day.",
+                    measure_id="evening_ritual", helpfulness="helped")
+    retried = _call(log_checkin, energy="exhausted", circumstances="Long day.",
+                    measure_taken="Evening ritual", helpfulness="helped")
+    assert _receipt(refused)["status"] == "error"
+    assert retried.update["checkin_logged"] is True
+    assert [row["measure_taken"] for row in read_checkin_rows(log_file)] == ["Evening ritual"] * 2
 
 
 def test_a_rating_does_not_end_the_conversation(log_file, measures_file):

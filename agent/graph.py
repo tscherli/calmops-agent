@@ -728,7 +728,8 @@ def action_request(call: dict[str, Any]) -> dict[str, Any]:
     if name == "add_measure":
         description = f'Add to your list: "{args.get("measure", "")}"'
     elif name == "log_checkin" and args.get("helpfulness"):
-        description = f'Rate "{args.get("measure_id", "")}" as: {args["helpfulness"]}'
+        measure = args.get("measure_id") or args.get("measure_taken") or "no measure"
+        description = f'Rate "{measure}" as: {args["helpfulness"]}'
     elif name == "log_checkin":
         measure = args.get("measure_id") or args.get("measure_taken") or "no measure"
         description = f'Log: "{args.get("circumstances", "")}" (measure: {measure})'

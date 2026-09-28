@@ -389,7 +389,7 @@ Removing the user's measure list made no measurable difference to the pass rate 
 - Energy, goal and helpfulness are entirely self-report, not sensed.
 - Check-ins fire at configured times or a random interval, not adaptively.
 - Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
-- A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons. Measures picked from the list are rated one at a time: when a turn logs two, the strip asks about the first, then the second.
+- A measure you describe in your own words has no `measure_id`, which the rating buttons need — so those cannot be rated with the buttons; a rating typed in words is logged under your words. Measures picked from the list are rated one at a time: when a turn logs two, the strip asks about the first, then the second.
 - One goal question covers a wide range: "plan recovery" reaches from an hour-long massage to a weekend away, and there is no way to say which you meant. 9 of the 62 measures are plan-recovery ones, against 42 quick recoveries, so that end of the list is thin as well.
 - The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.

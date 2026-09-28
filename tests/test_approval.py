@@ -281,3 +281,11 @@ def test_the_card_shows_what_will_be_written_built_from_the_arguments():
     assert add["description"] == 'Add to your list: "Stretch."' and add["editable"] == "measure"
     assert log["description"] == 'Log: "Deadline week." (measure: breathe)' and log["editable"] == "circumstances"
     assert "helped" in rate["description"] and rate["editable"] is None
+
+
+def test_a_rating_card_names_a_measure_in_the_users_own_words():
+    """The card read 'Rate "" as: helped' -- an approval of nothing visible."""
+    rate = action_request(
+        {"name": "log_checkin", "id": "c", "args": {"measure_taken": "Evening ritual", "helpfulness": "helped"}}
+    )
+    assert rate["description"] == 'Rate "Evening ritual" as: helped'
