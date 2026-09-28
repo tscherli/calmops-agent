@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> 🚧 **Pre-release (`v0.12.0`) — not evaluated yet.** The station architecture is built and covered by 792 tests, and `evals/dataset.jsonl` holds all 26 cases of the rebuilt suite (the cases written for the previous design were archived to `evals/dataset.mood-era.jsonl`). The suite has been run three times end to end: **18 of 26 cases pass in all three runs, 4 fail in all three, and 4 disagree with themselves** — 22 of 26 by majority, with all three zero-tolerance items at 100%. The four consistent failures are the four progression-tier cases, which assert behaviour the agent does not produce yet. There are still **no comparative quality numbers**, because the baseline has not been run — so these say the suite works and roughly where the agent stands, not how good it is against any alternative. The tests say the wiring holds; nothing yet says the agent answers well. Treat everything below as a description of what is built, not of what has been measured. See [Results & limitations](#results--limitations).
+> **v1.0.0 — measured, with one named defect.** In a three-run release sweep the agent passes every regression-tier case, makes no real false claim of having saved something, and stops every crisis message before any model call (78/78); its LLM judge is calibrated against human labels (kappa 0.88 and 0.90, n=25). Against a no-tools model call given the same list and an honest prompt it does not score better on what both can be graded on — its value is in what that baseline cannot do: save a check-in behind an approval card, stop crisis messages in code, and keep write tools out of any prompt's reach. One defect is named rather than fixed: the agent routes a message by where the conversation is, not by what it says, which accounts for most remaining failures; the fix is planned for v1.1. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -218,7 +218,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **The dataset is rebuilt and measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 21 in the regression tier, which must pass, and 5 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. An error analysis of every failing run traced the five to one shared cause, not five faults: the agent routes a message by where the conversation is, not by what the message says. The full agent, the agent without its measure lookup and the no-tools baseline have all been run; the published results are in `evals/published/`, and this section's results write-up is being rewritten.
+> **The dataset is rebuilt and measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 21 in the regression tier, which must pass, and 5 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. An error analysis of every failing run traced the five to one shared cause, not five faults: the agent routes a message by where the conversation is, not by what the message says. The full agent, the agent without its measure lookup and the no-tools baseline have all been run; the results are in [Results & limitations](#results--limitations), and every number there comes from a snapshot in `evals/published/`.
 
 ### Where the evals run, and where tracing goes
 
@@ -316,6 +316,8 @@ python devtools/try_trace.py cli            # the terminal client
 python devtools/try_trace.py app            # the Tk window
 ```
 
+Prints every call into `agent/`, `tools/` and `observability/`, indented, so a turn reads as its station path and the tools it used. Worker-thread lines are labelled, because the window runs each turn in one.
+
 ### Working on the window itself
 
 ```
@@ -324,29 +326,73 @@ python devtools/try_ui.py
 
 The real window with a scripted agent behind it: no API key, no cost, no waiting. It works on a copy of the measure list and a fresh log in the temp directory, so clicking Approve touches nothing real, and it prints which handler each button reaches. **F5 inside the window restarts it** with your edited code — Tkinter has no hot reload, so that is the loop: edit, F5, look.
 
-Prints every call into `agent/`, `tools/` and `observability/`, indented, so a turn reads as its station path and the tools it used. Worker-thread lines are labelled, because the window runs each turn in one.
-
 For values rather than names, use the debugger: `.vscode/launch.json` has a configuration per client, per test scope, and for the scheduler. The CLI is the one to step through — it is single-threaded, so a breakpoint stops the whole turn. Worth keeping breakpoints on `route_start` (which station, before any model call), the station functions, `tools_node` (which call is about to run, with its arguments), `review` (what the card will show) and `append_checkin_row` (what row is written).
 
 ## Results & limitations
 
-**Current state: pre-release. 792 passing tests, a complete 26-case dataset, two three-run sweeps, and no baseline yet.**
+**Current state: v1.0.0.** 937 passing tests, 26 eval cases (21 regression, 5 progression), an LLM judge calibrated against human labels, and the agent compared with itself without its measure lookup and with a no-tools model call. Every number below comes from a snapshot committed in `evals/published/`, and `python -m evals.summarize_runs` recounts any of them offline.
 
-The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
+The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, the eval harness itself, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
-**The eval figures from the previous architecture are not reproduced here**, because they measured a system that no longer exists (semantic tagging, history lookup, a structuring flow — all removed). The last run under the old design scored 100% on both zero-tolerance items (crisis-gate correctness, no fabrication) and 73% overall, and that overall figure was dominated by an uncalibrated LLM judge. Those cases are kept at `evals/dataset.mood-era.jsonl` so the old numbers remain reproducible; the rebuild for the station design is in progress.
+### What "good performance" means here
 
-**Known limitations:**
+- **Zero tolerance, in every run:** a crisis message never reaches the model (`crisis_gate_correctness`); the agent never claims a save that did not happen (`no_fabrication`); nothing is written without an approval card the user saw (`write_had_card`). One miss in any run blocks a release.
+- **Regression tier:** each case passes in at least 2 of 3 runs. A case passes when every deterministic check it makes holds.
+- **Progression tier:** behaviour the agent does not produce yet. Scored and reported, never blocking; a case moves up when it passes.
+- **The judge's two questions** — *groundedness* (did the reply offer only measures from the user's own list?) and *situation faithfulness* (did it assert anything the user did not say?) — count only once calibrated against human labels.
+- **What the suite can detect:** at 26 cases a paired comparison needs about six cases flipping one way before a difference is significant, so the suite catches collapse, not small regressions. The unit and graph tests are what catch those.
+
+### Results
+
+**The v1.0.0 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.0.0 ([snapshot](evals/published/20260927-190409-v1-release-sweep/)):
+
+| | result |
+|---|---|
+| majority pass | **21/26** — every regression-tier case; the 5 failing are all progression-tier |
+| pass in every run | 19/26 |
+| crisis gate | 78/78 |
+| no fabrication | 75/78 as counted; **0 real** — the three flags, read by hand, are not claims (see limitations) |
+| write had card | 11/11 |
+| task completion | should write, and did: 7/9 · should not write, and did not: 45/45 |
+| per case | 5.7 model calls, $0.0049, 15.5 s on average |
+
+**The judge, calibrated** against 25 hand-labelled trajectories per question, 5 of them planted violations:
+
+| question | kappa | 95% interval |
+|---|---|---|
+| groundedness | 0.88 | 0.58–1.00 |
+| situation faithfulness | 0.90 | 0.63–1.00 |
+
+The groundedness question first scored 0.69 and was published as a fail; it passed after two labels, marked for defects the question does not ask about, were corrected to the question as written. Both snapshots are committed, so the order of events is on record.
+
+**The agent against simpler versions of itself** (the Step 7 sweep, before the fabrication fix — [snapshot](evals/published/20260927-154512-step7-runs/)):
+
+| | full agent | without its measure lookup | no-tools model call |
+|---|---|---|---|
+| majority pass | 20/26 | 20/26 (13/26 counting the checks that cannot pass without a lookup) | not graded on these |
+| no fabrication | 76/78 | 77/78 | 78/78 |
+| groundedness (judge) | 14/14, last run | 20/23, last run | 76/78, all runs |
+| should write, and did | 7/9 | 5/9 | cannot write |
+
+Removing the user's measure list made no measurable difference to the pass rate — two cases flipped each way. The no-tools baseline — the same model, the list in its prompt, told honestly that it cannot save — matches or beats the agent on everything it can be graded on. **The agent's value is in what the baseline cannot do:** save a check-in behind an approval card, stop crisis messages in code before any model call, and keep write tools out of reach of any prompt. The lookup-free agent and the baseline are judged against the user's whole list (62 rows), an easier yardstick than the agent's looked-up slice and longer than any list the judge was calibrated on.
+
+**The eval figures from the previous architecture are not reproduced here**: they measured a system that no longer exists. Its cases are kept at `evals/dataset.mood-era.jsonl`.
+
+### Known limitations
+
+- **Messages are routed by where the conversation is, not by what they say (the named defect of v1.0.0).** The agent recognises only three kinds of message in code before routing — a button, a short rejection, a short rating with a row waiting. Everything else goes to a station chosen by the conversation's position, and a message that station does not expect is forced into the nearest tool: *"that breathing thing helped"* is treated as a new idea, *"the ritual helped but the muscle one didn't"* as a rejection, *"I don't want suggestions"* is answered with suggestions. An error analysis of 41 failing case-runs found this behind 26 of them. It is why the five progression-tier cases fail. The fix — understanding a message before routing it — is planned for v1.1.
+- **The fabrication check cannot read tense or mood.** It looks for "logged", "saved" and "recorded" and excuses denials, but not a hypothetical (*"I would have recorded"*), a plan (*"that will be logged"*) or the scoped wording the agent is now told to use (*"recorded for this conversation"*). That is why the release sweep counts 75/78 with no real fabrication. To be fixed in v1.1, with an audit over every saved run.
+- **The judge numbers rest on small samples.** 25 items per question, both intervals reaching below the 0.70 bar; stability measured by re-grading one trajectory; the judge splits 3 to 2 on one borderline item; the grounding question was reworded twice on these same items. Recall on *natural* violations is unmeasured — the planted ones are clean where real ones are subtle.
+- **Scripted multi-turn cases can go out of step.** A case's user turns are fixed, so when the agent legitimately takes another order, a later turn can refer to something it never said (*"the first one"*). 3 of the 41 failing case-runs are this: a test artefact, not an agent fault.
 
 - **The crisis gate screens English only.** It matched German until 2026-09-25; those ten patterns were removed when the app was limited to English. A message like *"Ich möchte nicht mehr leben"* now reaches the model as ordinary text and gets an ordinary reply instead of crisis resources. The resources it does show name German services (Telefonseelsorge, 112), because those are about where the user is rather than what language they write in — so this gap matters most for exactly the person the resources were chosen for. Restoring German support means restoring the patterns in `agent/safety.py` and this line together.
 - Energy, goal and helpfulness are entirely self-report, not sensed.
 - Check-ins fire at configured times or a random interval, not adaptively.
 - Web search results are protected against prompt injection **only** by instructions in the system prompt. Because OpenAI's built-in tool never hands the raw payload to this project's own code, no deterministic check is possible there — materially weaker than the rest of the app's boundaries.
 - A measure you describe in your own words has no `measure_id`, and the log ties a rating to one — so those cannot be rated with the buttons. Measures picked from the list are rated one at a time: when a turn logs two, the strip asks about the first, then the second.
-- One goal question covers a wide range: "plan recovery" reaches from an hour-long massage to a weekend away, and there is no way to say which you meant. 8 of the 60 measures are plan-recovery ones, against 42 quick recoveries, so that end of the list is thin as well.
+- One goal question covers a wide range: "plan recovery" reaches from an hour-long massage to a weekend away, and there is no way to say which you meant. 9 of the 62 measures are plan-recovery ones, against 42 quick recoveries, so that end of the list is thin as well.
 - The digest's window is a plain date cutoff; a rating written this week about last week's measure counts as this week's news.
 - Conversations have no memory across windows: the durable memory is the CSV, not the chat buffer.
-- The LLM judge in the eval suite is not yet calibrated against hand-labeled ground truth, and there is concrete evidence it needs to be. Both of its questions are reported outside the headline until the gate above is cleared. Even once it is, recall on *natural* violations stays unmeasured: the planted ones are clean and exaggerated where real ones are subtle.
 - Single-user personal tool. No cloud sync, no access from another device, no built-in backup — a deliberate tradeoff for zero setup, not an oversight.
 - This is a wellness aid, not a clinical tool; the crisis gate is a basic English keyword list, not a validated risk-assessment instrument, deliberately biased toward false positives.
 
