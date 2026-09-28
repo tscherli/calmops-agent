@@ -15,6 +15,7 @@ from agent.graph import (
     Reading,
     asked_to_log,
     build_agent,
+    effective_wants,
     forced_tool,
     parse_reading,
     reading_input,
@@ -235,6 +236,55 @@ def test_each_want_goes_where_the_table_says(state, waiting, expected):
 )
 def test_the_first_want_decides(wants, expected):
     assert route_for_reading({**ON_SCREEN, "messages": ANSWER, "reading": wants}) == expected
+
+
+# -- a rating given as the answer to the log question -----------------------
+
+HOW_IT_WENT = [AIMessage(content=LOG_QUESTION),
+               HumanMessage(content="helped. literally the only thing that actually helped today")]
+
+
+@pytest.mark.parametrize(
+    "messages,reading,expected",
+    [
+        # Case 39: the app asked the log question, the answer says how it went.
+        (HOW_IT_WENT, ["rate_measure"], ["log_checkin", "rate_measure"]),
+        # Without the question a rating stays a rating.
+        (UNPROMPTED, ["rate_measure"], ["rate_measure"]),
+        # Already in the right order; only a leading rating is changed.
+        (ANSWER, ["log_checkin", "rate_measure"], ["log_checkin", "rate_measure"]),
+        (ANSWER, ["just_chat", "rate_measure"], ["just_chat", "rate_measure"]),
+        (ANSWER, None, []),
+    ],
+)
+def test_a_rating_that_answers_the_log_question_is_a_yes_first(messages, reading, expected):
+    assert effective_wants({"messages": messages, "reading": reading}) == expected
+
+
+def test_the_answer_goes_to_the_station_that_can_log_even_with_nothing_waiting():
+    """The rating alone found no row to rate and fell back; as a yes to the log
+    question it goes to follow_up, where the log comes first."""
+    state = {"messages": HOW_IT_WENT, "reading": ["rate_measure"]}
+    assert route_for_reading(state, waiting="") == "follow_up"
+
+
+def test_the_answer_forces_the_log_when_its_inputs_are_known():
+    state = {"messages": HOW_IT_WENT, "reading": ["rate_measure"],
+             "energy": "exhausted", "situation": "third late night this week"}
+    assert forced_tool(state, "") == "log_checkin"
+    # A declined situation still leaves the log to the station.
+    assert forced_tool({**state, "situation": SITUATION_DECLINED}, "") is None
+
+
+def test_case_39s_last_turn_reaches_the_log_with_the_situation_shown(tmp_path, measures_file):
+    graph, stations = graph_with(reads("rate_measure"), tmp_path, measures_file)
+
+    result = graph.invoke({"messages": HOW_IT_WENT, "energy": "exhausted",
+                           "situation": "third late night this week"})
+
+    assert result["step"] == "follow_up"
+    notes = [m.content for m in stations.received_messages[-1] if isinstance(m, SystemMessage)]
+    assert any("third late night this week" in n and "call log_checkin now" in n for n in notes)
 
 
 # -- the tool a want forces --------------------------------------------------

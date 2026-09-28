@@ -611,6 +611,26 @@ def parse_reading(result: Any) -> Reading | None:
     return None
 
 
+def effective_wants(state: State) -> list[str]:
+    """The reading as routing and forcing use it.
+
+    An answer to the app's log question that says how it went -- "helped.
+    literally the only thing that actually helped today" -- contains the yes:
+    the reader returns a rating, and a rating given as that answer means the
+    measure was done and the log is wanted first. Log first, then rate: the
+    order case 44's "yes. the ritual helped ..." is already read in, with the
+    yes implied instead of said. In case 39 the rating alone found no row to
+    rate and the model asked which measure had helped (dev log stage 84).
+
+    Built from two facts code already has -- the log question was asked and
+    the first want is a rating -- not from the wording of the answer.
+    """
+    wants = list(state.get("reading") or [])
+    if wants and wants[0] == "rate_measure" and asked_to_log(state.get("messages") or []):
+        return ["log_checkin", *wants]
+    return wants
+
+
 def route_for_reading(state: State, waiting: str = "") -> str | None:
     """Where a reading sends the turn, or None to route as v1.0.0 did.
 
@@ -640,7 +660,7 @@ def route_for_reading(state: State, waiting: str = "") -> str | None:
     A check-in answer, a pick from the offer and anything unclear go where the
     state points, as before.
     """
-    wants = state.get("reading") or []
+    wants = effective_wants(state)
     first = wants[0] if wants else None
     idea_open = bool(state.get("idea"))
     if first == "just_chat":
@@ -676,7 +696,7 @@ def forced_tool(state: State, waiting: str) -> str | None:
     missing the station decides, under its prompt's own rules.
     """
     messages = state.get("messages") or []
-    wants = state.get("reading") or []
+    wants = effective_wants(state)
     if not wants or not messages or not isinstance(messages[-1], HumanMessage):
         return None
     first = wants[0]
@@ -990,7 +1010,7 @@ def build_agent(
                 "not said yet, ask them in one short sentence whether it helped."
             )
         force = forced_tool(state, waiting)
-        if force == "log_checkin" and (state.get("reading") or [None])[0] == "log_checkin":
+        if force == "log_checkin" and (effective_wants(state) or [None])[0] == "log_checkin":
             # What the log sentence is built from, put in front of the model.
             # Energy and situation can come from a button or a payload into
             # the state without ever appearing in the conversation, and a
@@ -1280,7 +1300,8 @@ def build_agent(
         # tried and closes it. Left open, the turn reaches follow_up, logs --
         # and `after_tools` sends it straight back to `debate`, which has no
         # log_checkin: the log request of case 41 that was never carried out.
-        if state.get("idea") and wants and wants[0] == "log_checkin" and asked_to_log(messages):
+        effective = effective_wants({**state, "reading": wants})
+        if state.get("idea") and effective and effective[0] == "log_checkin" and asked_to_log(messages):
             update.update(idea=None, debate_turns=0)
         return update
 
@@ -1392,6 +1413,7 @@ __all__ = [
     "WRITE_TOOLS",
     "action_request",
     "build_agent",
+    "effective_wants",
     "forced_tool",
     "discuss_idea",
     "idea_decided",
