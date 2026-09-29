@@ -27,6 +27,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from agent.common import format_tool_event, message_text
+from agent.data_paths import DATA_DIR_ENV, DEFAULT_CONSENT_PATH, DataPaths, data_paths, prepare
 from agent.graph import build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
 from agent.prompts import choice_sentence
@@ -50,8 +51,7 @@ _RATING_OPTIONS = list(typing.get_args(Helpfulness))
 _RATING_LABELS = {"helped": "helped", "somewhat": "somewhat", "didnt_help": "not helpful"}
 
 
-BASE_DIR = Path(__file__).resolve().parent
-CONSENT_PATH = BASE_DIR / "state" / "consent_ack.json"
+CONSENT_PATH = DEFAULT_CONSENT_PATH
 
 CONSENT_TEXT = (
     "Data & Privacy Disclaimer\n\n"
@@ -78,13 +78,14 @@ CONSENT_TEXT = (
 )
 
 
-def has_consented() -> bool:
-    return CONSENT_PATH.exists()
+def has_consented(path: Path | None = None) -> bool:
+    return (path or CONSENT_PATH).exists()
 
 
-def record_consent() -> None:
-    CONSENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONSENT_PATH.write_text(json.dumps({"acknowledged": True}), encoding="utf-8")
+def record_consent(path: Path | None = None) -> None:
+    path = path or CONSENT_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"acknowledged": True}), encoding="utf-8")
 
 
 class ChatApp:
@@ -102,6 +103,8 @@ class ChatApp:
         opener_message: str | None = None,
         opener_events: "Sequence[dict]" = (),
         log_path: Path | None = None,
+        measures_path: Path | None = None,
+        consent_path: Path | None = None,
     ) -> None:
         self.root = root
         self.root.title("Job Load Agent")
@@ -126,9 +129,14 @@ class ChatApp:
         self._decisions: list[dict] = []
         # The checkpointer is what lets a turn pause on the approval card and
         # resume; it only ever has to hold one turn (a fresh thread per turn).
+        # The same log and list the window reads, or a rating button and the
+        # agent's own log_checkin would write to two different files.
         self.graph = (
-            agent_graph if agent_graph is not None else build_agent(checkpointer=InMemorySaver())
+            agent_graph
+            if agent_graph is not None
+            else build_agent(checkpointer=InMemorySaver(), log_path=log_path, measures_path=measures_path)
         )
+        self.consent_path = consent_path
         self.recorder = recorder if recorder is not None else RunRecorder()
         self._opener_message = opener_message
         # Receipts for work done before this window existed -- the scheduler's
@@ -136,7 +144,7 @@ class ChatApp:
         # report it, so the receipt has to travel with the opener text.
         self._opener_events = list(opener_events)
 
-        if skip_consent or has_consented():
+        if skip_consent or has_consented(self.consent_path):
             self._build_chat_ui()
         else:
             self._build_consent_ui()
@@ -156,7 +164,7 @@ class ChatApp:
         button.pack()
 
     def _on_consent_ack(self) -> None:
-        record_consent()
+        record_consent(self.consent_path)
         self.consent_frame.destroy()
         self._build_chat_ui()
 
@@ -585,6 +593,17 @@ class ChatApp:
         self._set_busy(False)
 
 
+def window_paths(paths: DataPaths) -> dict[str, typing.Any]:
+    """ChatApp's arguments for one data folder -- shared with the scheduler,
+    which opens the same window."""
+    return {
+        "log_path": paths.checkin_log,
+        "measures_path": paths.measures,
+        "consent_path": paths.consent,
+        "recorder": RunRecorder(log_path=paths.runs_log),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Job Load Agent chat window")
     parser.add_argument(
@@ -592,10 +611,13 @@ def main() -> None:
         action="store_true",
         help="Dev-only: skip the consent screen. Never use this as the default.",
     )
+    parser.add_argument("--data-dir", type=Path, default=None,
+                        help=f"Keep the log, the measure list and the app's state in this folder "
+                             f"(default: ${DATA_DIR_ENV}, else next to the code).")
     args = parser.parse_args()
 
     root = tk.Tk()
-    ChatApp(root, skip_consent=args.skip_consent)
+    ChatApp(root, skip_consent=args.skip_consent, **window_paths(prepare(data_paths(args.data_dir))))
     root.mainloop()
 
 

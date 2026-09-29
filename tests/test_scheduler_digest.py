@@ -8,6 +8,7 @@ failed LLM call must not silently cancel the digest.
 """
 from typing import Any
 
+import pytest
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
@@ -139,7 +140,7 @@ def test_checkin_fire_uses_the_plain_opener():
 def test_digest_fire_builds_a_digest_opener(monkeypatch):
     monkeypatch.setattr(
         "scheduler.analyze_stress_patterns",
-        lambda window_days: _summary(enough_data=False, entry_count=0),
+        lambda window_days, **_: _summary(enough_data=False, entry_count=0),
     )
 
     opener, _events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
@@ -154,7 +155,7 @@ def test_digest_reports_the_analysis_that_produced_it(monkeypatch):
     compute, so the aggregation reports itself."""
     monkeypatch.setattr(
         "scheduler.analyze_stress_patterns",
-        lambda window_days: _summary(enough_data=True, entry_count=6),
+        lambda window_days, **_: _summary(enough_data=True, entry_count=6),
     )
 
     _opener, events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
@@ -169,9 +170,48 @@ def test_digest_says_so_when_there_was_not_enough_data(monkeypatch):
     only as a sentence the model chose to write."""
     monkeypatch.setattr(
         "scheduler.analyze_stress_patterns",
-        lambda window_days: _summary(enough_data=False, entry_count=1),
+        lambda window_days, **_: _summary(enough_data=False, entry_count=1),
     )
 
     _opener, events = opener_for(Fire(when=None, kind="digest"), SchedulerConfig())
 
     assert "not enough data" in events[0]["detail"]
+
+
+def test_the_digest_reads_the_folder_it_is_given(monkeypatch, tmp_path):
+    """A --data-dir run writes its check-ins there; a digest of the default log
+    would report a different week."""
+    from agent.data_paths import data_paths
+
+    seen = {}
+    monkeypatch.setattr(
+        "scheduler.analyze_stress_patterns",
+        lambda window_days, **kwargs: seen.update(kwargs) or _summary(enough_data=False, entry_count=0),
+    )
+
+    opener_for(Fire(when=None, kind="digest"), SchedulerConfig(), data_paths(tmp_path))
+
+    assert seen["path"] == tmp_path.resolve() / "checkin_log.csv"
+    assert seen["measures_path"] == tmp_path.resolve() / "measures.csv"
+
+
+def test_the_scheduler_opens_its_windows_on_the_data_dir(monkeypatch, tmp_path):
+    import scheduler
+    import tools.checkin_log as checkin_log
+
+    monkeypatch.setattr(checkin_log, "PENDING_LOG_PATH", checkin_log.PENDING_LOG_PATH)
+    opened = {}
+
+    def open_once(message, events, paths=None):
+        opened["paths"] = paths
+        raise SystemExit
+
+    monkeypatch.setattr("sys.argv", ["scheduler.py", "--data-dir", str(tmp_path / "data")])
+    monkeypatch.setattr(scheduler.time_module, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(scheduler, "opener_for", lambda fire, config, paths=None: ("hi", []))
+    monkeypatch.setattr(scheduler, "open_window", open_once)
+
+    with pytest.raises(SystemExit):
+        scheduler.main()
+
+    assert opened["paths"].checkin_log == (tmp_path / "data").resolve() / "checkin_log.csv"

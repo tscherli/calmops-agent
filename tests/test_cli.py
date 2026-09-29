@@ -79,8 +79,8 @@ def output(s) -> str:
 
 
 def test_the_consent_path_matches_the_windows():
-    """Derived rather than imported, to keep Tk out of a terminal client --
-    so the duplication needs a test or it drifts silently."""
+    """Both take it from agent/data_paths.py -- importing app.py would pull Tk
+    into a terminal client -- and a test keeps them from drifting apart."""
     import app
 
     assert cli.CONSENT_PATH == app.CONSENT_PATH
@@ -572,3 +572,60 @@ def test_the_readers_call_is_in_the_turns_record(tmp_path):
     record = json.loads((tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["side_calls"] == 1
     assert record["input_tokens"] == 100
+
+
+# -- one data folder -----------------------------------------------------------
+
+
+def test_the_agent_logs_where_rate_does(tmp_path, monkeypatch):
+    """--log-path used to move only /rate: the agent's own log_checkin kept
+    writing to the default log."""
+    built = {}
+    monkeypatch.setattr(cli, "build_agent", lambda **kwargs: built.update(kwargs) or StubGraph())
+
+    Session(log_path=tmp_path / "log.csv", measures_path=tmp_path / "measures.csv", out=lambda _: None)
+
+    assert built["log_path"] == tmp_path / "log.csv"
+    assert built["measures_path"] == tmp_path / "measures.csv"
+
+
+def _run_main(monkeypatch, *argv):
+    """cli.main() with these arguments, until the first prompt; the session it made."""
+    import tools.checkin_log as checkin_log
+
+    monkeypatch.setattr(checkin_log, "PENDING_LOG_PATH", checkin_log.PENDING_LOG_PATH)
+    made = {}
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            made.update(kwargs)
+
+        def hints(self):
+            return ""
+
+    def end_of_input(_prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr(cli, "Session", FakeSession)
+    monkeypatch.setattr("sys.argv", ["cli.py", *argv])
+    monkeypatch.setattr("builtins.input", end_of_input)
+    cli.main()
+    return made, checkin_log.PENDING_LOG_PATH
+
+
+def test_main_keeps_everything_in_the_data_dir(tmp_path, monkeypatch):
+    made, pending = _run_main(monkeypatch, "--data-dir", str(tmp_path / "data"))
+
+    root = (tmp_path / "data").resolve()
+    assert made["log_path"] == root / "checkin_log.csv"
+    assert made["measures_path"] == root / "measures.csv"
+    assert made["recorder"].log_path == root / "runs.jsonl"
+    assert (root / "measures.csv").exists()
+    assert pending == root / "state" / "pending_sheet_log.jsonl"
+
+
+def test_log_path_still_moves_the_log_alone(tmp_path, monkeypatch):
+    made, _ = _run_main(monkeypatch, "--data-dir", str(tmp_path / "data"), "--log-path", str(tmp_path / "other.csv"))
+
+    assert made["log_path"] == tmp_path / "other.csv"
+    assert made["measures_path"] == (tmp_path / "data").resolve() / "measures.csv"

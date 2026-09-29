@@ -739,3 +739,76 @@ def test_the_readers_call_is_in_the_turns_record(tk_root, tmp_path):
     record = json.loads((tmp_path / "runs.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert record["side_calls"] == 1
     assert record["input_tokens"] == 105  # the reply's 5 and the reader's 100
+
+
+# -- one data folder -----------------------------------------------------------
+
+
+def test_the_window_gives_the_agent_its_own_log_and_list(tk_root, tmp_path, monkeypatch):
+    """A rating button and the agent's own log_checkin must write to one file,
+    so the window hands its log and list to the agent it builds."""
+    built = {}
+    monkeypatch.setattr(app_module, "build_agent", lambda **kwargs: built.update(kwargs) or _PoisonGraph())
+
+    ChatApp(tk_root, skip_consent=True, log_path=tmp_path / "log.csv", measures_path=tmp_path / "measures.csv")
+
+    assert built["log_path"] == tmp_path / "log.csv"
+    assert built["measures_path"] == tmp_path / "measures.csv"
+
+
+def test_consent_is_kept_in_the_folder_it_was_given(tk_root, tmp_path, isolated_consent_path):
+    consent = tmp_path / "data" / "state" / "consent_ack.json"
+    app = ChatApp(tk_root, agent_graph=_PoisonGraph(), consent_path=consent)
+    assert hasattr(app, "consent_frame")
+
+    app._on_consent_ack()
+
+    assert consent.exists()
+    assert not isolated_consent_path.exists()
+
+
+def test_one_folder_gives_the_window_every_path(tmp_path):
+    """A folder of its own below tmp_path: conftest already points the default
+    turn records at tmp_path/runs.jsonl, and a folder there would hide a
+    recorder that ignored it."""
+    from agent.data_paths import data_paths
+
+    kwargs = app_module.window_paths(data_paths(tmp_path / "data"))
+
+    root = (tmp_path / "data").resolve()
+    assert kwargs["log_path"] == root / "checkin_log.csv"
+    assert kwargs["measures_path"] == root / "measures.csv"
+    assert kwargs["consent_path"] == root / "state" / "consent_ack.json"
+    assert kwargs["recorder"].log_path == root / "runs.jsonl"
+
+
+def test_consent_given_in_the_folder_skips_the_screen_there(tk_root, tmp_path):
+    consent = tmp_path / "data" / "state" / "consent_ack.json"
+    app_module.record_consent(consent)
+
+    app = ChatApp(tk_root, agent_graph=_PoisonGraph(), consent_path=consent)
+
+    assert hasattr(app, "history")
+    assert not hasattr(app, "consent_frame")
+
+
+def test_main_opens_the_window_on_the_data_dir(tmp_path, monkeypatch):
+    import tools.checkin_log as checkin_log
+
+    monkeypatch.setattr(checkin_log, "PENDING_LOG_PATH", checkin_log.PENDING_LOG_PATH)
+    opened = {}
+
+    class FakeRoot:
+        def mainloop(self):
+            pass
+
+    monkeypatch.setattr(app_module.tk, "Tk", FakeRoot)
+    monkeypatch.setattr(app_module, "ChatApp", lambda root, **kwargs: opened.update(kwargs))
+    monkeypatch.setattr("sys.argv", ["app.py", "--data-dir", str(tmp_path / "data")])
+
+    app_module.main()
+
+    root = (tmp_path / "data").resolve()
+    assert opened["log_path"] == root / "checkin_log.csv"
+    assert opened["consent_path"] == root / "state" / "consent_ack.json"
+    assert (root / "measures.csv").exists()

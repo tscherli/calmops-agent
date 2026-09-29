@@ -33,6 +33,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from agent.common import format_tool_event, message_text
+from agent.data_paths import DATA_DIR_ENV, DEFAULT_CONSENT_PATH, data_paths, prepare
 from agent.graph import build_agent, next_turn_state
 from agent.model import DEFAULT_MODEL
 from agent.prompts import choice_sentence
@@ -41,11 +42,9 @@ from observability.tracing import RunRecorder
 from tools.checkin_log import Helpfulness, append_checkin_row, measures_awaiting_rating
 from tools.measures import Energy, Goal
 
-BASE_DIR = Path(__file__).resolve().parent
-# Deliberately derived the same way app.py derives it rather than imported:
-# importing app.py would pull Tk into a terminal client. A test asserts the
-# two agree, so the duplication cannot drift unnoticed.
-CONSENT_PATH = BASE_DIR / "state" / "consent_ack.json"
+# The same default as app.py's, from the module both share -- importing
+# app.py would pull Tk into a terminal client. A test asserts the two agree.
+CONSENT_PATH = DEFAULT_CONSENT_PATH
 
 # From the schema's own Literals, so a vocabulary change updates the commands
 # instead of drifting from them -- the same reason app.py derives its buttons.
@@ -91,13 +90,20 @@ class Session:
         graph: Any = None,
         *,
         log_path: Path | None = None,
+        measures_path: Path | None = None,
         recorder: RunRecorder | None = None,
         out: Callable[[str], None] = print,
         ask: Callable[[str], str] = input,
     ) -> None:
         # The checkpointer is what lets a turn pause on the approval card and
         # resume; it only ever has to hold one turn (a fresh thread per turn).
-        self.graph = graph if graph is not None else build_agent(checkpointer=InMemorySaver())
+        # The agent gets the same log as /rate: --log-path used to move only
+        # the ratings, while the agent's own log_checkin kept the default log.
+        self.graph = (
+            graph
+            if graph is not None
+            else build_agent(checkpointer=InMemorySaver(), log_path=log_path, measures_path=measures_path)
+        )
         self.log_path = log_path
         self.recorder = recorder
         self.out = out
@@ -327,11 +333,16 @@ def main() -> None:
                         help="Write check-ins somewhere other than the real log.")
     parser.add_argument("--no-record", action="store_true",
                         help="Skip the per-turn cost/latency record.")
+    parser.add_argument("--data-dir", type=Path, default=None,
+                        help=f"Keep the log, the measure list and the app's state in this folder "
+                             f"(default: ${DATA_DIR_ENV}, else next to the code).")
     args = parser.parse_args()
 
+    paths = prepare(data_paths(args.data_dir))
     session = Session(
-        log_path=args.log_path,
-        recorder=None if args.no_record else RunRecorder(),
+        log_path=args.log_path or paths.checkin_log,
+        measures_path=paths.measures,
+        recorder=None if args.no_record else RunRecorder(log_path=paths.runs_log),
     )
     print(f"Job Load Agent ({DEFAULT_MODEL}). /help for commands, /quit to leave.\n")
 
