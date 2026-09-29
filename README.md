@@ -163,11 +163,22 @@ Choosing happens in two stages, and only the second one belongs to the model.
 
 ## Setup prerequisites
 
-You need an OpenAI API key (required) and optionally a LangSmith key (tracing only). Each user supplies their own.
+You need Python 3.10 or newer — what the LangChain and LangGraph packages require; developed and tested on 3.13 — with Tk (included in the python.org installers; on Linux, install your distribution's `python3-tk`), an OpenAI API key (required) and optionally a LangSmith key (tracing only). Each user supplies their own. Nothing depends on where you clone the repository or which operating system you use.
 
-### Check-in log and measure list
+### Install
 
-No setup needed. `data/checkin_log.csv` is created on first write. `tools/measures.csv` ships with 28 curated measures — it is yours to edit by hand, and the agent can add to it with your agreement. Some rows come from [Stretchly](https://hovancik.net/stretchly/) under BSD 2-Clause; the licence travels with the data in `third_party/stretchly/`.
+```
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate       # macOS / Linux
+pip install -r requirements.txt
+```
+
+### Where your data lives
+
+By default, next to the code: the check-in log in `data/checkin_log.csv` (created on first write) and your measure list in `tools/measures.csv`, which ships with curated measures — it is yours to edit by hand, and the agent can add to it with your agreement. Some rows come from [Stretchly](https://hovancik.net/stretchly/) under BSD 2-Clause; the licence travels with the data in `third_party/stretchly/`.
+
+To keep all of it in one folder anywhere else — the log, the measure list, the consent record, the file a failed write falls back to, and the per-turn cost records — set `JOB_LOAD_DATA_DIR` in `.env`, or pass `--data-dir <folder>` to `app.py`, `cli.py` or `scheduler.py` (the flag wins over the variable). A new folder is created on first use and gets a copy of the shipped measure list, which is never overwritten after that.
 
 ### OpenAI API key (required)
 
@@ -184,16 +195,19 @@ Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real
 
 ## How to run
 
+With the virtual environment active (see [Install](#install)), from any working directory — give the path to the script if you are not in the repository:
+
 **The chat window:**
 
-```powershell
-.venv\Scripts\python.exe app.py
+```
+python app.py
+python app.py --data-dir ~/job-load-data     # your data in a folder of your choice
 ```
 
 **The terminal client** — same agent, buttons as commands, and it prints which station answered each turn:
 
-```powershell
-.venv\Scripts\python.exe cli.py
+```
+python cli.py
 ```
 
 ```
@@ -205,8 +219,8 @@ Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real
 
 **Scheduled** — sits in the background, opens a window at configured times plus a weekly digest:
 
-```powershell
-.venv\Scripts\python.exe scheduler.py
+```
+python scheduler.py
 ```
 
 ```json
@@ -232,7 +246,7 @@ Set `"mode": "random_interval"` for a nudge every 45–90 minutes. `--interval-m
 
 ## How to run evals
 
-> **The dataset is rebuilt and measured.** The 37 cases written for the previous design were archived to `evals/dataset.mood-era.jsonl` on 2026-09-25 — they graded a mood-tracking agent that no longer exists, and mixing them with new cases would make the pass rate meaningless. `evals/dataset.jsonl` now holds all 26 rebuilt cases: 21 in the regression tier, which must pass, and 5 in the progression tier, which assert behaviour the agent does not produce yet and fail until it does. An error analysis of every failing run traced the five to one shared cause, not five faults: the agent routes a message by where the conversation is, not by what the message says. The full agent, the agent without its measure lookup and the no-tools baseline have all been run; the results are in [Results & limitations](#results--limitations), and every number there comes from a snapshot in `evals/published/`.
+> **26 cases, measured on v1.1.** `evals/dataset.jsonl` holds 21 cases in the regression tier, which must keep passing, and 5 in the progression tier, which were written for behaviour the agent did not yet produce. Under v1.0.0 the five failed for one shared cause — a message was routed by where the conversation was, not by what it said. Since v1.1 reads each message before routing it, they pass in every run of both of v1.1's final sweeps (15/15 each), so by this suite's own rule they are due to move up to the regression tier; that move is a separate decision, not yet made. The full agent and the no-tools baseline were run on v1.1 (29 September), the agent without its measure lookup on v1.0.0; the results are in [Results & limitations](#results--limitations), and every number there comes from a snapshot in `evals/published/`. The 37 cases written for the previous, mood-tracking design are archived in `evals/dataset.mood-era.jsonl`.
 
 ### Where the evals run, and where tracing goes
 
@@ -402,7 +416,19 @@ The six cases that v1.0.0's release sweep failed or passed only in part — 27, 
 
 The groundedness question first scored 0.69 and was published as a fail; it passed after two labels, marked for defects the question does not ask about, were corrected to the question as written. Both snapshots are committed, so the order of events is on record.
 
-**The agent against simpler versions of itself** (the Step 7 sweep, before the fabrication fix — [snapshot](evals/published/20260927-154512-step7-runs/)):
+**v1.1 against the no-tools baseline, the same day** — the baseline rerun on 29 September next to v1.1's release sweep, because results move between days ([snapshot](evals/published/20260929-193432-v1-1-baseline/)):
+
+| | v1.1 agent | no-tools model call |
+|---|---|---|
+| no fabrication, as counted | 77/78 | 77/78 |
+| real false save claims, read by hand | 0 | 0 |
+| groundedness (judge) | 12/12, last run | 74/78, all runs |
+| should write, and did | 9/9 | cannot write |
+| crisis messages (18 case-runs) | 18/18 stopped in code before any model call | 18/18 answered with crisis awareness by the model itself |
+
+The reading has not changed since v1.0.0: on what both can be graded on, the baseline does about as well as the agent, and the agent's value is in what the baseline cannot do. The agent without its measure lookup was not rerun for v1.1.
+
+**The agent against simpler versions of itself, v1.0.0** (the Step 7 sweep, before the fabrication fix — [snapshot](evals/published/20260927-154512-step7-runs/)):
 
 | | full agent | without its measure lookup | no-tools model call |
 |---|---|---|---|
