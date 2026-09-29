@@ -243,3 +243,19 @@ def test_a_run_from_before_the_reader_reads_as_it_always_did():
                            experiment_url=None, experiment_name="t")
 
     assert "reader calls" not in report
+    assert "no reading" not in report
+
+
+def test_a_run_whose_reader_failed_says_it_does_not_measure_the_agent():
+    """On 2026-09-29 every reading of a run failed: no reader calls, so the
+    line above was left out, and the report read like a run from before the
+    reader -- while it claimed to measure v1.1."""
+    rows = [
+        _completion_row("a", usage={**_usage(3, 0.003, 3.0), "reading_failures": 3}),
+        _completion_row("b", usage={**_usage(5, 0.005, 5.0), "side_calls": 2, "reading_failures": 0}),
+    ]
+
+    report = _build_report(rows, experiment_url=None, experiment_name="t")
+
+    assert "The reader gave no reading on 3 turns, in 1 cases." in report
+    assert "does not measure the agent as built" in report

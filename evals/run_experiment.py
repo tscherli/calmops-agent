@@ -176,6 +176,15 @@ def _completion_and_cost(rows: list[dict]) -> list[str]:
             f"- Of those, reader calls per case: mean {sum(side) / len(side):.1f} (the understand "
             "node; they leave no message in the transcript and are counted from the turn records)"
         )
+    # A reader that is down costs the turn nothing and leaves the line above
+    # out, so a run of v1.1 without its reader read like a run from before it.
+    failed = [u.get("reading_failures", 0) for u in used]
+    if any(failed):
+        lines.append(
+            f"- **The reader gave no reading on {sum(failed)} turns, in {sum(1 for f in failed if f)} "
+            "cases.** Those turns were routed as v1.0.0 routes them, so this run does not measure the "
+            "agent as built."
+        )
     unpriced = sorted({m for u in used for m in u.get("unpriced_models") or []})
     if unpriced:
         lines.append(f"- **Unpriced models, counted as $0:** {', '.join(unpriced)}")

@@ -8,6 +8,8 @@ construction without the lookup.
 """
 import json
 
+import pytest
+
 import evals.summarize_runs as summary_module
 from evals.summarize_runs import majority_file_agrees, summarize, tautological_keys
 
@@ -90,6 +92,39 @@ def test_the_rendered_summary_names_every_zero_tolerance_miss(monkeypatch, tmp_p
 
     assert "writes run 2: no_fabrication" in text
     assert "| `no_fabrication` | 5/6 |" in text
+
+
+def _trajectories(tmp_path, failures):
+    """A trajectories file whose case-runs carry these reading-failure counts."""
+    path = tmp_path / "trajectories-20260929-135207.jsonl"
+    records = [{"case_id": "writes", "run_index": i, "outputs": {"usage": ({} if f is None else {"reading_failures": f})}}
+               for i, f in enumerate(failures)]
+    path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize(
+    "failures,expected",
+    [
+        ([3, 0, 2], "Turns without a reading, full agent: **5, in 2 case-runs**"),
+        ([0, 0, 0], "Turns without a reading, full agent: none"),
+        # Recorded before the count existed: nothing is claimed either way.
+        ([None, None, None], None),
+    ],
+)
+def test_the_recount_says_when_the_reader_did_not_read(monkeypatch, tmp_path, failures, expected):
+    """Checked before any verdict: a run whose readings failed ran the routing
+    of v1.0.0, whatever its file name says."""
+    path = _trajectories(tmp_path, failures)
+    monkeypatch.setattr(summary_module, "load_cases", lambda: list(CASES.values()))
+    monkeypatch.setattr(summary_module, "rescore", lambda p, cases: {"writes": [_run()] * 3})
+
+    text = summary_module.render(path)
+
+    if expected is None:
+        assert "Turns without a reading" not in text
+    else:
+        assert expected in text
 
 
 # -- a result is recounted against the dataset it was scored with ------------

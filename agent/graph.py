@@ -221,6 +221,7 @@ class State(TypedDict, total=False):
     last_measure_id: str        # the measure that check-in row named, for a later rating
     complete: bool              # the conversation reached its end
     reading: list[str] | None   # what the understand node read the user to want, this turn
+    reading_failed: bool        # the reader was asked this turn and gave no reading
     say_nothing_saved: bool     # this turn's reply opens with NOTHING_TO_SAVE_YET
     side_calls: list[AIMessage]  # model calls of this turn that left no message: the reader's
     approvals: dict[str, dict[str, Any]]  # the user's card decisions, by tool call id
@@ -1342,7 +1343,7 @@ def build_agent(
             or state.get("choices_clicked")
             or decided_in_code(state)
         ):
-            return {"reading": None, "side_calls": [], "say_nothing_saved": False}
+            return {"reading": None, "reading_failed": False, "side_calls": [], "say_nothing_saved": False}
         try:
             result = reader.invoke(reading_input(state, measure_awaiting_rating(log_path)))
         except Exception:  # noqa: BLE001 - a failed reading falls back, it does not end the turn
@@ -1358,6 +1359,11 @@ def build_agent(
         wants = list(reading.wants) if reading else None
         update: dict[str, Any] = {
             "reading": wants,
+            # Said, not only survived: the fallback keeps the turn alive and
+            # would otherwise hide that it ran the routing of v1.0.0. For ten
+            # minutes on 2026-09-29 every reading failed, and an eval run of
+            # "v1.1" measured v1.0.0's routing without a word in its report.
+            "reading_failed": wants is None,
             "side_calls": [raw] if isinstance(raw, AIMessage) else [],
             # Set again only by nothing_to_save, for this turn alone.
             "say_nothing_saved": False,

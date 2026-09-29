@@ -144,6 +144,24 @@ def majority_file_agrees(trajectories: Path, scores: dict[str, list[dict]]) -> b
     return recorded == {c: _passes(r) for c, r in scores.items()}
 
 
+def reading_failures(path: Path) -> tuple[int, int] | None:
+    """Turns the reader gave no reading on, and in how many case-runs; None for
+    a run recorded before the count existed.
+
+    Checked before any verdict: on 2026-09-29 every reading of a ten-minute
+    run failed, and its "v1.1" half measured the routing of v1.0.0.
+    """
+    counts = [
+        (json.loads(line)["outputs"].get("usage") or {}).get("reading_failures")
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if all(c is None for c in counts):
+        return None
+    failed = [c or 0 for c in counts]
+    return sum(failed), sum(1 for c in failed if c)
+
+
 def zero_tolerance_misses(path: Path, scores: dict[str, list[dict]]) -> list[str]:
     lines = []
     for case_id, runs in scores.items():
@@ -193,6 +211,14 @@ def render(full: Path, n1: Path | None = None, *, dataset_at: str | None = None)
         misses = zero_tolerance_misses(path, scores)
         lines += ["", f"Zero-tolerance misses, {label}:" + (" none" if not misses else "")]
         lines += [f"- {m}" for m in misses]
+    for label, path, _, _ in rows[:2]:
+        failures = reading_failures(path)
+        if failures is None:
+            continue
+        turns, runs = failures
+        lines += ["", f"Turns without a reading, {label}: "
+                  + ("none" if not turns else f"**{turns}, in {runs} case-runs** -- those turns ran the "
+                     "routing of v1.0.0; this run does not measure the agent as built")]
     if n1 is not None:
         full_s, n1_s = rows[0][3], rows[2][3]
         runs = full_s["runs"]

@@ -233,7 +233,7 @@ def _nodes_run(graph: Any, config: dict) -> list[str]:
 
 def _new_usage() -> dict:
     return {"cost_usd": 0.0, "latency_seconds": 0.0, "input_tokens": 0, "output_tokens": 0,
-            "web_searches": 0, "unpriced_models": set(), "side_calls": 0}
+            "web_searches": 0, "unpriced_models": set(), "side_calls": 0, "reading_failures": 0}
 
 
 def _add_turn(usage: dict, turn: Any) -> None:
@@ -318,8 +318,9 @@ def _result(
         "excluded_tools": sorted(exclude_tools),
         # What the reader read the user to want, one entry per user turn that
         # reached the graph -- None where no model read it (a button, a
-        # shortcut, a failed call). Without it an error analysis can only
-        # infer the reading from the nodes and tools that followed it.
+        # shortcut, a failed call; usage["reading_failures"] counts the last
+        # apart). Without it an error analysis can only infer the reading from
+        # the nodes and tools that followed it.
         "readings": list(readings or []),
     }
 
@@ -468,6 +469,9 @@ def run_case(
         nodes_run.extend(_nodes_run(graph, config))
         tool_events.extend(result.get("tool_events") or [])
         readings.append(result.get("reading"))
+        # Outside the cost record's try: a turn the reader could not read ran
+        # the routing of v1.0.0, and a run full of them measures that instead.
+        usage["reading_failures"] += bool(result.get("reading_failed"))
         try:
             # Summarised whether or not a runs_log was given, so the case's
             # own usage is always there; appended to the file only when asked.

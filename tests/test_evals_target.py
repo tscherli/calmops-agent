@@ -715,6 +715,24 @@ def test_each_turns_reading_is_saved_with_the_case(tmp_path):
 
     # One entry per turn: read, then a button click nobody had to read.
     assert result["readings"] == [["just_chat"], None]
+    # A click that nobody had to read is not a failed reading.
+    assert result["usage"]["reading_failures"] == 0
+
+
+def test_turns_the_reader_could_not_read_are_counted(tmp_path):
+    """A failed reading falls back silently, by design; the case says how many
+    of its turns did, because each one ran the routing of v1.0.0."""
+    from tests.conftest import StubChatModel
+
+    stations = StubChatModel(responses=[AIMessage(content="ok")] * 5)
+    reader = StubChatModel(responses=[AIMessage(content="not json"), AIMessage(content='{"wants": ["unclear"]}')])
+    graph = build_eval_graph(tmp_path / "log.csv", tmp_path / "measures.csv", model=stations, reader_model=reader)
+
+    result = run_case({"turns": ["hm", "what is this"]}, agent_graph=graph,
+                      log_path=tmp_path / "log.csv", measures_path=tmp_path / "measures.csv")
+
+    assert result["readings"] == [None, ["unclear"]]
+    assert result["usage"]["reading_failures"] == 1
 
 
 def test_a_crisis_exit_keeps_the_readings_so_far():

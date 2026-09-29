@@ -117,6 +117,17 @@ def test_a_failed_reading_falls_back_instead_of_ending_the_turn(reader, tmp_path
     assert result["reading"] is None
     assert result["step"] == "ask"  # where v1.0.0 would have sent it
     assert stations.call_count == 1
+    # ... and it says so, so a run of such turns cannot pass for v1.1.
+    assert result["reading_failed"] is True
+
+
+def test_a_reading_that_came_back_or_was_never_asked_for_is_not_a_failure(tmp_path, measures_file):
+    graph, _ = graph_with(reads("unclear"), tmp_path, measures_file)
+    assert graph.invoke({"messages": [HumanMessage(content="hm")]})["reading_failed"] is False
+
+    # A button click is not read at all: no reading, and nothing failed.
+    clicked = {"messages": [HumanMessage(content="I'm feeling wired.")], "energy": "wired", "choices_clicked": True}
+    assert graph.invoke(clicked)["reading_failed"] is False
 
 
 def test_the_reader_sees_the_facts_the_question_and_the_message():
