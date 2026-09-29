@@ -269,6 +269,8 @@ python -m evals.summarize_runs <trajectories.jsonl> --n1 <...>     # every run r
 
 A single run is a sample, not a verdict: the agent is stochastic and the threshold is a pass in at least 2 of 3 runs. `--runs 3` prints a per-case majority table and names any case that did not agree with itself, which are the ones to re-run with `--case` before calling them stable. A report covers its last run only; `summarize_runs` recounts all of them.
 
+**Times in result file names are UTC, and mark when a run finished.** `trajectories-20260929-133248.jsonl` finished at 13:32:48 UTC — 15:32:48 in the author's local time, UTC+2 in summer. The v1.1 runs of 29 September behind the results below were all made after 15:00 local time, the first starting at 15:22; their local start and end times are given with the results.
+
 **In LangSmith** — one run, as an experiment in the UI:
 
 ```
@@ -372,7 +374,7 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 
 ### Results
 
-**The v1.1 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.1.0, with the same-day comparisons behind the release decision ([snapshot](evals/published/20260929-145134-v1-1-release-sweep/)):
+**The v1.1 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.1.0, run on 29 September from 15:22 to 15:32 local time, with the same-day comparisons behind the release decision ([snapshot](evals/published/20260929-145134-v1-1-release-sweep/)):
 
 | | v1.0.0 release | v1.1 release |
 |---|---|---|
@@ -386,14 +388,14 @@ The test suite covers the graph shape, the tool bindings per station, the receip
 
 The six cases that v1.0.0's release sweep failed or passed only in part — 27, 34, 35 and 43 on routing, 36 and 44 on the log — pass 3/3 in both of v1.1's final sweeps.
 
-**The two misses, run ten times on each version the same afternoon:**
+**The two misses, run ten times on each version the same afternoon** (15:55 to 16:14 local time):
 
 | case | v1.0.0 | v1.1 | under the rule |
 |---|---|---|---|
 | 33 | 10/10 | 10/10 | parity — passes |
 | 39 | 8/10 | 4/10 | **v1.0.0 four better — fails** |
 
-**v1.1 does not meet its release rule, and is released anyway.** That is a decision, not a result: v1.1 passes in every run six cases that v1.0.0 failed or passed only in part, every zero-tolerance check stayed clean, and the one loss is not established as real — the evening before, the same comparison went the other way (v1.0.0 6/10, v1.1 7/10), and over every valid run v1.0.0 passes case 39 in 14 of 20 and v1.1 in 15 of 30. The new `nothing_to_save` step was checked as a cause and ruled out: v1.1 without it also passed 4 of 10. One attempt at the comparison is void and kept in the snapshot: for about ten minutes every reader call failed, so that half ran v1.0.0's routing — which is why failed readings are now counted.
+**v1.1 does not meet its release rule, and is released anyway.** That is a decision, not a result: v1.1 passes in every run six cases that v1.0.0 failed or passed only in part, every zero-tolerance check stayed clean, and the one loss is not established as real — the evening before, the same comparison went the other way (v1.0.0 6/10, v1.1 7/10), and over every valid run v1.0.0 passes case 39 in 14 of 20 and v1.1 in 15 of 30. The new `nothing_to_save` step was checked as a cause and ruled out: v1.1 without it also passed 4 of 10 (16:16 to 16:24 local time). One attempt at the comparison is void and kept in the snapshot (15:34 to 15:52 local time): for about ten minutes every reader call failed, so that half ran v1.0.0's routing — which is why failed readings are now counted.
 
 **The v1.0.0 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.0.0 ([snapshot](evals/published/20260927-190409-v1-release-sweep/)):
 
@@ -416,7 +418,7 @@ The six cases that v1.0.0's release sweep failed or passed only in part — 27, 
 
 The groundedness question first scored 0.69 and was published as a fail; it passed after two labels, marked for defects the question does not ask about, were corrected to the question as written. Both snapshots are committed, so the order of events is on record.
 
-**v1.1 against the no-tools baseline, the same day** — the baseline rerun on 29 September next to v1.1's release sweep, because results move between days ([snapshot](evals/published/20260929-193432-v1-1-baseline/)):
+**v1.1 against the no-tools baseline, the same day** — the baseline rerun on 29 September from 21:28 to 21:33 local time, next to v1.1's release sweep, because results move between days ([snapshot](evals/published/20260929-193432-v1-1-baseline/)):
 
 | | v1.1 agent | no-tools model call |
 |---|---|---|
