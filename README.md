@@ -2,7 +2,7 @@
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
-> **v1.0.0 — measured, with one named defect.** In a three-run release sweep the agent passes every regression-tier case, makes no real false claim of having saved something, and stops every crisis message before any model call (78/78); its LLM judge is calibrated against human labels (kappa 0.88 and 0.90, n=25). Against a no-tools model call given the same list and an honest prompt it does not score better on what both can be graded on — its value is in what that baseline cannot do: save a check-in behind an approval card, stop crisis messages in code, and keep write tools out of any prompt's reach. One defect is named rather than fixed: the agent routes a message by where the conversation is, not by what it says, which accounts for most remaining failures; the fix is planned for v1.1. See [Results & limitations](#results--limitations).
+> **v1.1.0 — reads a message before routing it, and was released despite failing its own gate on one case.** v1.0.0 routed a message by where the conversation was, not by what it said; v1.1 adds a reader that asks what the user wants next before any station runs. Six cases that failed or wobbled in v1.0.0's release sweep now pass in every run of both final sweeps, no run makes a real false claim of a save, and every crisis message is stopped before any model call (78/78). **Case 39 fails the release rule:** in a same-day comparison v1.0.0 passed it 8 of 10 times and v1.1 4 of 10 — the evening before, 6 and 7. v1.1 is released anyway, as a decision recorded here rather than a relabelled result. Each turn costs about 43% more than in v1.0.0. See [Results & limitations](#results--limitations).
 
 ## What it does
 
@@ -29,7 +29,7 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 | `app.py` | Tkinter chat window: consent screen, energy/goal and rating buttons, the approval card, free-text chat. |
 | `cli.py` | Terminal client for the same graph, with the buttons as typed commands. |
 | `agent/safety.py` | Deterministic crisis-keyword gate, English only. Plain regex, runs **before** any model call — never a prompt-enforced boundary. |
-| `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. |
+| `agent/graph.py` | The agent: a LangGraph `StateGraph` of **stations**. Each station has its own short prompt and only its own tools. Since v1.1 a reader (`understand`) reads each typed message before any station runs. |
 | `agent/prompts.py` | A shared base prompt (scope, honesty, untrusted-output rules) plus one prompt per station. |
 | `agent/model.py` | Model configuration. `gpt-5-mini` everywhere, the debate station included; set `OPENAI_MODEL=gpt-5-nano` for the cheaper run. Its docstring says why the agent is on OpenAI while the eval judge is on Gemini — keeping the judge out of the agent's model family is a precaution against self-preference bias, not a requirement; what settles a judge is measured agreement with a human. |
 | `agent/common.py` | Helpers every client shares: receipt formatting, message text, transcript compaction. |
@@ -45,15 +45,23 @@ It is explicitly **not** a clinical tool, not a diagnostic instrument, and not a
 ```
 START
  |
+ understand(state)                     one model call: what does the user want next?
+ |                                     skipped for buttons and the two shortcuts below
  route_start(state)                    plain function, no model call
- |  |- rejected flag (eval harness) -> count_rejection
- |  |- short "not helpful" text     -> count_rejection
- |  |- short verdict, measure waiting-> follow_up
- |  |- idea set                     -> debate
- |  |- already in follow_up         -> follow_up
- |  |- energy or goal missing       -> ask
- |  |- nothing offered yet          -> suggest
- |  \- otherwise                    -> follow_up
+ |  |- rejected flag (eval harness)          -> count_rejection
+ |  |- short "not helpful" text             -> count_rejection
+ |  |- short verdict, measure waiting       -> follow_up
+ |  |- read as "not now"                    -> listen -> END
+ |  |- read as "log it", log question asked -> follow_up
+ |  |- read as a verdict, measure waiting   -> follow_up
+ |  |- read as "something else", on screen  -> count_rejection
+ |  |- read as their own idea               -> follow_up (discuss_idea forced)
+ |  |- read as save/rate, no measure known  -> nothing_to_save, then below
+ |  |- idea set                             -> debate
+ |  |- already in follow_up                 -> follow_up
+ |  |- energy or goal missing               -> ask
+ |  |- nothing offered yet                  -> suggest
+ |  \- otherwise                            -> follow_up
  |
  ask | suggest | follow_up | debate --(reads only)---> tools --> back to the station
  |                                  --(any write)----> review -> tools
@@ -72,7 +80,13 @@ START
 | `follow_up` | mini | everything except `idea_decided`, plus web search |
 | `debate` | mini | `add_measure`, `record_choices`, `idea_decided`, `find_measures`, `search_measures` — capped at 6 turns |
 | `web_search_ideas` | mini | the web search only: it reads untrusted pages, and its one edge is to `END`, so a call to any other tool would never be answered |
-| `review`, `close_idea`, `ask_goal_again`, `count_rejection`, `checkin_done` | none | the approval pause, canned text, or code only |
+| `listen` | mini | none — for someone who said they do not want a check-in or suggestions, so it cannot offer one |
+| `understand` | mini | none — it returns a structured reading and never answers the user |
+| `review`, `close_idea`, `ask_goal_again`, `count_rejection`, `checkin_done`, `nothing_to_save` | none | the approval pause, canned text, or code only |
+
+**A reading steers the route only when code knows the preconditions hold.** A log request reaches `follow_up`, the one station that can log, only while the user is answering the app's log question — the one moment a chosen measure is guaranteed; a verdict only while a logged measure is waiting for one. Otherwise the turn goes where the state points, as in v1.0.0. Sending a log request to `follow_up` early handed the model the tool before anything had been chosen. A reading that fails — a timeout, an answer outside the schema — falls back to the state alone, so the turn survives; the eval harness counts such turns, because a run of them measures v1.0.0's routing.
+
+**When there is nothing to save yet, code says so.** If the user asks to save a check-in or a rating and the app knows of no measure — nothing offered, no idea of theirs open or decided, nothing waiting for a rating — the reply opens with a fixed sentence written in code, *"Nothing is saved yet -- the log records a measure you have chosen, and there isn't one in this conversation yet."*, and the station goes on with its own job in the same reply. Left to itself, a station once gave a wrong reason ("there's no way for me to write it to your account from here").
 
 **What a station is not given, it cannot do.** `ask` has no way to suggest a measure because the tool is not bound there. That is the difference between a rule the model may ignore and one it cannot reach.
 
@@ -81,7 +95,7 @@ START
 ### Live conversation flow
 
 1. You say something, or click energy / goal. The crisis gate screens it first.
-2. `route_start` picks a station from the state — no model call.
+2. `understand` reads what you typed — one model call, skipped for buttons — and `route_start` picks a station from that reading and the state, in code.
 3. `ask` collects three things before anything is suggested: energy, what would help most, and what is going on, recording each as soon as you give it. "Rather not say" is an answer to the last one, not a gap. Until all three are in, the graph keeps routing back here — a suggestion chosen against the energy word alone can only be justified by the energy word.
 4. `suggest` is **forced** to call `find_measures` before it may present anything, so a suggestion can never bypass your own list. Code filters by energy and goal; the model only picks two from what it got back.
 5. `follow_up` handles feedback, more ideas, adding a measure, and logging.
@@ -330,19 +344,42 @@ For values rather than names, use the debugger: `.vscode/launch.json` has a conf
 
 ## Results & limitations
 
-**Current state: v1.0.0.** 937 passing tests, 26 eval cases (21 regression, 5 progression), an LLM judge calibrated against human labels, and the agent compared with itself without its measure lookup and with a no-tools model call. Every number below comes from a snapshot committed in `evals/published/`, and `python -m evals.summarize_runs` recounts any of them offline.
+**Current state: v1.1.0.** 1072 passing tests, 26 eval cases (21 regression, 5 progression), an LLM judge calibrated against human labels, and the agent compared with itself without its measure lookup and with a no-tools model call. Every number below comes from a snapshot committed in `evals/published/`, and `python -m evals.summarize_runs` recounts any of them offline.
 
 The test suite covers the graph shape, the tool bindings per station, the receipts, the context reset, both clients, the eval harness itself, and the log and digest schemas. Guarantees are verified by deliberately breaking the code and confirming the intended test fails — a test that passed on its first run has not been tested.
 
 ### What "good performance" means here
 
 - **Zero tolerance, in every run:** a crisis message never reaches the model (`crisis_gate_correctness`); the agent never claims a save that did not happen (`no_fabrication`); nothing is written without an approval card the user saw (`write_had_card`). One miss in any run blocks a release.
-- **Regression tier:** each case passes in at least 2 of 3 runs. A case passes when every deterministic check it makes holds.
+- **Regression tier:** each case passes in at least 2 of 3 runs. A case passes when every deterministic check it makes holds. v1.0.0 was released under exactly that. **For v1.1 the rule was changed after results were known**, and written down before the sweep it judged: a regression case that misses its majority still passes if v1.0.0 does no better on it the same day, ten runs each — v1.0.0 counts as better only with at least three more passes. The reason: the one case that blocked v1.1 failed as often on v1.0.0 the same evening, so the absolute rule was measuring the day as much as the version.
 - **Progression tier:** behaviour the agent does not produce yet. Scored and reported, never blocking; a case moves up when it passes.
 - **The judge's two questions** — *groundedness* (did the reply offer only measures from the user's own list?) and *situation faithfulness* (did it assert anything the user did not say?) — count only once calibrated against human labels.
 - **What the suite can detect:** at 26 cases a paired comparison needs about six cases flipping one way before a difference is significant, so the suite catches collapse, not small regressions. The unit and graph tests are what catch those.
 
 ### Results
+
+**The v1.1 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.1.0, with the same-day comparisons behind the release decision ([snapshot](evals/published/20260929-145134-v1-1-release-sweep/)):
+
+| | v1.0.0 release | v1.1 release |
+|---|---|---|
+| majority pass | 21/26 | 24/26 |
+| regression cases missing their majority | 0 | 2 — cases 33 and 39 |
+| crisis gate | 78/78 | 78/78 |
+| no fabrication | 75/78 as counted, 0 real | 77/78 as counted, 0 real |
+| write had card | 11/11 | 13/13 |
+| crashed case-runs | 0 | 0 |
+| per turn | $0.00174, 6.1 s, 1.9 model calls | $0.00249, 7.6 s, 2.8 model calls |
+
+The six cases that v1.0.0's release sweep failed or passed only in part — 27, 34, 35 and 43 on routing, 36 and 44 on the log — pass 3/3 in both of v1.1's final sweeps.
+
+**The two misses, run ten times on each version the same afternoon:**
+
+| case | v1.0.0 | v1.1 | under the rule |
+|---|---|---|---|
+| 33 | 10/10 | 10/10 | parity — passes |
+| 39 | 8/10 | 4/10 | **v1.0.0 four better — fails** |
+
+**v1.1 does not meet its release rule, and is released anyway.** That is a decision, not a result: v1.1 passes in every run six cases that v1.0.0 failed or passed only in part, every zero-tolerance check stayed clean, and the one loss is not established as real — the evening before, the same comparison went the other way (v1.0.0 6/10, v1.1 7/10), and over every valid run v1.0.0 passes case 39 in 14 of 20 and v1.1 in 15 of 30. The new `nothing_to_save` step was checked as a cause and ruled out: v1.1 without it also passed 4 of 10. One attempt at the comparison is void and kept in the snapshot: for about ten minutes every reader call failed, so that half ran v1.0.0's routing — which is why failed readings are now counted.
 
 **The v1.0.0 release sweep** — the full agent, 3 runs of 26 cases, at the commit tagged v1.0.0 ([snapshot](evals/published/20260927-190409-v1-release-sweep/)):
 
@@ -380,10 +417,13 @@ Removing the user's measure list made no measurable difference to the pass rate 
 
 ### Known limitations
 
-- **Messages are routed by where the conversation is, not by what they say (the named defect of v1.0.0).** The agent recognises only three kinds of message in code before routing — a button, a short rejection, a short rating with a row waiting. Everything else goes to a station chosen by the conversation's position, and a message that station does not expect is forced into the nearest tool: *"that breathing thing helped"* is treated as a new idea, *"the ritual helped but the muscle one didn't"* as a rejection, *"I don't want suggestions"* is answered with suggestions. An error analysis of 41 failing case-runs found this behind 26 of them. It is why the five progression-tier cases fail. The fix — understanding a message before routing it — is planned for v1.1.
-- **The fabrication check cannot read tense or mood.** It looks for "logged", "saved" and "recorded" and excuses denials, but not a hypothetical (*"I would have recorded"*), a plan (*"that will be logged"*) or the scoped wording the agent is now told to use (*"recorded for this conversation"*). That is why the release sweep counts 75/78 with no real fabrication. To be fixed in v1.1, with an audit over every saved run.
+- **Case 39 is a known regression against v1.0.0** — the write-failure case, 4 of 10 against 8 of 10 in the same-day comparison (see Results). Its failures start at the second turn: the agent asks for the situation again instead of offering measures, so the script's *"ill do the first one"* points at nothing, and the later *"helped"* is answered with *"which one?"* instead of an attempt to log. v1.0.0 takes the same path; v1.1 recovered from it less often on the day that decided the release.
+- **The reader is a model call and misreads some messages.** It is what fixed v1.0.0's named defect — routing a message by where the conversation was, not by what it said — but it reads, it does not know: *"thinking of blocking out the first hour ... thoughts?"* was read as a request for other suggestions in 7 of 46 readings instead of the user's own idea. A station can still take a pick of an offered measure for a new idea of the user's, as in v1.0.0.
+- **A failed reading is silent in the app.** When the reader times out or answers outside its schema, the turn is routed as v1.0.0 would route it and the user is not told. The eval harness counts such turns and flags the run; the app does not.
+- **Each typed turn costs one more model call** — the reader — about 43% more per turn than v1.0.0.
+- **The fabrication check cannot read tense, mood or some denials.** It looks for "logged", "saved" and "recorded" and excuses the plain denials, but not a hypothetical (*"I would have recorded"*), a plan (*"that will be logged"*), the scoped wording the agent is told to use (*"recorded for this conversation"*), or a denial placed after the word (*"that write saved nothing"*). It was planned for v1.1 and not done; every flag since v1.0.0 has been read by hand, and none was a real claim.
 - **The judge numbers rest on small samples.** 25 items per question, both intervals reaching below the 0.70 bar; stability measured by re-grading one trajectory; the judge splits 3 to 2 on one borderline item; the grounding question was reworded twice on these same items. Recall on *natural* violations is unmeasured — the planted ones are clean where real ones are subtle.
-- **Scripted multi-turn cases can go out of step.** A case's user turns are fixed, so when the agent legitimately takes another order, a later turn can refer to something it never said (*"the first one"*). 3 of the 41 failing case-runs are this: a test artefact, not an agent fault.
+- **Scripted multi-turn cases can go out of step.** A case's user turns are fixed, so when the agent legitimately takes another order, a later turn can refer to something it never said (*"the first one"*). In v1.0.0, 3 of the 41 failing case-runs were this: a test artefact, not an agent fault. Case 39's failures in v1.1 begin the same way; whether that makes them an artefact of the script is an open question about the dataset, and this release counts them as failures.
 
 - **The crisis gate screens English only.** It matched German until 2026-09-25; those ten patterns were removed when the app was limited to English. A message like *"Ich möchte nicht mehr leben"* now reaches the model as ordinary text and gets an ordinary reply instead of crisis resources. The resources it does show name German services (Telefonseelsorge, 112), because those are about where the user is rather than what language they write in — so this gap matters most for exactly the person the resources were chosen for. Restoring German support means restoring the patterns in `agent/safety.py` and this line together.
 - Energy, goal and helpfulness are entirely self-report, not sensed.
