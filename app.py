@@ -1,4 +1,4 @@
-"""Tkinter chat window: the actual Job Load Agent UI.
+"""Tkinter chat window: the actual CalmOps UI.
 
 Blocking first-run consent screen, then free-text chat that goes through
 agent/safety.py's crisis gate first and the station graph second.
@@ -107,7 +107,7 @@ class ChatApp:
         consent_path: Path | None = None,
     ) -> None:
         self.root = root
-        self.root.title("Job Load Agent")
+        self.root.title("CalmOps")
         # Everything the graph needs carried into the next turn: the
         # transcript plus the station fields. Built by next_turn_state(), the
         # one function the eval harness uses too -- the two implemented this
@@ -605,7 +605,7 @@ def window_paths(paths: DataPaths) -> dict[str, typing.Any]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Job Load Agent chat window")
+    parser = argparse.ArgumentParser(description="CalmOps chat window")
     parser.add_argument(
         "--skip-consent",
         action="store_true",

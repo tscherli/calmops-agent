@@ -83,7 +83,7 @@ def _isolated_log_path() -> Path:
     Fresh per case, so cases can't see each other's rows and results don't
     depend on execution order.
     """
-    return Path(tempfile.mkdtemp(prefix="joblog-eval-")) / "checkin_log.csv"
+    return Path(tempfile.mkdtemp(prefix="calmops-eval-")) / "checkin_log.csv"
 
 
 def _isolated_measures_path() -> Path:
@@ -94,7 +94,7 @@ def _isolated_measures_path() -> Path:
     A copy rather than an empty file, because the cases are about choosing
     from the real list.
     """
-    path = Path(tempfile.mkdtemp(prefix="joblog-evalmeasures-")) / "measures.csv"
+    path = Path(tempfile.mkdtemp(prefix="calmops-evalmeasures-")) / "measures.csv"
     shutil.copyfile(MEASURES_PATH, path)
     return path
 
@@ -104,7 +104,7 @@ def _unwritable_log_path() -> Path:
     fails. Used by the `simulate_write_failure` case to exercise the
     fallback-and-report-honestly path for real, rather than trusting that
     it works."""
-    directory = Path(tempfile.mkdtemp(prefix="joblog-evalfail-"))
+    directory = Path(tempfile.mkdtemp(prefix="calmops-evalfail-"))
     blocker = directory / "not-a-directory"
     blocker.write_text("blocks the write below", encoding="utf-8")
     return blocker / "checkin_log.csv"
@@ -128,7 +128,7 @@ def _isolate_pending_log() -> Path:
     """
     global _PENDING_LOG
     if _PENDING_LOG is None:
-        _PENDING_LOG = Path(tempfile.mkdtemp(prefix="joblog-evalpending-")) / "pending_sheet_log.jsonl"
+        _PENDING_LOG = Path(tempfile.mkdtemp(prefix="calmops-evalpending-")) / "pending_sheet_log.jsonl"
     checkin_log.PENDING_LOG_PATH = _PENDING_LOG
     return _PENDING_LOG
 

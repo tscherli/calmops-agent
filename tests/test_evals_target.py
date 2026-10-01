@@ -191,7 +191,7 @@ def test_a_failed_eval_write_never_reaches_the_real_state_folder(monkeypatch):
     monkeypatch.setattr("evals.target.build_agent", lambda **kwargs: _StubGraph())
     run_case({"turns": ["quiet morning"]})
 
-    assert "joblog-evalpending-" in str(checkin_log.PENDING_LOG_PATH)
+    assert "calmops-evalpending-" in str(checkin_log.PENDING_LOG_PATH)
     assert "state" not in checkin_log.PENDING_LOG_PATH.parts
 
 

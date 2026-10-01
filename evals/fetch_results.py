@@ -17,7 +17,7 @@ on a network error during result collection is still readable here.
 
 Usage:
     python -m evals.fetch_results --list
-    python -m evals.fetch_results --experiment job-load-agent-v2-501af13c
+    python -m evals.fetch_results --experiment calmops-agent-eval-501af13c
     python -m evals.fetch_results            # newest experiment
 """
 from __future__ import annotations

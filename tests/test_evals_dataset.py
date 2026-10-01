@@ -64,7 +64,7 @@ def _case_measure_list(case: dict) -> Path:
     """The measure list this case actually runs against: the shipped one plus
     whatever it seeds, built through the harness's own seeding function so the
     test cannot disagree with the run."""
-    path = Path(tempfile.mkdtemp(prefix="joblog-datasettest-")) / "measures.csv"
+    path = Path(tempfile.mkdtemp(prefix="calmops-datasettest-")) / "measures.csv"
     shutil.copyfile(MEASURES_PATH, path)
     if case.get("seed_measures"):
         seed_measures(case["seed_measures"], path)

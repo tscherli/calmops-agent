@@ -444,7 +444,7 @@ def test_the_source_is_recorded_in_the_labelling_file(stub_judge, trajectories, 
     monkeypatch.setattr(calib, "LABEL_PATH", tmp_path / "labels.json")
     monkeypatch.setattr(calib, "RESULTS_DIR", tmp_path)
 
-    records, label = calib.resolve_source(trajectories, None, "job-load-agent-evals")
+    records, label = calib.resolve_source(trajectories, None, "calmops-agent-evals")
     calib.export(records, label, sample=1, plant=0)
 
     payload = json.loads((tmp_path / "labels.json").read_text(encoding="utf-8"))

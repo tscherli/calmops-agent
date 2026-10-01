@@ -1,4 +1,8 @@
-# Job Load Agent
+# CalmOps
+
+**DevOps for your own head.** A runbook of measures for overloaded days: check in, pick one, log what helped.
+
+*Formerly Job Load Agent (`job-load-agent`). The published eval snapshots and the release tags up to v1.2.0 keep the old name; they are records of what ran.*
 
 > ⚠️ **Data & Privacy Disclaimer**: This tool shares what you type — including personal reflections on how you are doing and what is going on at work — with OpenAI's API (to power the agent), and optionally LangSmith (for tracing). It may also run a web search through OpenAI when it looks for ideas beyond your own list. Your check-in log and your measure list are plain CSV files on your own machine, never sent to any storage service — but their contents are included in what goes to the API during a conversation. The buttons in the app (your energy and goal, and how well something worked) are recorded without asking the model anything; everything you type is sent. **If you are not comfortable with a large language model processing your personal information, do not use this software.** This is a self-reflection aid, not a substitute for professional mental health support; its replies are AI-generated and may be inaccurate. In a crisis, contact local emergency services or a crisis hotline directly, not this tool. Each user supplies their own API key — no data from anyone running this passes through the original developer's infrastructure.
 
@@ -6,7 +10,7 @@
 
 ## What it does
 
-Job Load Agent checks in with you — on a schedule you control, or whenever you open it — and helps you pick something concrete to do about a stressful day, then keeps a short log of what you tried and whether it helped.
+CalmOps checks in with you — on a schedule you control, or whenever you open it — and helps you pick something concrete to do about a stressful day, then keeps a short log of what you tried and whether it helped.
 
 It asks two things: **how much energy you have** (exhausted / calm / wired) and **what would help most right now** (calm down now / plan recovery / change the situation). Those two pick from a curated list of measures you own and can edit. You can reject suggestions, bring an idea of your own and have it argued through honestly, or add something new to your list. Nothing is logged until you confirm it.
 
@@ -178,7 +182,7 @@ pip install -r requirements.txt
 
 By default, next to the code: the check-in log in `data/checkin_log.csv` (created on first write) and your measure list in `tools/measures.csv`, which ships with curated measures — it is yours to edit by hand, and the agent can add to it with your agreement. Some rows come from [Stretchly](https://hovancik.net/stretchly/) under BSD 2-Clause; the licence travels with the data in `third_party/stretchly/`.
 
-To keep all of it in one folder anywhere else — the log, the measure list, the consent record, the file a failed write falls back to, and the per-turn cost records — set `JOB_LOAD_DATA_DIR` in `.env`, or pass `--data-dir <folder>` to `app.py`, `cli.py` or `scheduler.py` (the flag wins over the variable). A new folder is created on first use and gets a copy of the shipped measure list, which is never overwritten after that.
+To keep all of it in one folder anywhere else — the log, the measure list, the consent record, the file a failed write falls back to, and the per-turn cost records — set `CALMOPS_DATA_DIR` in `.env`, or pass `--data-dir <folder>` to `app.py`, `cli.py` or `scheduler.py` (the flag wins over the variable). A new folder is created on first use and gets a copy of the shipped measure list, which is never overwritten after that.
 
 ### OpenAI API key (required)
 
@@ -188,7 +192,7 @@ Create a key at [platform.openai.com](https://platform.openai.com/api-keys), cop
 
 1. Sign up at [smith.langchain.com](https://smith.langchain.com). Note whether your dashboard URL is `eu.smith.langchain.com` — if so you need the extra step below.
 2. **Settings** → **API Keys** → **Create API Key**.
-3. In `.env`, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY=<your key>`. `LANGSMITH_PROJECT` is already `job-load-agent`.
+3. In `.env`, set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY=<your key>`. `LANGSMITH_PROJECT` is already `calmops-agent`.
 4. **EU accounts only:** also set `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com` — without it every trace fails with `403 Forbidden` even with a valid key, since keys are region-scoped.
 
 Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real key causes repeated `401` errors on every agent call, not a silent no-op.
@@ -231,7 +235,7 @@ On macOS or Linux, use `.venv/bin/python` wherever it says `.venv\Scripts\python
 
 Good to know:
 
-- Your data stays where it is — `data\checkin_log.csv` and `tools\measures.csv`. To keep it somewhere else, add `--data-dir C:\path\to\folder` to any of the three commands, or set `JOB_LOAD_DATA_DIR` in `.env` (see [Where your data lives](#where-your-data-lives)).
+- Your data stays where it is — `data\checkin_log.csv` and `tools\measures.csv`. To keep it somewhere else, add `--data-dir C:\path\to\folder` to any of the three commands, or set `CALMOPS_DATA_DIR` in `.env` (see [Where your data lives](#where-your-data-lives)).
 - If you activate the environment first (`.venv\Scripts\activate`), the shorter `python app.py` works too.
 
 ### In more detail
@@ -242,7 +246,7 @@ With the virtual environment active (see [Install](#install)), from any working 
 
 ```
 python app.py
-python app.py --data-dir ~/job-load-data     # your data in a folder of your choice
+python app.py --data-dir ~/calmops-data     # your data in a folder of your choice
 ```
 
 **The terminal client** — same agent, buttons as commands, and it prints which station answered each turn:

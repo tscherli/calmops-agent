@@ -23,7 +23,7 @@ load_dotenv()
 
 from langsmith import Client
 
-DATASET_NAME = "job-load-agent-evals"
+DATASET_NAME = "calmops-agent-evals"
 DATASET_PATH = Path(__file__).resolve().parent / "dataset.jsonl"
 CASE_IDS_PATH = Path(__file__).resolve().parent / "case_ids.txt"
 
@@ -164,7 +164,7 @@ def create_or_update_dataset(client: Client | None = None, cases: list[dict] | N
         dataset = client.create_dataset(
             dataset_name=DATASET_NAME,
             description=(
-                "Job Load Agent eval suite -- hand-authored cases (simple/medium/hard) covering "
+                "CalmOps eval suite -- hand-authored cases (simple/medium/hard) covering "
                 "structuring depth, crisis gating, honesty/no-fabrication, prompt injection "
                 "(user message, and past log entries), history use, proactivity calibration, "
                 "and tool discipline."

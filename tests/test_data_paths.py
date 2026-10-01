@@ -45,7 +45,7 @@ def test_the_flag_wins_over_the_env_var(tmp_path, monkeypatch):
 
 
 def test_an_empty_env_var_is_no_setting(monkeypatch):
-    """`JOB_LOAD_DATA_DIR=` left blank in .env must not mean "the current folder"."""
+    """`CALMOPS_DATA_DIR=` left blank in .env must not mean "the current folder"."""
     monkeypatch.setenv(DATA_DIR_ENV, "  ")
 
     assert data_paths().checkin_log == checkin_log.CHECKIN_LOG_PATH

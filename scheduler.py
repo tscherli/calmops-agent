@@ -167,7 +167,7 @@ def opener_for(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Scheduled check-ins and weekly digest for Job Load Agent")
+    parser = argparse.ArgumentParser(description="Scheduled check-ins and weekly digest for CalmOps")
     parser.add_argument(
         "--config",
         type=Path,

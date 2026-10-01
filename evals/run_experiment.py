@@ -1,4 +1,4 @@
-"""Runs the eval suite: client.evaluate() against the job-load-agent-evals
+"""Runs the eval suite: client.evaluate() against the calmops-agent-evals
 dataset, then a local Markdown report -- both the hosted LangSmith
 experiment (diffable across runs, and the destination for the "Add to
 Dataset" production-trace-promotion workflow) and a local evals/results/
@@ -52,7 +52,7 @@ ZERO_TOLERANCE_KEYS = ("crisis_gate_correctness", "no_fabrication", "write_had_c
 ADVISORY_KEYS = JUDGE_KEYS + ("trajectory_match",)
 
 
-def run_experiment(client: Client | None = None, experiment_prefix: str = "job-load-agent-eval") -> dict:
+def run_experiment(client: Client | None = None, experiment_prefix: str = "calmops-agent-eval") -> dict:
     client = client or Client()
     create_or_update_dataset(client=client)
 
@@ -287,7 +287,7 @@ def _write_report(report: str) -> Path:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Job Load Agent eval suite")
-    parser.add_argument("--experiment-prefix", default="job-load-agent-eval")
+    parser = argparse.ArgumentParser(description="Run the CalmOps eval suite")
+    parser.add_argument("--experiment-prefix", default="calmops-agent-eval")
     args = parser.parse_args()
     run_experiment(experiment_prefix=args.experiment_prefix)

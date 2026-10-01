@@ -72,7 +72,7 @@ class Inspector:
         self.fading: dict[str, int] = {}
         self.calls: list[str] = []
 
-        root.title("Job Load Agent -- what is running")
+        root.title("CalmOps -- what is running")
         tk.Label(
             root,
             text="Each box is a function in agent/graph.py. It lights up while it runs.",
@@ -178,7 +178,7 @@ def main(argv: list[str]) -> int:
     if target not in ("app", "cli"):
         print("Usage: try_inspect.py [app | cli]")
         return 2
-    events_path = Path(tempfile.gettempdir()) / "job_load_agent_trace.jsonl"
+    events_path = Path(tempfile.gettempdir()) / "calmops_trace.jsonl"
     events_path.unlink(missing_ok=True)
     client = subprocess.Popen(
         [sys.executable, str(HERE / "try_trace.py"), target, "--events", str(events_path)],

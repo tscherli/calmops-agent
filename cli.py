@@ -328,7 +328,7 @@ class Session:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Job Load Agent terminal client")
+    parser = argparse.ArgumentParser(description="CalmOps terminal client")
     parser.add_argument("--log-path", type=Path, default=None,
                         help="Write check-ins somewhere other than the real log.")
     parser.add_argument("--no-record", action="store_true",
@@ -344,7 +344,7 @@ def main() -> None:
         measures_path=paths.measures,
         recorder=None if args.no_record else RunRecorder(log_path=paths.runs_log),
     )
-    print(f"Job Load Agent ({DEFAULT_MODEL}). /help for commands, /quit to leave.\n")
+    print(f"CalmOps ({DEFAULT_MODEL}). /help for commands, /quit to leave.\n")
 
     while True:
         print(session.hints())

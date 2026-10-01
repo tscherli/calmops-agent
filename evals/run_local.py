@@ -396,7 +396,7 @@ def run_local(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run the Job Load Agent eval suite locally")
+    parser = argparse.ArgumentParser(description="Run the CalmOps eval suite locally")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--case", action="append", help="Run only these case ids (repeatable).")
     parser.add_argument(

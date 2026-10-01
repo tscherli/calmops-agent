@@ -2,7 +2,7 @@
 
 The check-in log, the measure list, the consent record, the failed-write
 fallback and the per-turn records. By default they stay where they have
-always been, next to the code: nothing moves unless asked. JOB_LOAD_DATA_DIR,
+always been, next to the code: nothing moves unless asked. CALMOPS_DATA_DIR,
 or --data-dir on app.py, cli.py and scheduler.py, puts all of them into one
 folder of the user's choosing -- whichever directory the code was cloned
 into, and whatever the operating system.
@@ -21,7 +21,7 @@ import observability.tracing as tracing
 import tools.checkin_log as checkin_log
 import tools.measures as measures
 
-DATA_DIR_ENV = "JOB_LOAD_DATA_DIR"
+DATA_DIR_ENV = "CALMOPS_DATA_DIR"
 
 # Where the consent screen's answer is kept by default. app.py and cli.py
 # both take theirs from here; cli.py used to derive its own copy, to avoid
@@ -41,7 +41,7 @@ class DataPaths:
 
 
 def data_paths(data_dir: Path | str | None = None) -> DataPaths:
-    """The folder given, else JOB_LOAD_DATA_DIR, else where the files have always been.
+    """The folder given, else CALMOPS_DATA_DIR, else where the files have always been.
 
     The defaults are read when this runs, not when it is imported, so a test
     that points one of them elsewhere is followed here too.

@@ -36,7 +36,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from agent.graph import build_agent
 from app import ChatApp
 
-SANDBOX = Path(tempfile.gettempdir()) / "job_load_agent_ui_sandbox"
+SANDBOX = Path(tempfile.gettempdir()) / "calmops_ui_sandbox"
 
 # Which handler each button reaches, printed at startup: the fastest way to
 # find where to put a breakpoint for the button you are looking at.

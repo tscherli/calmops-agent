@@ -36,7 +36,7 @@ def _record(**extra_outputs):
                  "tool_calls": [{"name": "find_measures", "args": {}}]},
                 {"role": "ai", "content": "Try box breathing.", "tool_calls": None},
             ],
-            "measures_path": f"{HOME}\\AppData\\Local\\Temp\\joblog-evalmeasures-x\\measures.csv",
+            "measures_path": f"{HOME}\\AppData\\Local\\Temp\\calmops-evalmeasures-x\\measures.csv",
             "tool_events": [],
             **extra_outputs,
         },
@@ -100,7 +100,7 @@ def test_a_path_quoted_inside_a_tool_error_loses_the_user_name():
     """The write-failure case's receipt quotes the path it failed on, repr'd
     inside the message, so the backslashes arrive doubled -- and then doubled
     again by JSON. The first real dry run was refused over exactly this."""
-    home_in_repr = repr(f"{HOME}\\AppData\\Local\\Temp\\joblog-evalfail-x\\log.csv")
+    home_in_repr = repr(f"{HOME}\\AppData\\Local\\Temp\\calmops-evalfail-x\\log.csv")
     record = _record()
     record["outputs"]["messages"].append(
         {"role": "tool", "name": "log_checkin", "content": f"Not logged: [WinError 183] {home_in_repr}"}
