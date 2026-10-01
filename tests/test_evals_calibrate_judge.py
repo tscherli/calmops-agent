@@ -1045,8 +1045,12 @@ def test_one_run_of_every_case_comes_before_any_second_run():
     ]
 
 
-def test_the_item_says_which_run_it_came_from():
-    """Without it a second run of a case reads as the same item twice."""
+def test_the_item_says_which_run_it_came_from(offline_judge):
+    """Without it a second run of a case reads as the same item twice.
+
+    Offline like its neighbours: `_item` grades what it builds, and without
+    the stub this test called Gemini on every run of the suite -- and failed
+    in a fresh clone with no Google key (2026-10-01)."""
     item = calib._item(OFFERED_KEY, _run_of("a", 2), _run_of("a", 2)["outputs"], planted=False)
 
     assert item["run"] == 2
