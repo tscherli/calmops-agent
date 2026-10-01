@@ -195,6 +195,47 @@ Leave `LANGSMITH_TRACING=false` if you don't want this — `true` without a real
 
 ## How to run
 
+### The short version
+
+**First time only** — in PowerShell, from the project folder:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+copy .env.example .env
+```
+
+Then open `.env` and paste your OpenAI key after `OPENAI_API_KEY=` (see [OpenAI API key](#openai-api-key-required)).
+
+**Every time after that** — from the project folder, nothing to activate:
+
+The chat window:
+
+```powershell
+.venv\Scripts\python.exe app.py
+```
+
+The terminal version — type `/help` for its commands and `/quit` to leave:
+
+```powershell
+.venv\Scripts\python.exe cli.py
+```
+
+Scheduled check-ins — runs in the background and opens the window at your configured times:
+
+```powershell
+.venv\Scripts\python.exe scheduler.py
+```
+
+On macOS or Linux, use `.venv/bin/python` wherever it says `.venv\Scripts\python.exe`, and `cp` instead of `copy`.
+
+Good to know:
+
+- Your data stays where it is — `data\checkin_log.csv` and `tools\measures.csv`. To keep it somewhere else, add `--data-dir C:\path\to\folder` to any of the three commands, or set `JOB_LOAD_DATA_DIR` in `.env` (see [Where your data lives](#where-your-data-lives)).
+- If you activate the environment first (`.venv\Scripts\activate`), the shorter `python app.py` works too.
+
+### In more detail
+
 With the virtual environment active (see [Install](#install)), from any working directory — give the path to the script if you are not in the repository:
 
 **The chat window:**
