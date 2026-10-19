@@ -9,13 +9,16 @@ modules like agent/graph.py must not do this as an import side effect).
 import argparse
 import json
 import queue
+import re
 import threading
 import time
 import tkinter as tk
 import typing
 import uuid
+import webbrowser
 from collections.abc import Sequence
 from pathlib import Path
+from tkinter import font as tkfont
 from tkinter import scrolledtext
 
 from dotenv import load_dotenv
@@ -49,6 +52,42 @@ _GOAL_OPTIONS = list(typing.get_args(Goal))
 _RATING_OPTIONS = list(typing.get_args(Helpfulness))
 
 _RATING_LABELS = {"helped": "helped", "somewhat": "somewhat", "didnt_help": "not helpful"}
+
+# A few calm colours, defined once: a soft sage window, a white chat panel,
+# teal for the agent and the Send button, blue for links.
+_WINDOW_BG = "#eef3f1"
+_PANEL_BG = "#ffffff"
+_BUTTON_BG = "#dcebe5"
+_ACCENT = "#2f7d6d"
+_LINK = "#1a5fb4"
+_CARD_BG = "#fff6e0"
+_SENDER_COLOURS = {"You": "#3b6ea5", "Agent": _ACCENT, "App": "#a35a2a"}
+
+# A Markdown link shows its title, a bare address shows itself. Only web
+# addresses: a click hands the URL to the browser. Punctuation right after a
+# bare address ends the sentence, not the URL.
+_LINK_PATTERN = re.compile(
+    r"\[(?P<title>[^\]\n]+)\]\((?P<md_url>https?://[^\s)]+)\)|(?P<url>https?://[^\s<>()\[\]]+)"
+)
+
+
+def split_links(text: str) -> list[tuple[str, str | None]]:
+    """The text as (shown, url) pieces, in order; url is None for plain text."""
+    pieces: list[tuple[str, str | None]] = []
+    pos = 0
+    for match in _LINK_PATTERN.finditer(text):
+        if match.group("url"):
+            url = match.group("url").rstrip(".,;:!?'\"")
+            shown, end = url, match.start() + len(url)
+        else:
+            url, shown, end = match.group("md_url"), match.group("title"), match.end()
+        if match.start() > pos:
+            pieces.append((text[pos:match.start()], None))
+        pieces.append((shown, url))
+        pos = end
+    if pos < len(text):
+        pieces.append((text[pos:], None))
+    return pieces
 
 
 CONSENT_PATH = DEFAULT_CONSENT_PATH
@@ -108,6 +147,15 @@ class ChatApp:
     ) -> None:
         self.root = root
         self.root.title("CalmOps")
+        # Through Tk's option database, so every frame, label and button built
+        # after this gets the colours without repeating them.
+        self.root.configure(bg=_WINDOW_BG)
+        for widget_class in ("Frame", "Label", "Labelframe"):
+            self.root.option_add(f"*{widget_class}.background", _WINDOW_BG)
+        self.root.option_add("*Labelframe.foreground", _ACCENT)
+        self.root.option_add("*Button.background", _BUTTON_BG)
+        self.root.option_add("*Button.relief", "flat")
+        self.root.option_add("*Button.padX", 8)
         # Everything the graph needs carried into the next turn: the
         # transcript plus the station fields. Built by next_turn_state(), the
         # one function the eval harness uses too -- the two implemented this
@@ -171,14 +219,29 @@ class ChatApp:
     # -- Main chat screen --------------------------------------------------
 
     def _build_chat_ui(self) -> None:
-        self.history = scrolledtext.ScrolledText(self.root, state="disabled", width=70, height=22, wrap="word")
+        self.history = scrolledtext.ScrolledText(
+            self.root, state="disabled", width=70, height=22, wrap="word",
+            bg=_PANEL_BG, relief="flat", padx=10, pady=8,
+        )
         self.history.pack(fill="both", expand=True, padx=10, pady=10)
         # Tool receipts are deliberately styled as machine output, not speech:
         # they are the one thing in this window the agent cannot write.
         self.history.tag_configure("tool", font=("TkFixedFont", 8), foreground="gray45")
         self.history.tag_configure("tool_error", font=("TkFixedFont", 8), foreground="firebrick")
+        base = tkfont.nametofont("TkDefaultFont").actual()
+        self._bold = (base["family"], base["size"], "bold")
+        for sender, colour in _SENDER_COLOURS.items():
+            self.history.tag_configure(f"sender_{sender}", foreground=colour, font=self._bold)
+        self.history.tag_configure("link", foreground=_LINK, underline=True)
+        self.history.tag_bind("link", "<Enter>", lambda _event: self.history.configure(cursor="hand2"))
+        self.history.tag_bind("link", "<Leave>", lambda _event: self.history.configure(cursor="xterm"))
+        # Which address each link's own tag opens, so a click needs no lookup
+        # in the text itself.
+        self._link_urls: dict[str, str] = {}
 
-        self.approval_frame = tk.Frame(self.root, relief="groove", borderwidth=2, padx=6, pady=6)
+        self.approval_frame = tk.Frame(
+            self.root, relief="groove", borderwidth=2, padx=6, pady=6, bg=_CARD_BG
+        )
         self._build_approval_card()
 
         self.controls = tk.Frame(self.root)
@@ -190,7 +253,10 @@ class ChatApp:
         self.entry = tk.Entry(input_frame)
         self.entry.pack(side="left", fill="x", expand=True)
         self.entry.bind("<Return>", lambda _event: self._on_send())
-        self.send_button = tk.Button(input_frame, text="Send", command=self._on_send)
+        self.send_button = tk.Button(
+            input_frame, text="Send", command=self._on_send,
+            bg=_ACCENT, fg="white", activebackground=_ACCENT, activeforeground="white",
+        )
         self.send_button.pack(side="left", padx=(5, 0))
 
         self._refresh_controls()
@@ -210,11 +276,11 @@ class ChatApp:
         same three. The entry holds the one value Edit may change.
         """
         self.approval_label = tk.Label(
-            self.approval_frame, text="", anchor="w", justify="left", wraplength=520
+            self.approval_frame, text="", anchor="w", justify="left", wraplength=520, bg=_CARD_BG
         )
         self.approval_label.pack(fill="x")
         self.approval_entry = tk.Entry(self.approval_frame)
-        buttons = tk.Frame(self.approval_frame)
+        buttons = tk.Frame(self.approval_frame, bg=_CARD_BG)
         buttons.pack(fill="x", pady=(4, 0))
         self.approve_button = tk.Button(buttons, text="Approve", command=lambda: self._on_decision("approve"))
         self.edit_button = tk.Button(buttons, text="Save my edit", command=lambda: self._on_decision("edit"))
@@ -291,7 +357,13 @@ class ChatApp:
         """
         self._buttons: list[tk.Button] = []
 
-        self.choice_frame = tk.Frame(self.controls)
+        self.choice_frame = tk.LabelFrame(
+            self.controls, text="Quick check-in", font=self._bold, padx=6, pady=4
+        )
+        tk.Label(
+            self.choice_frame, anchor="w", fg="#5f6f73",
+            text="One click each, no typing: how is your energy, and what do you need right now?",
+        ).pack(fill="x")
         for field, options in (("energy", _ENERGY_OPTIONS), ("goal", _GOAL_OPTIONS)):
             row = tk.Frame(self.choice_frame)
             row.pack(fill="x")
@@ -395,9 +467,25 @@ class ChatApp:
 
     def _append_message(self, sender: str, text: str) -> None:
         self.history.configure(state="normal")
-        self.history.insert("end", f"{sender}: {text}\n\n")
+        self.history.insert("end", f"{sender}: ", f"sender_{sender}")
+        for shown, url in split_links(text):
+            if url is None:
+                self.history.insert("end", shown)
+            else:
+                self.history.insert("end", shown, ("link", self._link_tag(url)))
+        self.history.insert("end", "\n\n")
         self.history.configure(state="disabled")
         self.history.see("end")
+
+    def _link_tag(self, url: str) -> str:
+        """A tag of its own per link, bound to opening that one address."""
+        tag = f"link-{len(self._link_urls)}"
+        self._link_urls[tag] = url
+        self.history.tag_bind(tag, "<Button-1>", lambda _event: self._open_link(url))
+        return tag
+
+    def _open_link(self, url: str) -> None:
+        webbrowser.open(url, new=2)
 
     def _append_tool_event(self, event: dict) -> None:
         """Render one machine-set tool receipt.

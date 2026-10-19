@@ -10,6 +10,7 @@ does not even run the graph -- it writes its row and reports it. Several
 tests below use a graph that raises if it is invoked at all, because that is
 the only way to prove a cost was not paid."""
 import json
+import re
 import time
 
 import pytest
@@ -812,3 +813,55 @@ def test_main_opens_the_window_on_the_data_dir(tmp_path, monkeypatch):
     assert opened["log_path"] == root / "checkin_log.csv"
     assert opened["consent_path"] == root / "state" / "consent_ack.json"
     assert (root / "measures.csv").exists()
+
+
+# -- links and the quick check-in title ---------------------------------------
+
+
+def test_links_split_into_title_or_address_without_trailing_punctuation():
+    pieces = app_module.split_links(
+        "See ([clinic](https://example.org/a)) or https://example.com/b. Done"
+    )
+    assert pieces == [
+        ("See (", None),
+        ("clinic", "https://example.org/a"),
+        (") or ", None),
+        ("https://example.com/b", "https://example.com/b"),
+        (". Done", None),
+    ]
+
+
+def test_only_web_addresses_become_links():
+    assert app_module.split_links("file:///C:/secret.txt and [x](javascript:alert(1))") == [
+        ("file:///C:/secret.txt and [x](javascript:alert(1))", None)
+    ]
+
+
+def _link_tags(app) -> list[str]:
+    return [tag for tag in app.history.tag_names() if tag.startswith("link-")]
+
+
+def test_a_link_in_a_reply_is_styled_and_a_click_opens_it(tk_root, monkeypatch):
+    opened = []
+    monkeypatch.setattr(app_module.webbrowser, "open", lambda url, new=0: opened.append(url))
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=_PoisonGraph())
+
+    app._append_message("Agent", "Try this: [eye strain](https://example.org/eyes).")
+
+    (tag,) = _link_tags(app)
+    start, end = app.history.tag_ranges(tag)
+    assert app.history.get(start, end) == "eye strain"
+    assert "link" in app.history.tag_names(start)
+    assert "Agent: Try this: eye strain." in app.history.get("1.0", "end")
+    # Run the click binding itself: read its Tcl script back and evaluate it
+    # with the event fields set to 0 (the handler ignores the event).
+    script = app.history.tk.call(app.history._w, "tag", "bind", tag, "<Button-1>")
+    assert script, "the link must react to a click"
+    app.history.tk.eval(re.sub(r"%\S", "0", script))
+    assert opened == ["https://example.org/eyes"]
+
+
+def test_the_choice_buttons_have_a_title(tk_root):
+    app = ChatApp(tk_root, skip_consent=True, agent_graph=_PoisonGraph())
+
+    assert app.choice_frame.cget("text") == "Quick check-in"
